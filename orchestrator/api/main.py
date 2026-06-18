@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta  # noqa: F401
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
@@ -1838,163 +1838,17 @@ async def _run_flow_spec_generation(
     )
 
 
-async def run_exploratory_agent(
-    request: ExploratoryRunRequest, session: Session = Depends(get_session)
-):
-    return await agent_exploratory.run_exploratory_agent_impl(
-        request,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def synthesize_specs(run_id: str, session: Session = Depends(get_session)):
-    return await agent_exploratory.synthesize_specs_impl(
-        run_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def get_exploration_specs(
-    run_id: str,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.get_exploration_specs_impl(
-        run_id,
-        project_id=project_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def get_flow_details(
-    run_id: str,
-    flow_id: str,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.get_flow_details_impl(
-        run_id,
-        flow_id,
-        project_id=project_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def update_flow(
-    run_id: str,
-    flow_id: str,
-    request: FlowUpdateRequest,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.update_flow_impl(
-        run_id,
-        flow_id,
-        request,
-        project_id=project_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def delete_flow(
-    run_id: str,
-    flow_id: str,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.delete_flow_impl(
-        run_id,
-        flow_id,
-        project_id=project_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def analyze_prerequisites(
-    run_id: str,
-    force_reanalyze: bool = False,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.analyze_prerequisites_impl(
-        run_id,
-        force_reanalyze=force_reanalyze,
-        project_id=project_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def generate_flow_spec(
-    run_id: str,
-    flow_id: str,
-    force_regenerate: bool = False,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.generate_flow_spec_impl(
-        run_id,
-        flow_id,
-        force_regenerate=force_regenerate,
-        project_id=project_id,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def get_flow_spec_job_status(job_id: str):
-    return await agent_exploratory.get_flow_spec_job_status_impl(
-        job_id,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def generate_report_item_spec(
-    run_id: str,
-    item_id: str,
-    item_type: str | None = Query(default=None, description="finding or test_idea"),
-    project_id: str = Query(..., description="Project ID for verification"),
-    request_body: GenerateReportItemSpecRequest | None = None,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.generate_report_item_spec_impl(
-        run_id,
-        item_id,
-        item_type=item_type,
-        project_id=project_id,
-        request_body=request_body,
-        background_tasks=background_tasks,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
-
-
-async def generate_flow_test(
-    run_id: str,
-    flow_id: str,
-    force_regenerate: bool = False,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
-    request_body: GenerateFlowTestRequest | None = None,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    session: Session = Depends(get_session),
-):
-    return await agent_exploratory.generate_flow_test_impl(
-        run_id,
-        flow_id,
-        force_regenerate=force_regenerate,
-        project_id=project_id,
-        request_body=request_body,
-        background_tasks=background_tasks,
-        session=session,
-        deps=_agent_exploratory_dependencies(),
-    )
+run_exploratory_agent = agent_exploratory.run_exploratory_agent
+synthesize_specs = agent_exploratory.synthesize_specs
+get_exploration_specs = agent_exploratory.get_exploration_specs
+get_flow_details = agent_exploratory.get_flow_details
+update_flow = agent_exploratory.update_flow
+delete_flow = agent_exploratory.delete_flow
+analyze_prerequisites = agent_exploratory.analyze_prerequisites
+generate_flow_spec = agent_exploratory.generate_flow_spec
+get_flow_spec_job_status = agent_exploratory.get_flow_spec_job_status
+generate_report_item_spec = agent_exploratory.generate_report_item_spec
+generate_flow_test = agent_exploratory.generate_flow_test
 
 
 agent_exploratory.configure_dependencies_provider(_agent_exploratory_dependencies)
