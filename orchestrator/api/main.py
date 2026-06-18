@@ -73,6 +73,7 @@ from . import (
     agent_background_runner_support,
     agent_coding_patch,
     agent_compat_support,
+    agent_definition_support,
     agent_definitions,
     agent_exploratory,
     agent_flow_spec_support,
@@ -144,9 +145,7 @@ from .middleware.auth import get_current_user_optional
 from .middleware.permissions import ProjectRole, check_project_access  # noqa: F401
 from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from .models_db import (
-    AgentDefinition,
     AgentRun,
-    AgentToolDefinition,
     ExplorationSession,  # noqa: F401
     RegressionBatch,  # noqa: F401
 )
@@ -1295,36 +1294,12 @@ _find_report_item = agent_run_report_support._find_report_item
 _capture_custom_agent_report_memory = agent_run_report_support._capture_custom_agent_report_memory
 
 
-def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
-    return agent_compat_support.sync_agent_tool_catalog(_agent_compat_runtime(), session)
-
-
-def _serialize_agent_tool(tool: AgentToolDefinition) -> dict[str, Any]:
-    return agent_compat_support.serialize_agent_tool(_agent_compat_runtime(), tool)
-
-
-def _serialize_agent_definition(
-    definition: AgentDefinition,
-    tools_by_id: dict[str, AgentToolDefinition] | None = None,
-) -> dict[str, Any]:
-    return agent_compat_support.serialize_agent_definition(_agent_compat_runtime(), definition, tools_by_id)
-
-
-def _get_agent_definition_or_404(definition_id: str, project_id: str | None, session: Session) -> AgentDefinition:
-    return agent_compat_support.get_agent_definition_or_404(
-        _agent_compat_runtime(),
-        definition_id,
-        project_id,
-        session,
-    )
-
-
-async def _ensure_agent_write_access(project_id: str | None, current_user: Any, session: Session) -> None:
-    await agent_compat_support.ensure_agent_write_access(_agent_compat_runtime(), project_id, current_user, session)
-
-
-def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[str], list[dict[str, Any]]]:
-    return agent_compat_support.resolve_agent_tools(_agent_compat_runtime(), tool_ids, session)
+_sync_agent_tool_catalog = agent_definition_support._sync_agent_tool_catalog
+_serialize_agent_tool = agent_definition_support._serialize_agent_tool
+_serialize_agent_definition = agent_definition_support._serialize_agent_definition
+_get_agent_definition_or_404 = agent_definition_support._get_agent_definition_or_404
+_ensure_agent_write_access = agent_definition_support._ensure_agent_write_access
+_resolve_agent_tools = agent_definition_support._resolve_agent_tools
 
 
 def _browser_auth_selection(config: dict[str, Any]) -> tuple[str | None, bool]:
