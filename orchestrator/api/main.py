@@ -1133,19 +1133,19 @@ _start_agent_run_temporal_or_fail = agent_compat_alias_support._start_agent_run_
 _agent_run_temporal_payload = agent_compat_alias_support._agent_run_temporal_payload
 
 
-_signal_agent_run_temporal = agent_run_control._signal_agent_run_temporal
+_signal_agent_run_temporal = agent_compat_alias_support._signal_agent_run_temporal
 
 
-_cancel_agent_run_queue_task = agent_run_control._cancel_agent_run_queue_task
+_cancel_agent_run_queue_task = agent_compat_alias_support._cancel_agent_run_queue_task
 
 
-_wait_if_agent_run_paused = agent_run_control._wait_if_agent_run_paused
+_wait_if_agent_run_paused = agent_compat_alias_support._wait_if_agent_run_paused
 
 
-_mark_agent_run_paused = agent_run_control._mark_agent_run_paused
+_mark_agent_run_paused = agent_compat_alias_support._mark_agent_run_paused
 
 
-_mark_agent_run_cancelled = agent_run_control._mark_agent_run_cancelled
+_mark_agent_run_cancelled = agent_compat_alias_support._mark_agent_run_cancelled
 
 
 _agent_run_health = agent_compat_alias_support._agent_run_health
