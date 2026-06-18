@@ -56,7 +56,9 @@ from services.resource_manager import (
 )
 from utils.agent_report import (  # noqa: F401
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
+    _as_report_list,
     _build_custom_agent_structured_report,
+    _clean_text,
 )
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.claude_config import copy_claude_project_config  # noqa: F401
@@ -1274,74 +1276,23 @@ _live_agent_queue_progress = agent_run_observability._live_agent_queue_progress
 _serialize_agent_run_live = agent_run_observability._serialize_agent_run_live
 
 
-def _clean_text(value: Any, max_len: int = 2000) -> str:
-    return agent_compat_support.clean_text(_agent_compat_runtime(), value, max_len)
-
-
-def _as_report_list(value: Any) -> list[Any]:
-    return agent_compat_support.as_report_list(_agent_compat_runtime(), value)
-
-
 REPORT_ITEM_COLLECTIONS = agent_run_report_support.REPORT_ITEM_COLLECTIONS
 REPORT_ITEM_EDITABLE_FIELDS = agent_run_report_support.REPORT_ITEM_EDITABLE_FIELDS
 REPORT_ITEM_LIST_FIELDS = agent_run_report_support.REPORT_ITEM_LIST_FIELDS
 REPORT_ITEM_PROTECTED_FIELDS = agent_run_report_support.REPORT_ITEM_PROTECTED_FIELDS
 
 
-def _report_confidence(value: str | None) -> float:
-    return agent_compat_support.report_confidence(_agent_compat_runtime(), value)
-
-
-def _report_importance(value: str | None) -> float:
-    return agent_compat_support.report_importance(_agent_compat_runtime(), value)
-
-
-def _report_requirement_confidence(value: Any) -> float:
-    return agent_compat_support.report_requirement_confidence(_agent_compat_runtime(), value)
-
-
-def _report_requirement_acceptance_criteria(item: dict[str, Any]) -> list[str]:
-    return agent_compat_support.report_requirement_acceptance_criteria(_agent_compat_runtime(), item)
-
-
-def _requirement_create_body_from_report_item(item: dict[str, Any]) -> dict[str, Any]:
-    return agent_compat_support.requirement_create_body_from_report_item(_agent_compat_runtime(), item)
-
-
-def _normalize_report_item_type(item_type: str | None) -> str:
-    return agent_compat_support.normalize_report_item_type(_agent_compat_runtime(), item_type)
-
-
-def _stored_custom_agent_report(run: AgentRun) -> tuple[dict[str, Any], dict[str, Any]]:
-    return agent_compat_support.stored_custom_agent_report(_agent_compat_runtime(), run)
-
-
-def _normalize_report_patch_value(field: str, value: Any) -> Any:
-    return agent_compat_support.normalize_report_patch_value(_agent_compat_runtime(), field, value)
-
-
-def _editable_report_item_patch(item_type: str, patch: dict[str, Any]) -> dict[str, Any]:
-    return agent_compat_support.editable_report_item_patch(_agent_compat_runtime(), item_type, patch)
-
-
-def _find_report_item(report: dict[str, Any], item_type: str, item_id: str) -> dict[str, Any]:
-    return agent_compat_support.find_report_item(_agent_compat_runtime(), report, item_type, item_id)
-
-
-def _capture_custom_agent_report_memory(
-    *,
-    run_id: str,
-    project_id: str | None,
-    structured_report: dict[str, Any],
-    config: dict[str, Any],
-) -> list[str]:
-    return agent_compat_support.capture_custom_agent_report_memory(
-        _agent_compat_runtime(),
-        run_id=run_id,
-        project_id=project_id,
-        structured_report=structured_report,
-        config=config,
-    )
+_report_confidence = agent_run_report_support._report_confidence
+_report_importance = agent_run_report_support._report_importance
+_report_requirement_confidence = agent_run_report_support._report_requirement_confidence
+_report_requirement_acceptance_criteria = agent_run_report_support._report_requirement_acceptance_criteria
+_requirement_create_body_from_report_item = agent_run_report_support._requirement_create_body_from_report_item
+_normalize_report_item_type = agent_run_report_support._normalize_report_item_type
+_stored_custom_agent_report = agent_run_report_support._stored_custom_agent_report
+_normalize_report_patch_value = agent_run_report_support._normalize_report_patch_value
+_editable_report_item_patch = agent_run_report_support._editable_report_item_patch
+_find_report_item = agent_run_report_support._find_report_item
+_capture_custom_agent_report_memory = agent_run_report_support._capture_custom_agent_report_memory
 
 
 def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
