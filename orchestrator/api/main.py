@@ -14,10 +14,10 @@ if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
 import asyncio
-import functools
+import functools  # noqa: F401
 import shutil  # noqa: F401
-import subprocess
-import threading
+import subprocess  # noqa: F401
+import threading  # noqa: F401
 import uuid  # noqa: F401
 from datetime import datetime, timedelta  # noqa: F401
 
@@ -46,7 +46,7 @@ from orchestrator.services.coding_agent import (  # noqa: F401
 from services.browser_pool import AbstractBrowserPool, get_browser_pool  # noqa: F401
 from services.browser_pool import OperationType as BrowserOpType  # noqa: F401
 from services.resource_manager import (
-    ResourceManager,
+    ResourceManager,  # noqa: F401
     get_resource_manager,  # noqa: F401
 )
 from utils.agent_report import (  # noqa: F401
@@ -114,6 +114,7 @@ from . import (  # noqa: F401
     test_data,
     test_run_batch_watchdog_support,
     test_run_cleanup_support,
+    test_run_facade_support,
     test_run_maintenance_loop_support,
     test_run_process_registry_support,
     test_run_queue_manager_support,
@@ -207,83 +208,12 @@ rate_limit_exceeded_handler = app_wiring_support.rate_limit_exceeded_handler
 app = FastAPI(title="Quorvex AI API")
 app_wiring_support.configure_app(_main_runtime(), app)
 
-# Limit concurrent test executions
-EXECUTION_SEMAPHORE: asyncio.Semaphore | None = None
-# Track active processes: run_id -> subprocess.Popen object
-# NOTE: This is now also backed by ProcessManager for persistence
-# Protected by _processes_lock for thread safety (accessed from both event loop and thread pool)
-ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
-_processes_lock = threading.Lock()
-
 
 def _test_run_runtime():
     return sys.modules[__name__]
 
 
-register_process = functools.partial(
-    test_run_process_registry_support.register_process,
-    _test_run_runtime(),
-)
-unregister_process = functools.partial(
-    test_run_process_registry_support.unregister_process,
-    _test_run_runtime(),
-)
-get_process = functools.partial(
-    test_run_process_registry_support.get_process,
-    _test_run_runtime(),
-)
-is_process_active = functools.partial(
-    test_run_process_registry_support.is_process_active,
-    _test_run_runtime(),
-)
-get_active_process_count = functools.partial(
-    test_run_process_registry_support.get_active_process_count,
-    _test_run_runtime(),
-)
-list_active_process_ids = functools.partial(
-    test_run_process_registry_support.list_active_process_ids,
-    _test_run_runtime(),
-)
-clear_all_processes = functools.partial(
-    test_run_process_registry_support.clear_all_processes,
-    _test_run_runtime(),
-)
-
-
-# Process manager for persistent tracking and graceful termination
-PROCESS_MANAGER: ProcessManager | None = None
-
-
-QueueManager = test_run_queue_manager_support.QueueManager
-
-
-# Global queue manager instance
-QUEUE_MANAGER: QueueManager | None = None
-
-# Global resource manager instance for agent/exploration/PRD concurrency
-# DEPRECATED: Use BROWSER_POOL instead for unified browser management
-RESOURCE_MANAGER: ResourceManager | None = None
-
-# Unified browser resource pool - limits ALL browser operations to MAX_BROWSER_INSTANCES (default: 5)
-BROWSER_POOL: AbstractBrowserPool | None = None
-
-
-cleanup_orphaned_runs = functools.partial(
-    test_run_cleanup_support.cleanup_orphaned_runs,
-    _test_run_runtime(),
-)
-_cleanup_test_run_runtime = functools.partial(
-    test_run_cleanup_support.cleanup_test_run_runtime,
-    _test_run_runtime(),
-)
-cleanup_terminal_test_run_processes = functools.partial(
-    test_run_cleanup_support.cleanup_terminal_test_run_processes,
-    _test_run_runtime(),
-)
-sync_data_from_files = functools.partial(
-    test_run_read_model_support.sync_data_from_files,
-    _test_run_runtime(),
-)
+test_run_facade_support.configure_test_run_facade(_test_run_runtime, globals())
 
 
 @app.on_event("startup")
@@ -295,130 +225,6 @@ async def startup_event():
 async def shutdown_event():
     """Gracefully shut down all running processes."""
     await runtime_lifecycle_support.shutdown(_test_run_runtime())
-
-
-# ========= Execution Logic =========
-
-
-update_batch_stats = functools.partial(
-    test_run_batch_watchdog_support.update_batch_stats,
-    _test_run_runtime(),
-)
-_finalize_quality_gate_for_batch_safe = functools.partial(
-    test_run_batch_watchdog_support._finalize_quality_gate_for_batch_safe,
-    _test_run_runtime(),
-)
-_quality_gate_finalizer_loop = functools.partial(
-    test_run_batch_watchdog_support._quality_gate_finalizer_loop,
-    _test_run_runtime(),
-)
-_batch_watchdog = functools.partial(
-    test_run_batch_watchdog_support._batch_watchdog,
-    _test_run_runtime(),
-)
-_queue_watchdog = functools.partial(
-    test_run_batch_watchdog_support._queue_watchdog,
-    _test_run_runtime(),
-)
-_exploration_cleanup_loop = functools.partial(
-    test_run_maintenance_loop_support._exploration_cleanup_loop,
-    _test_run_runtime(),
-)
-_browser_pool_cleanup_loop = functools.partial(
-    test_run_maintenance_loop_support._browser_pool_cleanup_loop,
-    _test_run_runtime(),
-)
-_infrastructure_maintenance_loop = functools.partial(
-    test_run_maintenance_loop_support._infrastructure_maintenance_loop,
-    _test_run_runtime(),
-)
-_schedule_execution_watchdog = functools.partial(
-    test_run_schedule_watchdog_support._schedule_execution_watchdog,
-    _test_run_runtime(),
-)
-_run_db_maintenance = functools.partial(
-    test_run_maintenance_loop_support._run_db_maintenance,
-    _test_run_runtime(),
-)
-_log_startup_diagnostics = functools.partial(
-    startup_diagnostics_support._log_startup_diagnostics,
-    _test_run_runtime(),
-)
-
-
-_STARTUP_IMPORT_FAILURE_MESSAGE = (
-    test_run_runtime_support._STARTUP_IMPORT_FAILURE_MESSAGE
-)
-
-
-test_run_queue_manager_support.configure_runtime(_test_run_runtime)
-
-
-_record_startup_import_failure = functools.partial(
-    test_run_runtime_support.record_startup_import_failure,
-    _test_run_runtime(),
-)
-_run_test_cli_subprocess_with_retry = functools.partial(
-    test_run_runtime_support.run_test_cli_subprocess_with_retry,
-    _test_run_runtime(),
-)
-execute_run_task = functools.partial(
-    test_run_runtime_support.execute_run_task,
-    _test_run_runtime(),
-)
-
-
-def _task_exception_handler(task: asyncio.Task):
-    """Log exceptions from completed tasks to prevent silent failures."""
-    try:
-        exc = task.exception()
-        if exc:
-            logger.error(f"Task {task.get_name()} failed with unhandled exception: {exc}")
-    except asyncio.CancelledError:
-        # Task was cancelled, not an error
-        pass
-    except asyncio.InvalidStateError:
-        # Task not done yet, shouldn't happen in done callback
-        pass
-
-
-execute_run_task_wrapper = functools.partial(
-    test_run_runtime_support.execute_run_task_wrapper,
-    _test_run_runtime(),
-)
-execute_mobile_run_task = functools.partial(
-    test_run_runtime_support.execute_mobile_run_task,
-    _test_run_runtime(),
-)
-execute_mobile_run_task_wrapper = functools.partial(
-    test_run_runtime_support.execute_mobile_run_task_wrapper,
-    _test_run_runtime(),
-)
-_start_test_run_temporal_or_fail = functools.partial(
-    test_run_runtime_support.start_test_run_temporal_or_fail,
-    _test_run_runtime(),
-)
-_signal_test_run_temporal = functools.partial(
-    test_run_runtime_support.signal_test_run_temporal,
-    _test_run_runtime(),
-)
-_has_browser_auth_selection = functools.partial(
-    test_run_runtime_support.has_browser_auth_selection,
-    _test_run_runtime(),
-)
-_validate_browser_auth_selection_for_project = functools.partial(
-    test_run_runtime_support.validate_browser_auth_selection_for_project,
-    _test_run_runtime(),
-)
-_resolve_browser_auth_storage_state_for_run = functools.partial(
-    test_run_runtime_support.resolve_browser_auth_storage_state_for_run,
-    _test_run_runtime(),
-)
-_normalize_request_test_data_refs = functools.partial(
-    test_run_runtime_support.normalize_request_test_data_refs,
-    _test_run_runtime(),
-)
-
 
 # ========= Agents =========
 
