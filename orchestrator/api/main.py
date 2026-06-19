@@ -16,7 +16,7 @@ if str(orchestrator_dir) not in sys.path:
 from logging_config import get_logger, setup_logging
 
 from . import (
-    agent_facade_support,
+    main_agent_facade_support,
     main_app_wiring_facade_support,
     main_route_module_facade_support,
     main_runtime_dependency_facade_support,
@@ -34,10 +34,4 @@ main_route_module_facade_support.configure_main_route_module_facade(globals())
 main_app_wiring_facade_support.configure_main_app_wiring_facade(globals())
 app = globals()["app"]
 main_test_lifecycle_facade_support.configure_main_test_lifecycle_facade(globals())
-
-
-def _agent_compat_runtime():
-    return sys.modules[__name__]
-
-
-agent_facade_support.configure_agent_facade(_agent_compat_runtime, globals())
+main_agent_facade_support.configure_main_agent_facade(globals())
