@@ -99,6 +99,16 @@ describe('agents workspace query state', () => {
         expect(updated.has('specItemId')).toBe(false);
         expect(updated.has('specItemType')).toBe(false);
     });
+
+    it('keeps explicit custom agent intent while opening the builder', () => {
+        const updated = applyAgentWorkspaceQueryPatch(new URLSearchParams('view=library'), {
+            agent: 'custom',
+            create: true,
+        });
+
+        expect(updated.get('agent')).toBe('custom');
+        expect(updated.get('create')).toBe('1');
+    });
 });
 
 describe('agents history filtering', () => {

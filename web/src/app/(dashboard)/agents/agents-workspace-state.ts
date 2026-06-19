@@ -119,6 +119,10 @@ export function applyAgentWorkspaceQueryPatch(
         const defaultValue = DEFAULT_AGENT_WORKSPACE_QUERY[key as keyof AgentWorkspaceQueryState];
         const normalizedValue = typeof value === 'boolean' ? (value ? '1' : '') : value;
         const normalizedDefault = typeof defaultValue === 'boolean' ? (defaultValue ? '1' : '') : defaultValue;
+        if (key === 'agent' && patch.create === true && normalizedValue) {
+            next.set(key, normalizedValue);
+            return;
+        }
         if (!normalizedValue || normalizedValue === normalizedDefault) {
             next.delete(key);
         } else {

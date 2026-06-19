@@ -101,480 +101,92 @@ import {
     type ReportSpecItemType,
     type ReportSearchTypeFilter,
 } from './agents-workspace-state';
+import {
+    AGENT_HISTORY_STATUS_FILTER_LABELS,
+    AGENT_HISTORY_TYPE_FILTER_LABELS,
+    LIVE_AGENT_STATUSES,
+    REPORT_PRIORITY_OPTIONS,
+    REPORT_SELECT_EMPTY_VALUE,
+    REPORT_SEVERITY_OPTIONS,
+    TOOL_RISK_PILL_STYLES,
+    agentRunDisplayName,
+    agentRunResultTitle,
+    agentStatusTone,
+    customAgentCurrentActivity,
+    customAgentExecutionStarted,
+    customAgentWorkerMessage,
+    defaultDefinitionForm,
+    defaultReportSpecBrowserAuthSelection,
+    findReportSpecItem,
+    formatQueueAge,
+    formatToolName,
+    getArtifactUrl,
+    getStructuredReport,
+    isAgentRunTerminal,
+    itemPrompt,
+    linesToText,
+    markAgentsAction,
+    normalizeReportPatchResponse,
+    queueStateLabel,
+    reportEditDialogTitle,
+    reportItemReviewState,
+    reportItemSeverity,
+    reportItemToFlow,
+    reportSearchResultHref,
+    reportSpecBrowserAuthBody,
+    reportStatusColor,
+    runBrowserAuthSessionId,
+    severityColor,
+    sortArtifactsByModifiedAt,
+    textToLines,
+    type AgentActionIntent,
+    type AgentArtifact,
+    type AgentDefinition,
+    type AgentHistoryCounts,
+    type AgentQueueStatus,
+    type AgentReportSearchItem,
+    type AgentRun,
+    type AgentRunEvent,
+    type AgentTool,
+    type AgentTraceBundle,
+    type AuthType,
+    type CustomResultTab,
+    type FlowModalData,
+    type ReportEditTarget,
+    type ReportEditableItemType,
+    type ReportFinding,
+    type ReportRequirement,
+    type ReportSpecBrowserAuthMode,
+    type ReportTestIdea,
+    type SpecResult,
+    type StructuredAgentReport,
+    type TraceTab,
+} from './agents-model';
+import {
+    EMPTY_AGENT_HISTORY_COUNTS,
+    agentRunTraceExportUrl,
+    cleanStaleAgentQueue,
+    controlAgentRun as controlAgentRunApi,
+    fetchExploratoryFlowDetails,
+    fetchFlowSpecAgentRun as fetchFlowSpecAgentRunApi,
+    fetchAgentQueueStatus,
+    fetchAgentRunHistory,
+    fetchAgentRuntimeSetting,
+    generateExploratoryFlowSpec,
+    queueCleanupSummary,
+    retryAgentRun as retryAgentRunApi,
+    searchAgentReports,
+    splitSpecFile,
+    startAgentDefinitionRun,
+    synthesizeExploratorySpecs,
+} from './agents-api';
+import { useAgentDefinitions } from './use-agent-definitions';
+import { useAgentReportActions } from './use-agent-report-actions';
+import { useAgentRunDetail } from './use-agent-run-detail';
+import { useAgentRunEventsStream } from './use-agent-run-events-stream';
 
 const LiveBrowserView = dynamic<any>(() => import('@/components/LiveBrowserView').then(mod => mod.LiveBrowserView), { ssr: false });
 const TestDataPicker = dynamic<any>(() => import('@/components/TestDataPicker').then(mod => mod.TestDataPicker), { ssr: false });
-
-interface AgentRun {
-    id: string;
-    agent_type: string;
-    runtime?: string;
-    status: string;
-    created_at: string;
-    config: any;
-    summary?: string;
-    result?: any;
-    project_id?: string;
-    progress?: any;
-    agent_task_id?: string | null;
-    temporal_workflow_id?: string | null;
-    temporal_run_id?: string | null;
-    temporal?: AgentRunTemporal | null;
-    artifacts?: AgentArtifact[];
-    health?: AgentRunHealth;
-    started_at?: string | null;
-    completed_at?: string | null;
-}
-
-interface AgentHistoryCounts {
-    status: Record<AgentHistoryStatusFilter, number>;
-    type: Record<AgentHistoryTypeFilter, number>;
-}
-
-interface AgentRunHistoryResponse {
-    items: AgentRun[];
-    total: number;
-    counts: AgentHistoryCounts;
-    next_cursor?: string | null;
-}
-
-interface AgentRunTemporal {
-    temporal_workflow_id?: string | null;
-    temporal_run_id?: string | null;
-    temporal_ui_url?: string | null;
-    temporal_ui_workflow_url?: string | null;
-    temporal_namespace?: string | null;
-    task_queue?: string | null;
-    workflow_type?: string | null;
-    available?: boolean;
-    workflow_status?: string | null;
-    summary?: {
-        total_activities?: number;
-        failed_activities?: number;
-        retry_count?: number;
-        last_failure?: string | null;
-        last_workflow_task_failure?: string | null;
-    };
-    activities?: Array<{
-        activity_type?: string;
-        status?: string;
-        scheduled_at?: string | null;
-        started_at?: string | null;
-        completed_at?: string | null;
-    }>;
-    task_queue_status?: {
-        workflow_pollers?: number;
-        activity_pollers?: number;
-        has_workflow_pollers?: boolean;
-        has_activity_pollers?: boolean;
-    };
-    error?: string | null;
-}
-
-interface AgentArtifact {
-    name: string;
-    path: string;
-    type: string;
-    modified_at?: string | null;
-}
-
-interface AgentRunHealth {
-    event_count?: number;
-    tool_event_count?: number;
-    error_event_count?: number;
-    latest_event?: AgentRunEvent | null;
-    latest_heartbeat_at?: string | null;
-    agent_task_id?: string | null;
-    terminal?: boolean;
-    terminal_reason?: string | null;
-}
-
-interface AgentRunEvent {
-    id: string;
-    run_id?: string;
-    sequence: number;
-    event_type: string;
-    level: string;
-    message: string;
-    payload?: Record<string, any>;
-    created_at: string;
-    agent_task_id?: string | null;
-}
-
-interface AgentTraceSnapshot {
-    id: string;
-    trace_id: string;
-    run_id: string;
-    agent_task_id?: string | null;
-    attempt: number;
-    runtime: string;
-    model?: string | null;
-    model_tier?: string | null;
-    allowed_tools: string[];
-    prompt_hash?: string | null;
-    context_hash?: string | null;
-    memory_block_hash?: string | null;
-    prompt_preview?: string;
-    memory_preview?: string;
-    prompt_artifact_path?: string | null;
-    context_artifact_path?: string | null;
-    test_data_refs: string[];
-    runtime_diagnostics?: Record<string, any>;
-    created_at: string;
-    updated_at: string;
-}
-
-interface AgentTraceSpan {
-    id: string;
-    trace_id: string;
-    sequence: number;
-    span_type: string;
-    name: string;
-    level: string;
-    message: string;
-    tool_name?: string | null;
-    success?: boolean | null;
-    duration_ms?: number | null;
-    content_hash?: string | null;
-    input_preview?: any;
-    output_preview?: any;
-    artifact_path?: string | null;
-    payload?: Record<string, any>;
-    agent_run_event_id?: string | null;
-    created_at: string;
-    started_at?: string | null;
-    ended_at?: string | null;
-}
-
-interface AgentTraceBundle {
-    snapshot?: AgentTraceSnapshot | null;
-    spans: AgentTraceSpan[];
-    events: AgentRunEvent[];
-    memory_injections: Array<Record<string, any>>;
-    artifacts: AgentArtifact[];
-    temporal?: AgentRunTemporal | null;
-    correlation?: Record<string, any>;
-}
-
-interface AgentTool {
-    id: string;
-    label: string;
-    description: string;
-    category: string;
-    tool_name: string;
-    risk: 'low' | 'medium' | 'high' | 'destructive';
-    requires_mcp_server?: string | null;
-}
-
-const TOOL_RISK_PILL_STYLES: Record<AgentTool['risk'], { background: string; borderColor: string; color: string }> = {
-    low: {
-        background: 'rgba(126, 139, 168, 0.14)',
-        borderColor: 'rgba(126, 139, 168, 0.24)',
-        color: 'var(--text-secondary)',
-    },
-    medium: {
-        background: 'var(--warning-muted)',
-        borderColor: 'rgba(251, 191, 36, 0.28)',
-        color: 'var(--warning)',
-    },
-    high: {
-        background: 'var(--danger-muted)',
-        borderColor: 'rgba(248, 113, 113, 0.3)',
-        color: 'var(--danger)',
-    },
-    destructive: {
-        background: 'rgba(248, 113, 113, 0.16)',
-        borderColor: 'rgba(248, 113, 113, 0.36)',
-        color: 'var(--danger)',
-    },
-};
-
-interface AgentDefinition {
-    id: string;
-    name: string;
-    description: string;
-    system_prompt: string;
-    runtime?: string;
-    model?: string | null;
-    timeout_seconds: number;
-    tool_ids: string[];
-    test_data_refs?: string[];
-    status: string;
-    project_id?: string | null;
-}
-
-function defaultDefinitionForm(runtime: string) {
-    return {
-        id: '',
-        name: '',
-        description: '',
-        system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
-        runtime,
-        timeout_seconds: 1800,
-        tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console', 'browser_screenshot'],
-        test_data_refs: '',
-    };
-}
-
-interface SpecResult {
-    specs?: {
-        happy_path?: Record<string, string>;
-        edge_cases?: Record<string, string>;
-    };
-    summary?: string;
-    total_specs?: number;
-    flows_covered?: string[];
-    generated_at?: string;
-}
-
-type AuthType = 'none' | 'credentials' | 'session';
-type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'requirements' | 'evidence' | 'raw';
-type ReportSpecBrowserAuthMode = 'session' | 'project_default' | 'none';
-type TraceTab = AgentTraceTab;
-type ReportEditableItemType = 'finding' | 'test_idea' | 'requirement';
-type AgentActionIntent =
-    | { type: 'none' }
-    | { type: 'createAgent' }
-    | { type: 'reviewReportSpec'; runId: string; itemId: string; itemType: ReportSpecItemType };
-
-interface FlowModalData {
-    id: string;
-    title: string;
-    pages?: string[];
-    happy_path?: string;
-    edge_cases?: string[];
-    test_ideas?: string[];
-    entry_point?: string;
-    exit_point?: string;
-    source_type?: 'custom_report' | string;
-    item_type?: ReportSpecItemType;
-    generated_spec?: unknown;
-}
-
-const AGENT_HISTORY_STATUS_FILTER_LABELS: Record<AgentHistoryStatusFilter, string> = {
-    all: 'All',
-    active: 'Active',
-    completed: 'Completed',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-    paused: 'Paused',
-};
-
-const AGENT_HISTORY_TYPE_FILTER_LABELS: Record<AgentHistoryTypeFilter, string> = {
-    all: 'All',
-    exploratory: 'Explorer',
-    custom: 'Custom',
-    writer: 'Writer',
-    spec_generation: 'Spec runs',
-};
-
-const REPORT_PRIORITY_OPTIONS = ['critical', 'high', 'medium', 'low'] as const;
-const REPORT_SEVERITY_OPTIONS = ['critical', 'high', 'medium', 'low', 'info'] as const;
-const REPORT_SELECT_EMPTY_VALUE = '__empty__';
-
-interface ReportSpecBrowserAuthSelection {
-    mode: ReportSpecBrowserAuthMode;
-    sessionId: string;
-}
-
-interface ReportPage {
-    id?: string;
-    url: string;
-    status?: string;
-    notes?: string;
-}
-
-interface ReportFinding {
-    id: string;
-    title: string;
-    severity?: string;
-    confidence?: string;
-    page?: string;
-    description?: string;
-    evidence?: string;
-    suggested_action?: string;
-}
-
-interface ReportTestIdea {
-    id: string;
-    title: string;
-    priority?: string;
-    page?: string;
-    steps?: string[];
-    expected?: string;
-    source_finding_id?: string;
-}
-
-interface ReportRequirement {
-    id: string;
-    title: string;
-    description?: string;
-    category?: string;
-    priority?: string;
-    acceptance_criteria?: string[];
-    page?: string;
-    evidence?: string;
-    confidence?: number | string;
-    imported_requirement_id?: number;
-    imported_requirement_code?: string;
-    imported_at?: string;
-}
-
-interface ReportEvidence {
-    id?: string;
-    type?: string;
-    label?: string;
-    value?: string;
-}
-
-interface StructuredAgentReport {
-    summary?: string;
-    scope?: string;
-    pages_checked?: ReportPage[];
-    findings?: ReportFinding[];
-    test_ideas?: ReportTestIdea[];
-    requirements?: ReportRequirement[];
-    evidence?: ReportEvidence[];
-    follow_up_actions?: { id?: string; label?: string; action?: string; target?: string }[];
-    parse_status?: string;
-}
-
-type ReportEditTarget =
-    | { type: 'overview'; runId: string }
-    | { type: ReportEditableItemType; runId: string; itemId: string };
-
-interface AgentQueueStatus {
-    mode?: string;
-    active?: number;
-    queued?: number;
-    max?: number;
-    available?: number;
-    workers_alive?: number;
-    worker_processes_alive?: number;
-    workers_busy?: number;
-    workers_idle?: number;
-    running_task_heartbeats_alive?: number;
-    capacity_state?: string;
-    stale_running?: number;
-    oldest_queued_age_seconds?: number | null;
-    orphaned_tasks?: number;
-    background_tasks?: number;
-    linked_tasks?: number;
-    worker_health?: Record<string, any>;
-    browser_pool?: Record<string, any>;
-    pool_status?: Record<string, any>;
-    temporal?: Record<string, any>;
-    running_tasks?: Array<Record<string, any>>;
-}
-
-interface AgentReportSearchItem {
-    run_id: string;
-    agent_name?: string;
-    created_at?: string;
-    type: 'finding' | 'test_idea' | 'requirement' | 'page' | 'evidence' | 'action' | string;
-    item: Record<string, any>;
-}
-
-function reportSearchResultTab(type: AgentReportSearchItem['type']): CustomResultTab {
-    switch (type) {
-        case 'finding':
-            return 'findings';
-        case 'test_idea':
-            return 'test_ideas';
-        case 'requirement':
-            return 'requirements';
-        case 'evidence':
-            return 'evidence';
-        case 'page':
-        case 'action':
-        default:
-            return 'overview';
-    }
-}
-
-function reportSearchResultHref(result: AgentReportSearchItem) {
-    const params = new URLSearchParams({
-        runId: result.run_id,
-        view: 'run',
-        resultTab: reportSearchResultTab(result.type),
-    });
-    const itemId = result.item?.id != null ? String(result.item.id) : '';
-
-    if ((result.type === 'finding' || result.type === 'test_idea') && itemId) {
-        params.set('specItemId', itemId);
-        params.set('specItemType', result.type);
-    }
-
-    return `/agents?${params.toString()}`;
-}
-
-function formatToolName(toolName?: string) {
-    if (!toolName) return 'Waiting for first tool';
-    const short = toolName.includes('__') ? toolName.split('__').pop() || toolName : toolName;
-    return short.replace(/^browser_/, '').replace(/_/g, ' ');
-}
-
-function customAgentCurrentActivity(progress: any = {}) {
-    if (progress.current_tool_label || progress.last_tool_label || progress.current_tool || progress.last_tool) {
-        return progress.current_tool_label || progress.last_tool_label || formatToolName(progress.current_tool || progress.last_tool);
-    }
-    if (progress.phase === 'llm_retry' || progress.retry_attempt) {
-        const attempt = progress.retry_attempt ? ` ${progress.retry_attempt}${progress.retry_max_attempts ? `/${progress.retry_max_attempts}` : ''}` : '';
-        return `LLM retry${attempt}`;
-    }
-    return formatToolName('');
-}
-
-function sortArtifactsByModifiedAt(artifacts: AgentArtifact[] = []) {
-    return [...artifacts].sort((a, b) => {
-        const bTime = b.modified_at ? new Date(b.modified_at).getTime() : 0;
-        const aTime = a.modified_at ? new Date(a.modified_at).getTime() : 0;
-        return bTime - aTime;
-    });
-}
-
-function getArtifactUrl(artifact: AgentArtifact) {
-    return `${API_BASE}${artifact.path}`;
-}
-
-function runBrowserAuthSessionId(config: any): string {
-    const authConfig = config?.browser_auth && typeof config.browser_auth === 'object' ? config.browser_auth : {};
-    const legacyAuth = config?.auth && typeof config.auth === 'object' ? config.auth : {};
-    return String(
-        config?.browser_auth_session_id ||
-        authConfig.session_id ||
-        authConfig.browser_auth_session_id ||
-        legacyAuth.browser_auth_session_id ||
-        legacyAuth.session_id ||
-        ''
-    );
-}
-
-function defaultReportSpecBrowserAuthSelection(
-    sessions: BrowserAuthSession[],
-    selectedSessionId: string
-): ReportSpecBrowserAuthSelection {
-    const activeSessions = sessions.filter(isBrowserAuthSessionSelectable);
-    const selectedSession = activeSessions.find(item => item.id === selectedSessionId);
-    if (selectedSession) {
-        return { mode: 'session', sessionId: selectedSession.id };
-    }
-    const defaultSession = activeSessions.find(item => item.is_default);
-    if (defaultSession) {
-        return { mode: 'project_default', sessionId: '' };
-    }
-    return { mode: 'none', sessionId: '' };
-}
-
-function reportSpecBrowserAuthBody(mode: ReportSpecBrowserAuthMode, sessionId: string) {
-    if (mode === 'session') {
-        return { browser_auth_session_id: sessionId };
-    }
-    if (mode === 'project_default') {
-        return { use_project_default_browser_auth: true };
-    }
-    return { skip_browser_auth: true };
-}
 
 function AgentRunCapturePanel({
     activeRun,
@@ -702,186 +314,6 @@ function AgentRunCapturePanel({
             </div>
         </div>
     );
-}
-
-function getStructuredReport(run: AgentRun): StructuredAgentReport {
-    return run.result?.structured_report || {
-        summary: run.result?.summary || 'Custom agent completed. Review the raw output for details.',
-        scope: run.config?.prompt || run.config?.url || '',
-        pages_checked: [],
-        findings: [],
-        test_ideas: [],
-        requirements: [],
-        evidence: [],
-        follow_up_actions: [],
-        parse_status: 'raw',
-    };
-}
-
-function severityColor(value?: string) {
-    const normalized = (value || '').toLowerCase();
-    if (normalized === 'critical' || normalized === 'high') return 'var(--danger)';
-    if (normalized === 'medium') return 'var(--warning)';
-    if (normalized === 'low') return 'var(--primary)';
-    return 'var(--text-secondary)';
-}
-
-function reportItemReviewState(item: Record<string, any>, kind: 'finding' | 'test_idea' | 'requirement' | string): ReportReviewFilter {
-    if (item.imported_requirement_id || item.imported_requirement_code || item.imported_at) return 'imported';
-    if (item.spec_id || item.spec_file || item.generated_spec || item.spec_created_at || item.created_spec_id) return 'spec_created';
-    const urgency = String(item.severity || item.priority || '').toLowerCase();
-    if (kind === 'finding' || ['critical', 'high'].includes(urgency)) return 'needs_action';
-    return 'unreviewed';
-}
-
-function reportItemSeverity(item: Record<string, any>) {
-    return String(item.severity || item.priority || 'info').toLowerCase();
-}
-
-function formatQueueAge(seconds?: number | null) {
-    if (!seconds || seconds < 1) return 'None';
-    if (seconds < 60) return `${Math.round(seconds)}s`;
-    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-    return `${Math.round(seconds / 3600)}h`;
-}
-
-function queueStateLabel(queue?: AgentQueueStatus | null) {
-    if (!queue) return 'Unknown';
-    const state = queue.capacity_state || queue.mode || 'available';
-    return state.replace(/_/g, ' ');
-}
-
-function reportStatusColor(value?: string) {
-    const normalized = (value || '').toLowerCase();
-    if (normalized.includes('issue') || normalized.includes('failed') || normalized.includes('error')) return 'var(--danger)';
-    if (normalized.includes('load') || normalized.includes('pass')) return 'var(--success)';
-    return 'var(--text-secondary)';
-}
-
-const LIVE_AGENT_STATUSES = new Set(['running', 'pending', 'queued', 'in_progress', 'waiting', 'paused']);
-const TERMINAL_AGENT_STATUSES = new Set(['completed', 'completed_partial', 'failed', 'cancelled', 'canceled', 'timeout']);
-
-function isAgentRunTerminal(status?: string) {
-    return TERMINAL_AGENT_STATUSES.has(String(status || '').toLowerCase());
-}
-
-function agentStatusTone(status?: string) {
-    if (status === 'completed') return { bg: 'var(--success-muted)', color: 'var(--success)' };
-    if (status === 'completed_partial') return { bg: 'var(--warning-muted)', color: 'var(--warning)' };
-    if (status === 'failed' || status === 'cancelled' || status === 'timeout') return { bg: 'var(--danger-muted)', color: 'var(--danger)' };
-    if (status === 'paused') return { bg: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' };
-    return { bg: 'var(--primary-glow)', color: 'var(--primary)' };
-}
-
-function agentRunDisplayName(run: AgentRun) {
-    if (run.agent_type === 'spec_generation') return 'Spec Generation';
-    if (run.agent_type === 'custom') return run.config?.agent_name || 'Custom';
-    if (run.agent_type === 'writer') return 'Writer';
-    return 'Explorer';
-}
-
-function agentRunResultTitle(run: AgentRun) {
-    return run.config?.agent_name || run.config?.flow_title || run.config?.url || agentRunDisplayName(run);
-}
-
-function customAgentExecutionStarted(run: AgentRun) {
-    const progress = run.progress || {};
-    if (
-        run.agent_task_id ||
-        progress.agent_task_id ||
-        progress.last_tool ||
-        Number(progress.tool_calls || 0) > 0 ||
-        Number(progress.browser_tool_calls || 0) > 0 ||
-        ['tool_use', 'tool_result', 'running', 'completed', 'failed'].includes(String(progress.phase || '')) ||
-        (run.health?.latest_heartbeat_at)
-    ) {
-        return true;
-    }
-    const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
-    if (executeActivity?.status === 'scheduled') return false;
-    if (executeActivity && ['started', 'completed', 'failed', 'timed_out'].includes(String(executeActivity.status))) return true;
-    return false;
-}
-
-function customAgentWorkerMessage(run: AgentRun) {
-    const temporalError = run.temporal?.error || run.temporal?.summary?.last_workflow_task_failure;
-    if (temporalError) return temporalError;
-    if ((run.progress || {}).browser_runtime === 'headless_worker' || (run.progress || {}).live_view_available === false) {
-        return 'Browser execution is running outside the VNC display. Follow the latest screenshots and activity timeline.';
-    }
-    if ((run.progress || {}).phase === 'queued') return 'Agent task is queued for a worker. Browser evidence will appear when the worker starts the task.';
-    const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
-    if (executeActivity?.status === 'scheduled') {
-        return `Temporal scheduled agent execution. Waiting for a custom workflow worker on ${run.temporal?.task_queue || 'the workflow task queue'}.`;
-    }
-    if (run.temporal_workflow_id) return 'Temporal scheduled the run. Waiting for the custom workflow worker to start agent execution.';
-    return 'Waiting for the run to be scheduled.';
-}
-
-function itemPrompt(run: AgentRun, item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test idea') {
-    const title = item.title || item.id;
-    return [
-        `Use custom agent run ${run.id} (${run.config?.agent_name || 'Custom Agent'}) as context.`,
-        `Selected ${kind}: ${item.id} - ${title}`,
-        'Create an actionable next step. If it requires changing platform state, prepare an approval action instead of doing it silently.',
-    ].join('\n');
-}
-
-function markAgentsAction(payload: Record<string, unknown>) {
-    if (typeof window === 'undefined' || process.env.NODE_ENV === 'production') return;
-    (window as typeof window & { __agentsLastAction?: Record<string, unknown> }).__agentsLastAction = payload;
-}
-
-function reportItemToFlow(item: ReportFinding | ReportTestIdea, kind: ReportSpecItemType, run: AgentRun): FlowModalData {
-    return {
-        id: item.id,
-        title: item.title || item.id,
-        pages: item.page ? [item.page] : [],
-        happy_path: 'steps' in item && item.steps?.length ? item.steps.join('\n') : ('description' in item ? item.description : undefined),
-        edge_cases: kind === 'finding' && 'evidence' in item && item.evidence ? [item.evidence] : [],
-        test_ideas: kind === 'test_idea' && 'expected' in item && item.expected ? [item.expected] : [],
-        entry_point: item.page || run.config?.url,
-        exit_point: item.page || run.config?.url,
-        source_type: 'custom_report',
-        item_type: kind,
-    };
-}
-
-function linesToText(value?: string[]) {
-    return Array.isArray(value) ? value.join('\n') : '';
-}
-
-function textToLines(value?: string) {
-    return (value || '')
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean);
-}
-
-function normalizeReportPatchResponse(data: any): AgentRun | null {
-    if (data?.run?.id) return data.run as AgentRun;
-    if (data?.id) return data as AgentRun;
-    return null;
-}
-
-function reportEditDialogTitle(target: ReportEditTarget | null) {
-    if (!target) return 'Edit Report Summary';
-    if (target.type === 'overview') return 'Edit Report Summary';
-    if (target.type === 'finding') return `Edit finding ${target.itemId}`;
-    if (target.type === 'test_idea') return `Edit test idea ${target.itemId}`;
-    return `Edit requirement ${target.itemId}`;
-}
-
-function findReportSpecItem(run: AgentRun | null, itemId: string, itemType: ReportSpecItemType) {
-    if (!run?.result?.structured_report || !itemId) return null;
-    const report = getStructuredReport(run);
-    const items = itemType === 'finding' ? report.findings || [] : report.test_ideas || [];
-    const item = items.find(candidate => candidate.id === itemId);
-    if (!item) return null;
-    return {
-        item,
-        flow: reportItemToFlow(item, itemType, run),
-    };
 }
 
 function CustomAgentReportView({
@@ -2048,17 +1480,13 @@ export default function AgentsPage() {
     const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
     const [builderOpen, setBuilderOpen] = useState(false);
     const [savingDefinition, setSavingDefinition] = useState(false);
+    const [definitionRuntimeOpen, setDefinitionRuntimeOpen] = useState(false);
+    const [runSetupReady, setRunSetupReady] = useState(false);
     const [definitionForm, setDefinitionForm] = useState(() => defaultDefinitionForm('claude_sdk'));
-    const pollInterval = useRef<NodeJS.Timeout | null>(null);
-    const agentEventSourceRef = useRef<EventSource | null>(null);
-    const agentEventReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const targetUrlRef = useRef('');
     const historyAbortRef = useRef<AbortController | null>(null);
     const reportSearchAbortRef = useRef<AbortController | null>(null);
-    const runDetailAbortRef = useRef<AbortController | null>(null);
     const historyRequestIdRef = useRef(0);
-    const traceRequestIdRef = useRef(0);
-    const toolCatalogLoadedProjectRef = useRef<string | null>(null);
-    const definitionsLoadedProjectRef = useRef<string | null>(null);
     const agentEventsRef = useRef<AgentRunEvent[]>([]);
     const workspaceQueryRef = useRef(searchParamsString);
     const queryCreateOpenRef = useRef(false);
@@ -2154,10 +1582,8 @@ export default function AgentsPage() {
 
     const fetchRuntimeSettings = async () => {
         try {
-            const res = await fetch(`${API_BASE}/settings`);
-            if (!res.ok) return;
-            const data = await res.json();
-            const runtime = data.agent_runtime || 'claude_sdk';
+            const runtime = await fetchAgentRuntimeSetting();
+            if (!runtime) return;
             setAgentRuntime(runtime);
             setDefinitionForm(prev => prev.id ? prev : { ...prev, runtime });
         } catch (e) {
@@ -2176,33 +1602,18 @@ export default function AgentsPage() {
         setHistoryLoading(true);
         setHistoryError(null);
         try {
-            const params = new URLSearchParams({ limit: '40' });
-            if (currentProject?.id) params.set('project_id', currentProject.id);
-            if (historyStatusFilter !== 'all') params.set('status', historyStatusFilter);
-            if (historyTypeFilter !== 'all') params.set('agent_type', historyTypeFilter);
-            if (debouncedHistorySearch.trim()) params.set('q', debouncedHistorySearch.trim());
-            if (options.cursor) params.set('cursor', options.cursor);
-            const res = await fetch(`${API_BASE}/api/agents/runs?${params}`, { signal: controller.signal });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
+            const payload = await fetchAgentRunHistory({
+                projectId: currentProject?.id,
+                status: historyStatusFilter,
+                type: historyTypeFilter,
+                query: debouncedHistorySearch,
+                cursor: options.cursor,
+                signal: controller.signal,
+            });
             if (controller.signal.aborted || historyRequestIdRef.current !== requestId) return;
-            const payload: AgentRunHistoryResponse = Array.isArray(data)
-                ? {
-                    items: data,
-                    total: data.length,
-                    counts: {
-                        status: { all: data.length, active: 0, completed: 0, failed: 0, cancelled: 0, paused: 0 },
-                        type: { all: data.length, exploratory: 0, custom: 0, writer: 0, spec_generation: 0 },
-                    },
-                    next_cursor: null,
-                }
-                : data;
             setHistory(prev => options.append ? [...prev, ...(payload.items || [])] : (payload.items || []));
             setHistoryTotal(Number(payload.total || 0));
-            setHistoryCounts(payload.counts || {
-                status: { all: 0, active: 0, completed: 0, failed: 0, cancelled: 0, paused: 0 },
-                type: { all: 0, exploratory: 0, custom: 0, writer: 0, spec_generation: 0 },
-            });
+            setHistoryCounts(payload.counts || EMPTY_AGENT_HISTORY_COUNTS);
             setHistoryNextCursor(payload.next_cursor || null);
         } catch (e) {
             if (e instanceof DOMException && e.name === 'AbortError') return;
@@ -2232,56 +1643,34 @@ export default function AgentsPage() {
         } catch (e) { console.error("Failed to fetch browser login sessions", e); }
     };
 
-    const fetchToolCatalog = useCallback(async () => {
-        if (projectLoading) return;
-        const projectKey = currentProject?.id || 'unscoped';
-        if (toolCatalogLoadedProjectRef.current === projectKey && toolCatalog.length > 0) return;
-        try {
-            const res = await fetch(`${API_BASE}/api/agents/tools/catalog`);
-            if (res.ok) {
-                const data = await res.json();
-                setToolCatalog(data.tools || []);
-                toolCatalogLoadedProjectRef.current = projectKey;
-            }
-        } catch (e) { console.error("Failed to fetch agent tool catalog", e); }
-    }, [currentProject?.id, projectLoading, toolCatalog.length]);
+    const {
+        resetAgentLibraryLoadedProjects,
+        loadAgentDefinitionsFresh: fetchAgentDefinitionsFresh,
+        ensureAgentLibraryData,
+        saveDefinitionRecord,
+        archiveDefinitionRecord,
+    } = useAgentDefinitions({
+        projectId: currentProject?.id,
+        projectLoading,
+        agentDefinitionsLength: agentDefinitions.length,
+        toolCatalogLength: toolCatalog.length,
+        selectedDefinitionId,
+        setAgentDefinitions,
+        setToolCatalog,
+        setSelectedDefinitionId,
+    });
 
-    const fetchAgentDefinitions = useCallback(async () => {
-        if (projectLoading) return;
-        const projectKey = currentProject?.id || 'unscoped';
-        if (definitionsLoadedProjectRef.current === projectKey && agentDefinitions.length > 0) return;
-        try {
-            const projectParam = currentProject?.id
-                ? `?project_id=${encodeURIComponent(currentProject.id)}`
-                : '';
-            const res = await fetch(`${API_BASE}/api/agents/definitions${projectParam}`);
-            if (res.ok) {
-                const data = await res.json();
-                setAgentDefinitions(data || []);
-                definitionsLoadedProjectRef.current = projectKey;
-                if (!selectedDefinitionId && data?.length) {
-                    setSelectedDefinitionId(data[0].id);
-                }
-            }
-        } catch (e) { console.error("Failed to fetch agent definitions", e); }
-    }, [agentDefinitions.length, currentProject?.id, projectLoading, selectedDefinitionId]);
-
-    const fetchAgentDefinitionsFresh = useCallback(async () => {
-        definitionsLoadedProjectRef.current = null;
-        await fetchAgentDefinitions();
-    }, [fetchAgentDefinitions]);
-
-    const ensureAgentLibraryData = useCallback(async () => {
-        await Promise.all([fetchToolCatalog(), fetchAgentDefinitions()]);
-    }, [fetchAgentDefinitions, fetchToolCatalog]);
+    const {
+        saveReportPatch,
+        importRequirements,
+        generateItemSpec,
+    } = useAgentReportActions(currentProject?.id);
 
     const fetchQueueStatus = async () => {
         setQueueLoading(true);
         setQueueError(null);
         try {
-            const res = await fetch(`${API_BASE}/api/agents/queue-status`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            setQueueStatus(await res.json());
+            setQueueStatus(await fetchAgentQueueStatus());
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Failed to fetch queue status.';
             setQueueError(message);
@@ -2293,30 +1682,8 @@ export default function AgentsPage() {
     const cleanStaleQueueTasks = async () => {
         setQueueCleanupLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/api/agents/queue-clean-stale`, { method: 'POST' });
-            let data: Record<string, any> = {};
-            try {
-                data = await res.json();
-            } catch {
-                data = {};
-            }
-            if (!res.ok || data.status === 'error') {
-                throw new Error(String(data.message || data.detail || `HTTP ${res.status}`));
-            }
-            const cleaned = Number(data.cleaned ?? 0);
-            const cleanupDetails = [
-                ['lost heartbeat', data.cancelled_orphaned],
-                ['timed out', data.timed_out],
-                ['terminal owner', data.terminal_owner],
-                ['orphaned queued', data.orphaned_queued],
-                ['stale queued', data.stale_ownerless_queued],
-                ['missing refs', data.missing_task_refs],
-            ]
-                .map(([label, value]) => [label, Number(value ?? 0)] as const)
-                .filter(([, value]) => value > 0)
-                .map(([label, value]) => `${value} ${label}`)
-                .join(', ');
-            toast.success(cleaned > 0 ? `Cleaned ${cleaned} stale queue task${cleaned === 1 ? '' : 's'}${cleanupDetails ? ` (${cleanupDetails})` : ''}` : 'No stale queue tasks needed cleanup');
+            const data = await cleanStaleAgentQueue();
+            toast.success(queueCleanupSummary(data));
             await fetchQueueStatus();
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Failed to clean stale queue tasks.';
@@ -2333,16 +1700,15 @@ export default function AgentsPage() {
         reportSearchAbortRef.current = controller;
         setReportSearchLoading(true);
         try {
-            const params = new URLSearchParams({ limit: '50' });
-            if (currentProject?.id) params.set('project_id', currentProject.id);
-            if (reportSearchQuery.trim()) params.set('query', reportSearchQuery.trim());
-            if (reportSearchType !== 'all') params.set('item_type', reportSearchType);
-            if (reportSearchSeverity !== 'all') params.set('severity', reportSearchSeverity);
-            const res = await fetch(`${API_BASE}/api/agents/reports/search?${params}`, { signal: controller.signal });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
+            const results = await searchAgentReports({
+                projectId: currentProject?.id,
+                query: reportSearchQuery,
+                type: reportSearchType,
+                severity: reportSearchSeverity,
+                signal: controller.signal,
+            });
             if (controller.signal.aborted) return;
-            setReportSearchResults(Array.isArray(data.items) ? data.items : []);
+            setReportSearchResults(results);
         } catch (e) {
             if (e instanceof DOMException && e.name === 'AbortError') return;
             console.error('Failed to search agent reports', e);
@@ -2405,14 +1771,13 @@ export default function AgentsPage() {
 
     useEffect(() => {
         if (projectLoading) return;
-        toolCatalogLoadedProjectRef.current = null;
-        definitionsLoadedProjectRef.current = null;
+        resetAgentLibraryLoadedProjects();
         setToolCatalog([]);
         setAgentDefinitions([]);
         setSelectedDefinitionId('');
         setSessions([]);
         setSessionId('');
-    }, [currentProject?.id, projectLoading]);
+    }, [currentProject?.id, projectLoading, resetAgentLibraryLoadedProjects]);
 
     useEffect(() => {
         if (projectLoading) return;
@@ -2442,14 +1807,29 @@ export default function AgentsPage() {
     }, [builderOpen, currentProject?.id, flowModalOpen, projectLoading, workspaceView]);
 
     useEffect(() => {
+        setRunSetupReady(true);
+    }, []);
+
+    useEffect(() => {
         return () => {
-            if (pollInterval.current) clearInterval(pollInterval.current);
-            agentEventSourceRef.current?.close();
             historyAbortRef.current?.abort();
             reportSearchAbortRef.current?.abort();
-            runDetailAbortRef.current?.abort();
-            if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
         }
+    }, []);
+
+    useEffect(() => {
+        const rememberTargetUrl = (event: Event) => {
+            const target = event.target as HTMLInputElement | null;
+            if (target?.name === 'targetUrl' || target?.id === 'agents-target-url') {
+                targetUrlRef.current = target.value;
+            }
+        };
+        document.addEventListener('input', rememberTargetUrl, true);
+        document.addEventListener('change', rememberTargetUrl, true);
+        return () => {
+            document.removeEventListener('input', rememberTargetUrl, true);
+            document.removeEventListener('change', rememberTargetUrl, true);
+        };
     }, []);
 
     useEffect(() => {
@@ -2484,80 +1864,7 @@ export default function AgentsPage() {
         }, 50);
     };
 
-    // Fetch single run
-    const fetchRun = async (id: string) => {
-        runDetailAbortRef.current?.abort();
-        const controller = new AbortController();
-        runDetailAbortRef.current = controller;
-        try {
-            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
-            const res = await fetch(`${API_BASE}/api/agents/runs/${id}${projectQuery}`, { signal: controller.signal });
-            if (res.ok) {
-                const data = await res.json();
-                if (controller.signal.aborted) return;
-                setActiveRun(prev => {
-                    const wasActive = prev?.id === id && !isAgentRunTerminal(prev.status);
-                    const isTerminal = isAgentRunTerminal(data.status);
-                    if (wasActive && isTerminal) {
-                        void fetchHistory();
-                        void fetchAgentEvents(id);
-                        void fetchAgentTrace(id);
-                    }
-                    return data;
-                });
-            }
-        } catch (e) {
-            if (e instanceof DOMException && e.name === 'AbortError') return;
-            console.error("Failed to fetch run", e);
-        }
-    };
-
-    const mergeAgentEvents = (incoming: AgentRunEvent[]) => {
-        setAgentEvents(prev => {
-            const bySequence = new Map<number, AgentRunEvent>();
-            [...prev, ...incoming].forEach(item => bySequence.set(item.sequence, item));
-            return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence);
-        });
-    };
-
-    const fetchAgentEvents = async (id: string, afterSequence = 0) => {
-        try {
-            const res = await fetch(`${API_BASE}/api/agents/runs/${id}/events?limit=200&after_sequence=${afterSequence}`);
-            if (res.ok) {
-                const data = await res.json();
-                if (Array.isArray(data)) {
-                    if (afterSequence > 0) mergeAgentEvents(data);
-                    else setAgentEvents(data);
-                }
-            }
-        } catch (e) {
-            console.error("Failed to fetch agent events", e);
-        }
-    };
-
-    const fetchAgentTrace = async (id: string) => {
-        const requestId = traceRequestIdRef.current + 1;
-        traceRequestIdRef.current = requestId;
-        setTraceLoading(true);
-        try {
-            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
-            const res = await fetch(`${API_BASE}/api/agents/runs/${id}/trace${projectQuery}`);
-            if (res.ok) {
-                const data = await res.json();
-                if (traceRequestIdRef.current === requestId) {
-                    setAgentTrace(data);
-                }
-            }
-        } catch (e) {
-            console.error("Failed to fetch agent trace", e);
-        } finally {
-            if (traceRequestIdRef.current === requestId) {
-                setTraceLoading(false);
-            }
-        }
-    };
-
-    const mergeProgressFromAgentEvent = (event: AgentRunEvent) => {
+    const mergeProgressFromAgentEvent = useCallback((event: AgentRunEvent) => {
         if (!event || !['tool_call', 'browser_action'].includes(event.event_type)) return;
         const payload = event.payload || {};
         const eventRunId = event.run_id || selectedRunId;
@@ -2586,22 +1893,47 @@ export default function AgentsPage() {
                 },
             };
         });
-    };
+    }, [selectedRunId]);
+
+    const {
+        fetchRun,
+        fetchAgentEvents,
+        fetchAgentTrace,
+        fetchSpecs,
+        mergeAgentEvents,
+    } = useAgentRunDetail({
+        selectedRunId,
+        projectId: currentProject?.id,
+        activeRun,
+        traceTab,
+        fetchHistory,
+        setActiveRun,
+        setAgentEvents,
+        setAgentTrace,
+        setTraceLoading,
+        setSpecResult,
+        setTraceSearch,
+        setTraceSpanType,
+    });
+
+    useAgentRunEventsStream({
+        selectedRunId,
+        activeRun,
+        projectId: currentProject?.id,
+        agentEventsRef,
+        fetchRun,
+        fetchAgentEvents,
+        fetchAgentTrace,
+        fetchHistory,
+        mergeAgentEvents,
+        mergeProgressFromAgentEvent,
+    });
 
     const fetchFlowSpecAgentRun = async (id: string) => {
         try {
-            const [runRes, eventsRes] = await Promise.all([
-                fetch(`${API_BASE}/api/agents/runs/${id}`),
-                fetch(`${API_BASE}/api/agents/runs/${id}/events?limit=100`),
-            ]);
-            if (runRes.ok) {
-                const data = await runRes.json();
-                setFlowSpecAgentRun(data);
-            }
-            if (eventsRes.ok) {
-                const events = await eventsRes.json();
-                setFlowSpecAgentEvents(Array.isArray(events) ? events : []);
-            }
+            const data = await fetchFlowSpecAgentRunApi(id);
+            setFlowSpecAgentRun(data.run);
+            setFlowSpecAgentEvents(data.events);
         } catch (e) {
             console.error("Failed to fetch spec generation run", e);
         }
@@ -2614,21 +1946,6 @@ export default function AgentsPage() {
         return () => window.clearInterval(interval);
     }, [flowSpecAgentRunId, flowModalOpen]);
 
-    // Fetch specs for exploration run
-    const fetchSpecs = async (runId: string) => {
-        try {
-            const res = await fetch(`${API_BASE}/api/agents/exploratory/${runId}/specs`);
-            if (res.ok) {
-                const data = await res.json();
-                if (data.specs) {
-                    setSpecResult(data);
-                }
-            }
-        } catch (e) {
-            console.error("Failed to fetch specs", e);
-        }
-    };
-
     // Fetch flow details from the API
     const fetchFlowDetails = async (flowId: string) => {
         if (!activeRun?.id) return;
@@ -2640,20 +1957,15 @@ export default function AgentsPage() {
         setFlowSpecAgentEvents([]);
         setFlowSpecError(null);
         try {
-            const res = await fetch(`${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}`);
-            if (res.ok) {
-                const data = await res.json();
-                setSelectedFlow(data.flow);
-                setAgentActionIntent({ type: 'none' });
-                updateWorkspaceQuery({ specItemId: '', specItemType: '' });
-                setFlowModalOpen(true);
-            } else {
-                const error = await res.json();
-                toast.error(`Failed to load flow details: ${error.detail || 'Unknown error'}`);
-            }
+            const data = await fetchExploratoryFlowDetails(activeRun.id, flowId);
+            setSelectedFlow(data.flow);
+            setAgentActionIntent({ type: 'none' });
+            updateWorkspaceQuery({ specItemId: '', specItemType: '' });
+            setFlowModalOpen(true);
         } catch (e) {
             console.error("Failed to fetch flow details", e);
-            toast.error("Failed to load flow details. Please try again.");
+            const message = e instanceof Error ? e.message : 'Please try again.';
+            toast.error(`Failed to load flow details: ${message}`);
         } finally {
             setLoadingFlowDetails(false);
         }
@@ -2725,16 +2037,7 @@ export default function AgentsPage() {
         setFlowSpecAgentEvents([]);
         setFlowSpecError(null);
         try {
-            const url = forceRegenerate
-                ? `${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}/generate?force_regenerate=true`
-                : `${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}/generate`;
-
-            const res = await fetch(url, { method: 'POST' });
-            if (!res.ok) {
-                const error = await res.json().catch(() => ({}));
-                throw new Error(error.detail || `HTTP ${res.status}`);
-            }
-            const data = await res.json();
+            const data = await generateExploratoryFlowSpec(activeRun.id, flowId, forceRegenerate);
 
             // Cached result → show immediately
             if (data.cached || data.status === 'success') {
@@ -2864,18 +2167,12 @@ export default function AgentsPage() {
         setFlowSpecError(null);
         setWorkspaceStatus(`Generating test spec from ${kind === 'finding' ? 'finding' : 'test idea'} ${item.id}.`);
         try {
-            const params = new URLSearchParams({ item_type: kind });
-            if (currentProject?.id) params.set('project_id', currentProject.id);
-            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/report-items/${encodeURIComponent(item.id)}/generate-spec?${params}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(reportSpecBrowserAuthBody(reportSpecAuthMode, reportSpecAuthSessionId)),
+            const data = await generateItemSpec({
+                runId: activeRun.id,
+                itemId: item.id,
+                itemType: kind,
+                body: reportSpecBrowserAuthBody(reportSpecAuthMode, reportSpecAuthSessionId),
             });
-            if (!res.ok) {
-                const error = await res.json().catch(() => ({}));
-                throw new Error(error.detail || `HTTP ${res.status}`);
-            }
-            const data = await res.json();
             if (data.agent_run_id) {
                 setFlowSpecAgentRunId(data.agent_run_id);
                 fetchFlowSpecAgentRun(data.agent_run_id);
@@ -3084,25 +2381,7 @@ export default function AgentsPage() {
         setSavingReportEdit(true);
         setReportEditError(null);
         try {
-            const params = new URLSearchParams();
-            if (currentProject?.id) params.set('project_id', currentProject.id);
-            let url = `${API_BASE}/api/agents/runs/${reportEditTarget.runId}/report`;
-            if (reportEditTarget.type !== 'overview') {
-                params.set('item_type', reportEditTarget.type);
-                url = `${API_BASE}/api/agents/runs/${reportEditTarget.runId}/report-items/${encodeURIComponent(reportEditTarget.itemId)}`;
-            }
-            const query = params.toString() ? `?${params}` : '';
-            const res = await fetch(`${url}${query}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(reportEditTarget.type === 'overview' ? reportEditPayload() : { patch: reportEditPayload() }),
-            });
-            if (!res.ok) {
-                const error = await res.json().catch(() => ({}));
-                const detail = typeof error.detail === 'string' ? error.detail : error.detail?.message;
-                throw new Error(detail || `HTTP ${res.status}`);
-            }
-            const data = await res.json();
+            const data = await saveReportPatch(reportEditTarget, reportEditPayload());
             const updatedRun = normalizeReportPatchResponse(data);
             if (!updatedRun) throw new Error('The server did not return the updated run.');
             updateRunFromReportPatch(updatedRun);
@@ -3125,20 +2404,7 @@ export default function AgentsPage() {
         setImportingRequirementIds(prev => Array.from(new Set([...prev, ...markers])));
         setReportImportError(null);
         try {
-            const params = new URLSearchParams();
-            if (currentProject?.id) params.set('project_id', currentProject.id);
-            const query = params.toString() ? `?${params}` : '';
-            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/report-requirements/import${query}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(selectedIds.length > 0 ? { item_ids: selectedIds } : { import_all: true }),
-            });
-            if (!res.ok) {
-                const error = await res.json().catch(() => ({}));
-                const detail = typeof error.detail === 'string' ? error.detail : error.detail?.message;
-                throw new Error(detail || `HTTP ${res.status}`);
-            }
-            const data = await res.json();
+            const data = await importRequirements(activeRun.id, selectedIds);
             if (data.run) {
                 setActiveRun(data.run);
                 setHistory(prev => prev.map(run => run.id === data.run.id ? data.run : run));
@@ -3176,138 +2442,18 @@ export default function AgentsPage() {
         setSplittingSpec(true);
         setSplitResult(null);
         try {
-            // Extract spec name relative to specs directory
-            const specFile = generatedSpec.spec_file;
-            const specsIndex = specFile.indexOf('/specs/');
-            const specName = specsIndex !== -1 ? specFile.substring(specsIndex + 7) : specFile.split('/').slice(-2).join('/');
-
-            const res = await fetch(`${API_BASE}/specs/split`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_name: specName })
-            });
-
-            if (res.ok) {
-                const data = await res.json();
-                setSplitResult(data);
-                setWorkspaceStatus(`Split spec into ${data.count} files.`);
-                toast.success('Spec split into individual tests');
-            } else {
-                const error = await res.json();
-                toast.error(`Failed to split spec: ${error.detail || 'Unknown error'}`);
-            }
+            const data = await splitSpecFile(generatedSpec.spec_file);
+            setSplitResult(data);
+            setWorkspaceStatus(`Split spec into ${data.count} files.`);
+            toast.success('Spec split into individual tests');
         } catch (e) {
             console.error("Failed to split spec", e);
-            toast.error("Failed to split spec. Please try again.");
+            const message = e instanceof Error ? e.message : 'Please try again.';
+            toast.error(`Failed to split spec: ${message}`);
         } finally {
             setSplittingSpec(false);
         }
     };
-
-    // When selection changes
-    useEffect(() => {
-        if (!selectedRunId) {
-            setActiveRun(null);
-            setSpecResult(null);
-            setAgentEvents([]);
-            setAgentTrace(null);
-            setTraceSearch('');
-            setTraceSpanType('');
-            return;
-        }
-
-        if (pollInterval.current) clearInterval(pollInterval.current);
-        pollInterval.current = null;
-        runDetailAbortRef.current?.abort();
-
-        fetchRun(selectedRunId);
-        fetchAgentEvents(selectedRunId);
-        fetchSpecs(selectedRunId);
-
-        return () => {
-            if (pollInterval.current) clearInterval(pollInterval.current);
-            pollInterval.current = null;
-            runDetailAbortRef.current?.abort();
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selectedRunId, currentProject?.id]);
-
-    useEffect(() => {
-        if (!selectedRunId || !activeRun || !LIVE_AGENT_STATUSES.has(activeRun.status)) return;
-        let cancelled = false;
-        let attempts = 0;
-
-        const backfillEvents = async () => {
-            const lastSequence = agentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
-            await fetchAgentEvents(selectedRunId, lastSequence);
-        };
-
-        const scheduleReconnect = () => {
-            if (cancelled) return;
-            if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
-            attempts += 1;
-            const delay = Math.min(15000, 750 * Math.pow(2, Math.min(attempts, 5)));
-            agentEventReconnectTimerRef.current = setTimeout(async () => {
-                agentEventReconnectTimerRef.current = null;
-                await backfillEvents();
-                await fetchRun(selectedRunId);
-                connect();
-            }, delay);
-        };
-
-        const connect = () => {
-            if (cancelled || agentEventSourceRef.current) return;
-            const lastSequence = agentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
-            const projectQuery = currentProject?.id ? `&project_id=${encodeURIComponent(currentProject.id)}` : '';
-            const source = new EventSource(`${API_BASE}/api/agents/runs/${selectedRunId}/events/stream?after_sequence=${lastSequence}${projectQuery}`);
-            agentEventSourceRef.current = source;
-            source.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    attempts = 0;
-                    mergeAgentEvents([data]);
-                    mergeProgressFromAgentEvent(data);
-                } catch {
-                    source.close();
-                    agentEventSourceRef.current = null;
-                    scheduleReconnect();
-                }
-            };
-            source.addEventListener('complete', () => {
-                source.close();
-                agentEventSourceRef.current = null;
-                window.setTimeout(() => {
-                    void fetchRun(selectedRunId);
-                    void fetchAgentTrace(selectedRunId);
-                    void fetchHistory();
-                }, 500);
-            });
-            source.onerror = () => {
-                source.close();
-                agentEventSourceRef.current = null;
-                scheduleReconnect();
-            };
-        };
-
-        void backfillEvents();
-        connect();
-        return () => {
-            cancelled = true;
-            if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
-            agentEventReconnectTimerRef.current = null;
-            agentEventSourceRef.current?.close();
-            agentEventSourceRef.current = null;
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selectedRunId, activeRun?.status, currentProject?.id]);
-
-    useEffect(() => {
-        if (!selectedRunId || !activeRun) return;
-        if (traceTab === 'timeline' && !isAgentRunTerminal(activeRun.status)) return;
-        void fetchAgentTrace(selectedRunId);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selectedRunId, activeRun?.status, traceTab, currentProject?.id]);
-
 
     const definitionById = useMemo(() => new Map(agentDefinitions.map(definition => [definition.id, definition])), [agentDefinitions]);
     const selectedDefinition = useMemo(() => definitionById.get(selectedDefinitionId), [definitionById, selectedDefinitionId]);
@@ -3321,6 +2467,7 @@ export default function AgentsPage() {
     const resetDefinitionForm = () => {
         setDefinitionForm(defaultDefinitionForm(agentRuntime));
         setDefinitionFormError(null);
+        setDefinitionRuntimeOpen(false);
     };
 
     const openCreateAgentBuilder = () => {
@@ -3351,6 +2498,7 @@ export default function AgentsPage() {
 
     const closeCustomAgentBuilder = () => {
         setBuilderOpen(false);
+        setDefinitionRuntimeOpen(false);
         setDefinitionFormError(null);
         if (agentActionIntent.type === 'createAgent') {
             setAgentActionIntent({ type: 'none' });
@@ -3412,32 +2560,20 @@ export default function AgentsPage() {
         setSavingDefinition(true);
         try {
             const isEdit = Boolean(definitionForm.id);
-            const url = isEdit
-                ? `${API_BASE}/api/agents/definitions/${definitionForm.id}${currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : ''}`
-                : `${API_BASE}/api/agents/definitions`;
-            const res = await fetch(url, {
-                method: isEdit ? 'PUT' : 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: definitionForm.name,
-                    description: definitionForm.description,
-                    system_prompt: definitionForm.system_prompt,
-                    runtime: definitionForm.runtime,
-                    timeout_seconds: definitionForm.timeout_seconds,
-                    tool_ids: definitionForm.tool_ids,
-                    test_data_refs: definitionForm.test_data_refs.split(',').map(s => s.trim()).filter(Boolean),
-                    project_id: currentProject?.id,
-                }),
+            const saved = await saveDefinitionRecord(definitionForm.id || null, {
+                name: definitionForm.name,
+                description: definitionForm.description,
+                system_prompt: definitionForm.system_prompt,
+                runtime: definitionForm.runtime,
+                timeout_seconds: definitionForm.timeout_seconds,
+                tool_ids: definitionForm.tool_ids,
+                test_data_refs: definitionForm.test_data_refs.split(',').map(s => s.trim()).filter(Boolean),
+                project_id: currentProject?.id,
             });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.detail || 'Failed to save agent');
-            }
-            const saved = await res.json();
             await fetchAgentDefinitionsFresh();
             selectDefinition(saved.id);
             selectAgentMode('custom');
-            const nextView = returnToAfterSave || (isEdit && workspaceView === 'library') ? 'library' : 'run';
+            const nextView = isEdit && workspaceView === 'library' ? 'library' : 'run';
             setWorkspaceView(nextView);
             updateWorkspaceQuery({ create: false, view: nextView });
             setBuilderOpen(false);
@@ -3454,13 +2590,7 @@ export default function AgentsPage() {
 
     const archiveDefinition = async (definition: AgentDefinition) => {
         try {
-            const res = await fetch(`${API_BASE}/api/agents/definitions/${definition.id}${currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : ''}`, {
-                method: 'DELETE',
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.detail || 'Failed to archive agent');
-            }
+            await archiveDefinitionRecord(definition.id);
             await fetchAgentDefinitionsFresh();
             if (selectedDefinitionId === definition.id) selectDefinition('');
             setWorkspaceStatus(`Archived ${definition.name}.`);
@@ -3471,7 +2601,7 @@ export default function AgentsPage() {
         }
     };
 
-    const handleRun = async () => {
+    const handleRun = async (submittedTargetUrl?: string) => {
         const validationError = validateAgentRunInput({
             selectedAgent: 'custom',
             selectedDefinitionId,
@@ -3498,13 +2628,15 @@ export default function AgentsPage() {
                 return;
             }
 
+            const targetUrl = (submittedTargetUrl || '').trim() || url.trim() || targetUrlRef.current.trim() || (typeof document !== 'undefined'
+                ? ((document.getElementById('agents-target-url') as HTMLInputElement | null)?.value || '').trim()
+                : '');
             const testDataRefsList = testDataRefs ? testDataRefs.split(',').map(s => s.trim()).filter(Boolean) : [];
 
-            const endpoint = `${API_BASE}/api/agents/definitions/${selectedDefinitionId}/runs`;
             const selectedRuntime = selectedDefinition?.runtime || agentRuntime;
             const body = {
-                prompt: instructions || `Inspect ${url || 'the current application context'} and report useful QA findings.`,
-                url: url || undefined,
+                prompt: instructions || `Inspect ${targetUrl || 'the current application context'} and report useful QA findings.`,
+                url: targetUrl || undefined,
                 runtime: selectedRuntime,
                 test_data_refs: testDataRefsList,
                 config: {
@@ -3514,18 +2646,7 @@ export default function AgentsPage() {
                 project_id: currentProject?.id,
             };
 
-            const res = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-
-            if (!res.ok) {
-                const err = await res.json();
-                throw new Error(err.detail || 'Agent run failed');
-            }
-
-            const data = await res.json();
+            const data = await startAgentDefinitionRun(selectedDefinitionId, body);
             // Refresh history but select the new run
             await fetchHistory();
             selectRun(data.run_id);
@@ -3545,14 +2666,7 @@ export default function AgentsPage() {
         if (!activeRun) return;
         setRunControlPending(action);
         try {
-            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
-            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/${action}${projectQuery}`, {
-                method: 'POST',
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(data.detail || `Failed to ${action} agent run`);
-            }
+            const data = await controlAgentRunApi(activeRun.id, action, currentProject?.id);
             setActiveRun(data);
             await fetchHistory();
             setWorkspaceStatus(`Run ${action} request sent.`);
@@ -3568,14 +2682,7 @@ export default function AgentsPage() {
         if (!activeRun || !isAgentRunTerminal(activeRun.status)) return;
         setRunControlPending('retry');
         try {
-            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
-            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/retry${projectQuery}`, {
-                method: 'POST',
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(data.detail || 'Failed to retry agent run');
-            }
+            const data = await retryAgentRunApi(activeRun.id, currentProject?.id);
             setActiveRun(data);
             await fetchHistory();
             selectRun(activeRun.id);
@@ -3590,8 +2697,7 @@ export default function AgentsPage() {
 
     const exportAgentTrace = () => {
         if (!activeRun) return;
-        const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
-        window.open(`${API_BASE}/api/agents/runs/${activeRun.id}/trace/export${projectQuery}`, '_blank', 'noopener,noreferrer');
+        window.open(agentRunTraceExportUrl(activeRun.id, currentProject?.id), '_blank', 'noopener,noreferrer');
     };
 
     const handleSynthesize = async () => {
@@ -3611,16 +2717,7 @@ export default function AgentsPage() {
 
         setIsSynthesizing(true);
         try {
-            const res = await fetch(`${API_BASE}/api/agents/exploratory/${selectedRunId}/synthesize`, {
-                method: 'POST'
-            });
-
-            if (!res.ok) {
-                const err = await res.json();
-                throw new Error(err.detail || 'Spec synthesis failed');
-            }
-
-            const data = await res.json();
+            await synthesizeExploratorySpecs(selectedRunId);
 
             // Poll for specs
             setTimeout(() => {
@@ -3670,6 +2767,12 @@ export default function AgentsPage() {
             phase: 'item-not-found',
         });
     }, [missingReportSpecItemMessage, agentActionIntent]);
+
+    useEffect(() => {
+        if (agentActionIntent.type !== 'reviewReportSpec' || !reportSpecReview?.item) return;
+        const kind = agentActionIntent.itemType === 'finding' ? 'finding' : 'test idea';
+        setWorkspaceStatus(`Reviewing ${kind} ${reportSpecReview.item.id} for spec generation.`);
+    }, [agentActionIntent, reportSpecReview]);
 
     const flowSpecLatestImage = sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
     const flowSpecRunLive = Boolean(flowSpecAgentRun && LIVE_AGENT_STATUSES.has(flowSpecAgentRun.status));
@@ -5028,22 +4131,31 @@ export default function AgentsPage() {
                             )}
                         </div>
 
-                        <div className="agents-run-field">
-                            <label htmlFor="agents-target-url">Target URL</label>
-                            <input
-                                id="agents-target-url"
-                                name="targetUrl"
-                                type="url"
-                                placeholder="Optional target URL"
-                                value={url}
-                                onChange={e => setUrl(e.target.value)}
-                                autoComplete="url"
-                                style={{
-                                    width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
-                                    border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                }}
-                            />
-                        </div>
+                        {runSetupReady && (!selectedDefinitionId || selectedDefinition) && (
+                            <div className="agents-run-field">
+                                <label htmlFor="agents-target-url">Target URL</label>
+                                <input
+                                    id="agents-target-url"
+                                    name="targetUrl"
+                                    type="url"
+                                    placeholder="Optional target URL"
+                                    defaultValue={url}
+                                    onChange={e => {
+                                        targetUrlRef.current = e.target.value;
+                                        setUrl(e.target.value);
+                                    }}
+                                    onInput={e => {
+                                        targetUrlRef.current = e.currentTarget.value;
+                                        setUrl(e.currentTarget.value);
+                                    }}
+                                    autoComplete="url"
+                                    style={{
+                                        width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
+                                        border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
+                                    }}
+                                />
+                            </div>
+                        )}
 
                         <div className="agents-run-field">
                             <label htmlFor="agents-custom-session-select">Browser Login Session</label>
@@ -5179,7 +4291,10 @@ export default function AgentsPage() {
                         <div className="agents-run-footer">
                         <button
                             className="agents-start-button"
-                            onClick={handleRun}
+                            onClick={() => {
+                                const submittedTargetUrl = (document.getElementById('agents-target-url') as HTMLInputElement | null)?.value || '';
+                                void handleRun(submittedTargetUrl);
+                            }}
                             disabled={isStarting}
                         >
                             {isStarting ? <><Loader2 className="spin" size={16} /> Starting...</> : <><Play size={16} /> Start Agent</>}
@@ -5285,14 +4400,16 @@ export default function AgentsPage() {
                                     <Button type="button" variant="outline" onClick={() => selectWorkspaceView('history')}>
                                         <RotateCcw size={14} /> Open History
                                     </Button>
-                                    <Button type="button" variant="outline" onClick={() => { selectWorkspaceView('library'); openCreateAgentBuilder(); }}>
+                                    <Button type="button" variant="outline" onClick={openCreateAgentBuilder}>
                                         <Plus size={14} /> Create Agent
                                     </Button>
                                     <Button type="button" variant="outline" onClick={() => openAssistantWithPrompt('Help me choose or draft an agent prompt for this project.')}>
                                         <MessageSquare size={14} /> Ask Assistant
                                     </Button>
                                     <Button type="button" variant="outline" asChild>
-                                        <Link href="/workflow"><ArrowRight size={14} /> Workflow</Link>
+                                        <Link href={returnToAfterSave || '/workflow'}>
+                                            <ArrowRight size={14} /> {returnToAfterSave ? 'Return to Workflow' : 'Workflow'}
+                                        </Link>
                                     </Button>
                                 </div>
                             </div>
@@ -5981,14 +5098,63 @@ export default function AgentsPage() {
                                 <div className="agents-builder-split">
                                     <div className="agents-builder-field">
                                         <Label htmlFor="definition-runtime">Runtime</Label>
-                                        <Select value={definitionForm.runtime} onValueChange={value => setDefinitionForm({ ...definitionForm, runtime: value })}>
-                                            <SelectTrigger id="definition-runtime" aria-label="Runtime">
-                                                <SelectValue />
-                                            </SelectTrigger>
-                                            <SelectContent className="agents-runtime-select-content" sideOffset={8}>
-                                                <SelectItem value="claude_sdk">Claude SDK</SelectItem>
-                                            </SelectContent>
-                                        </Select>
+                                        <div style={{ position: 'relative' }}>
+                                            <button
+                                                id="definition-runtime"
+                                                type="button"
+                                                aria-label="Runtime"
+                                                aria-haspopup="listbox"
+                                                aria-expanded={definitionRuntimeOpen}
+                                                onClick={() => setDefinitionRuntimeOpen(open => !open)}
+                                                className="agents-report-edit-select-trigger"
+                                                style={{
+                                                    width: '100%',
+                                                    justifyContent: 'space-between',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                }}
+                                            >
+                                                Claude SDK
+                                                <ChevronDown size={14} />
+                                            </button>
+                                            {definitionRuntimeOpen && (
+                                                <div
+                                                    role="listbox"
+                                                    aria-label="Options"
+                                                    className="agents-runtime-select-content"
+                                                    style={{
+                                                        position: 'absolute',
+                                                        zIndex: 60,
+                                                        top: 'calc(100% + 0.35rem)',
+                                                        left: 0,
+                                                        right: 0,
+                                                        padding: '0.25rem',
+                                                    }}
+                                                >
+                                                    <button
+                                                        type="button"
+                                                        role="option"
+                                                        aria-selected={definitionForm.runtime === 'claude_sdk'}
+                                                        onClick={() => {
+                                                            setDefinitionForm({ ...definitionForm, runtime: 'claude_sdk' });
+                                                            setDefinitionRuntimeOpen(false);
+                                                        }}
+                                                        style={{
+                                                            width: '100%',
+                                                            border: 0,
+                                                            background: 'transparent',
+                                                            color: 'var(--text)',
+                                                            padding: '0.45rem 0.55rem',
+                                                            textAlign: 'left',
+                                                            borderRadius: '6px',
+                                                            cursor: 'pointer',
+                                                        }}
+                                                    >
+                                                        Claude SDK
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                     <div className="agents-builder-field">
                                         <Label htmlFor="definition-timeout">Timeout seconds</Label>
