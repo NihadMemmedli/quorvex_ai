@@ -2,16 +2,24 @@ from pathlib import Path
 
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from orchestrator.api.models_db import Project, RepoIndexedFile, RepoIndexSnapshot
-from orchestrator.api.models_db import PrChangedFile, PrImpactAnalysis
-from orchestrator.api.models_db import PrSelectedTest, TestImpactMap as _TestImpactMap
+from orchestrator.api.models_db import (
+    PrChangedFile,
+    PrImpactAnalysis,
+    Project,
+    PrSelectedTest,
+    RepoIndexedFile,
+    RepoIndexSnapshot,
+)
+from orchestrator.api.models_db import TestImpactMap as _TestImpactMap
 from orchestrator.services.pr_test_advisor import (
     ChangedFileInput,
     RepoFileInput,
-    TestInventoryItem as _TestInventoryItem,
     analyze_pr_changes,
     index_repository_snapshot,
     select_impacted_tests,
+)
+from orchestrator.services.pr_test_advisor import (
+    TestInventoryItem as _TestInventoryItem,
 )
 
 

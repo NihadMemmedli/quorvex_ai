@@ -10,6 +10,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from orchestrator.utils.agent_runner import AgentResult
 from orchestrator.workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
@@ -21,7 +22,6 @@ from orchestrator.workflows.agentic_quality import (
     normalize_test_critic,
     normalize_test_design,
 )
-from orchestrator.utils.agent_runner import AgentResult
 
 memory_stub = types.ModuleType("orchestrator.memory")
 memory_stub.get_memory_manager = lambda *args, **kwargs: None
@@ -674,7 +674,7 @@ async def test_pipeline_repairs_generation_validation_and_continues(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_planned_pipeline_records_and_consumes_planner_draft(tmp_path: Path):
+async def test_planned_pipeline_records_and_consumes_planner_draft(tmp_path: Path, monkeypatch):
     spec = tmp_path / "spec.md"
     spec.write_text("# Test\nNavigate to https://example.com\n1. Click Save")
     run_dir = tmp_path / "run"
@@ -723,6 +723,15 @@ async def test_planned_pipeline_records_and_consumes_planner_draft(tmp_path: Pat
         tmp_path,
     )
     pipeline.native_planner = FakePlanner()
+
+    async def fake_debug_validate_planner_draft_script(**_kwargs):
+        return {"attempted": True, "status": "passed", "tool_calls": ["test_debug"]}
+
+    monkeypatch.setattr(
+        pipeline,
+        "_debug_validate_planner_draft_script",
+        fake_debug_validate_planner_draft_script,
+    )
 
     result = await pipeline.run(str(spec), run_dir, skip_planning=False)
 

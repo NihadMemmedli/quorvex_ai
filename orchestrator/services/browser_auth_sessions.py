@@ -37,7 +37,6 @@ from orchestrator.utils.playwright_mcp import (
     write_playwright_mcp_config,
 )
 
-
 BASE_DIR = Path(__file__).resolve().parents[2]
 AUTH_SESSIONS_DIR = Path(
     os.environ.get(

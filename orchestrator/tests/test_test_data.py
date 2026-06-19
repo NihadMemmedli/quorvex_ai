@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-test-data")
 os.environ.setdefault("REQUIRE_AUTH", "false")

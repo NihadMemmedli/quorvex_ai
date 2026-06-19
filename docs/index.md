@@ -80,14 +80,16 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
 
 ## Quick Start
 
+All useful setup paths require AI provider credentials. Copy the relevant environment file, set your provider token, and run `make check-env` before relying on generated output.
+
 | Setup | Best for | Command |
 |-------|----------|---------|
-| Full Docker dev | Main local workflow with dashboard, queues, storage, VNC, and frontend hot reload | `make dev` |
-| Company/server runtime | App runtime for company-managed DNS/TLS/nginx | `make start` |
-| Minimal Docker | Legacy local-only demo on smaller machines with SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
-| Repo-managed nginx | Legacy single-host path | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` |
+| Evaluator demo | Fastest local product trial with the lightweight SQLite stack | `docker compose -f docker-compose.minimal.yml up -d` |
+| Contributor dev | Full Docker development stack with dashboard, queues, storage, VNC, and frontend hot reload | `make dev` |
+| Production/company | Compose app behind company DNS/TLS/nginx in external-nginx mode | `make start` |
+| Repo-managed nginx | Legacy single-host path, opt-in only | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` |
 
-=== "Minimal Docker (Recommended)"
+=== "Evaluator Demo"
 
     ```bash
     git clone https://github.com/NihadMemmedli/quorvex_ai.git
@@ -100,7 +102,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
 
     Open [http://localhost:3000](http://localhost:3000) for the dashboard.
 
-=== "Full Docker Dev"
+=== "Contributor Dev"
 
     ```bash
     git clone https://github.com/NihadMemmedli/quorvex_ai.git
@@ -112,7 +114,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
 
     Open [http://localhost:3000](http://localhost:3000) for the dashboard.
 
-=== "Local Dev"
+=== "Local Native Dev"
 
     ```bash
     git clone https://github.com/NihadMemmedli/quorvex_ai.git
@@ -131,7 +133,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     ```
 
 !!! tip
-    `make dev` starts the full Docker stack with local code mounting and frontend hot reload. See the [Getting Started](tutorials/getting-started.md) tutorial for the full walkthrough.
+    `make dev` starts the full Docker stack with local code mounting and frontend hot reload. Production/company deployments use `make start` behind company-managed DNS/TLS/nginx. See the [Getting Started](tutorials/getting-started.md) tutorial for the full walkthrough.
 
 ![Quorvex AI Dashboard](assets/dashboard-screenshot.png)
 
@@ -174,6 +176,12 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     ---
 
     Pick minimal Docker, full Docker, local dev, production, workers, or Kubernetes based on your goal.
+
+-   :material-folder-star-outline: **[Curated Examples](tutorials/examples.md)**
+
+    ---
+
+    Maintained UI, API, authenticated-flow, and generated-output examples for evaluation and review.
 
 -   :material-file-document-outline: **[Reference](reference/cli.md)**
 

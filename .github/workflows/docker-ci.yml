@@ -6,27 +6,29 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
+    name: Docker build and optional AI smoke
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build Docker image
         run: docker build -t quorvex-ai .
 
-      - name: Run Smoke Test (Self-Healing)
+      - name: Optional smoke test with AI credentials
         env:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ secrets.ANTHROPIC_DEFAULT_SONNET_MODEL }}
         run: |
           if [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-            echo "ANTHROPIC_AUTH_TOKEN is not configured; skipping Docker smoke test."
+            echo "ANTHROPIC_AUTH_TOKEN is not configured; skipping optional Docker AI smoke test."
             exit 0
           fi
 

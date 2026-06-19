@@ -16,8 +16,8 @@ pytestmark = pytest.mark.integration
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from orchestrator.services.browser_pool import InMemoryBrowserPool, OperationType, RedisBrowserResourcePool, SlotStatus
 from orchestrator.services.agent_queue import AgentTask, AgentTaskStatus
+from orchestrator.services.browser_pool import InMemoryBrowserPool, OperationType, RedisBrowserResourcePool, SlotStatus
 
 
 class _FakeRedis:

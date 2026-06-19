@@ -36,7 +36,7 @@ elif not hasattr(sys.modules["slowapi"].Limiter, "limit"):
 
         return decorator
 
-    setattr(sys.modules["slowapi"].Limiter, "limit", _limit)
+    sys.modules["slowapi"].Limiter.limit = _limit
 
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, select

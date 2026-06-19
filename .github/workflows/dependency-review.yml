@@ -1,0 +1,27 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dependency Review disabled
+        if: ${{ vars.DEPENDENCY_REVIEW_ENABLED != 'true' }}
+        run: |
+          echo "Dependency Review requires GitHub dependency graph support."
+          echo "Set repository variable DEPENDENCY_REVIEW_ENABLED=true after enabling dependency graph."
+
+      - uses: actions/checkout@v7
+        if: ${{ vars.DEPENDENCY_REVIEW_ENABLED == 'true' }}
+
+      - uses: actions/dependency-review-action@v4
+        if: ${{ vars.DEPENDENCY_REVIEW_ENABLED == 'true' }}
+        with:
+          fail-on-severity: high

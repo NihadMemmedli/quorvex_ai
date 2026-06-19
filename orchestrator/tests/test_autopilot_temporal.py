@@ -41,8 +41,8 @@ if "slowapi" not in sys.modules:
     sys.modules["slowapi.errors"] = slowapi_errors
     sys.modules["slowapi.util"] = slowapi_util
 
-from orchestrator.api import db as db_module
 from orchestrator.api import autopilot as autopilot_api
+from orchestrator.api import db as db_module
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
     AutoPilotPhase,
@@ -51,9 +51,14 @@ from orchestrator.api.models_db import (
     AutoPilotSpecTask,
     AutoPilotTestTask,
     Project,
+)
+from orchestrator.api.models_db import (
     TestDataItem as DBTestDataItem,
+)
+from orchestrator.api.models_db import (
     TestDataSet as DBTestDataSet,
 )
+from orchestrator.services import temporal_client
 from orchestrator.services.autopilot_activities import (
     _build_config_from_session,
     _temporal_autopilot_execution_env,
@@ -62,7 +67,6 @@ from orchestrator.services.autopilot_activities import (
 )
 from orchestrator.services.browser_auth_sessions import create_browser_auth_session
 from orchestrator.services.custom_workflow_worker import get_worker_contract
-from orchestrator.services import temporal_client
 from orchestrator.services.temporal_client import TemporalUnavailableError, TemporalWorkflowStart
 from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline, _effective_test_generation_parallelism
 

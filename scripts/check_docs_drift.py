@@ -251,6 +251,28 @@ def fastapi_routes_from_file(path: Path) -> set[tuple[str, str]]:
                 continue
             routes.add((method.upper(), join_paths(prefix, route_path)))
 
+    routes.update(literal_api_route_table_routes(tree))
+    return routes
+
+
+def literal_api_route_table_routes(tree: ast.AST) -> set[tuple[str, str]]:
+    routes: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "routes" for target in node.targets):
+            continue
+        if not isinstance(node.value, (ast.List, ast.Tuple)):
+            continue
+
+        for item in node.value.elts:
+            if not isinstance(item, (ast.List, ast.Tuple)) or len(item.elts) < 2:
+                continue
+            method = constant_string(item.elts[0])
+            route_path = constant_string(item.elts[1])
+            if not method or method.lower() not in API_METHODS or route_path is None:
+                continue
+            routes.add((method.upper(), normalize_path(route_path)))
     return routes
 
 

@@ -277,10 +277,14 @@ class TestRunEndpoints:
 class TestAgentRunHistoryEndpoints:
     def _cleanup(self, run_ids: list[str]) -> None:
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent, AgentTraceSnapshot, AgentTraceSpan
 
         with Session(engine) as session:
             for run_id in run_ids:
+                for span in session.exec(select(AgentTraceSpan).where(AgentTraceSpan.run_id == run_id)).all():
+                    session.delete(span)
+                for snapshot in session.exec(select(AgentTraceSnapshot).where(AgentTraceSnapshot.run_id == run_id)).all():
+                    session.delete(snapshot)
                 for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
                     session.delete(event)
                 run = session.get(AgentRun, run_id)
@@ -376,9 +380,583 @@ class TestAgentRunHistoryEndpoints:
         finally:
             self._cleanup(run_ids)
 
+    def test_agent_run_events_endpoint_filters_and_preserves_project_scope(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+        from orchestrator.services.agent_run_events import create_agent_run_event
+
+        marker = f"events-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_ids[0])
+                assert run is not None
+                run.project_id = "default"
+                session.add(run)
+                session.commit()
+
+            event = create_agent_run_event(
+                run_id=run_ids[0],
+                event_type="tool_call",
+                level="debug",
+                message="Using Read",
+                payload={"tool_name": "Read"},
+            )
+            assert event is not None
+
+            response = client.get(f"/api/agents/runs/{run_ids[0]}/events?event_type=tool_call&level=debug")
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data) == 1
+            assert data[0]["event_type"] == "tool_call"
+            assert data[0]["payload"] == {"tool_name": "Read"}
+
+            forbidden = client.get(f"/api/agents/runs/{run_ids[0]}/events?project_id=other-project")
+            assert forbidden.status_code == 404
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_events_stream_emits_complete_frame_for_terminal_run(self, client):
+        marker = f"stream-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            with client.stream("GET", f"/api/agents/runs/{run_ids[0]}/events/stream?after_sequence=1") as response:
+                assert response.status_code == 200
+                assert response.headers["content-type"].startswith("text/event-stream")
+                body = next(response.iter_text())
+            assert "event: complete" in body
+            assert f'"run_id": "{run_ids[0]}"' in body
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_trace_endpoints_preserve_spans_and_export_header(self, client):
+        from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span
+
+        marker = f"trace-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            snapshot = ensure_trace_snapshot(
+                run_id=run_ids[0],
+                prompt="Inspect checkout with Bearer abc.def.ghi",
+                runtime="claude_sdk",
+                allowed_tools=["Read"],
+            )
+            span = record_trace_span(
+                run_id=run_ids[0],
+                span_type="tool_result",
+                name="Read result",
+                tool_name="Read",
+                success=True,
+                output_preview={"content": "ok"},
+            )
+            assert snapshot is not None
+            assert span is not None
+
+            spans_response = client.get(f"/api/agents/runs/{run_ids[0]}/trace/spans?tool=Read&q=result")
+            assert spans_response.status_code == 200
+            spans = spans_response.json()
+            assert any(item["id"] == span.id for item in spans)
+
+            trace_response = client.get(f"/api/agents/runs/{run_ids[0]}/trace")
+            assert trace_response.status_code == 200
+            trace = trace_response.json()
+            assert trace["snapshot"]["trace_id"] == snapshot.id
+            assert trace["correlation"]["run_id"] == run_ids[0]
+
+            export_response = client.get(f"/api/agents/runs/{run_ids[0]}/trace/export")
+            assert export_response.status_code == 200
+            assert export_response.headers["content-disposition"] == f'attachment; filename="agent-trace-{run_ids[0]}.json"'
+            exported = export_response.json()
+            assert exported["schema"] == "quorvex.agent_trace_export.v1"
+            assert exported["snapshot"]["trace_id"] == snapshot.id
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_observability_routes_registered_from_observability_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_run_observability"
+        assert endpoints[("GET", "/api/agents/runs")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/events")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/events/stream")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/trace")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/trace/spans")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/trace/export")] == expected_module
+        assert endpoints[("GET", "/api/agents/temporal/health")] == expected_module
+
+
+class TestAgentRunLaunchEndpoints:
+    """Test agent run launch route ownership."""
+
+    def test_agent_run_launch_route_registered_from_launch_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        assert endpoints[("POST", "/api/agents/runs")] == "orchestrator.api.agent_run_launch"
+
+    def test_agent_run_launch_docs_source_map_points_to_launch_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_run_launch.py`"
+        assert f"| POST | `/api/agents/runs` | {expected_source} |" in endpoints_doc
+        assert "Agent run launch" in router_map
+        assert expected_source in router_map
+
+
+class TestAgentCodingPatchEndpoints:
+    """Test coding-agent patch review endpoints."""
+
+    PATCH_TEXT = (
+        "diff --git a/docs/reference/coding-patch-test.md b/docs/reference/coding-patch-test.md\n"
+        "new file mode 100644\n"
+        "index 0000000..e69de29\n"
+        "--- /dev/null\n"
+        "+++ b/docs/reference/coding-patch-test.md\n"
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+    )
+
+    def _endpoint(self, method: str, path: str):
+        from orchestrator.api.main import app
+
+        for route in app.routes:
+            if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
+                return route.endpoint
+        raise AssertionError(f"Route not registered: {method} {path}")
+
+    def _runs_dir(self) -> Path:
+        endpoint = self._endpoint("GET", "/api/agents/runs/{id}/coding/diff")
+        runs_dir = endpoint.__globals__.get("RUNS_DIR")
+        if runs_dir is not None:
+            return Path(runs_dir)
+        from orchestrator.api import main as main_module
+
+        return main_module.RUNS_DIR
+
+    def _patch_artifact_name(self) -> str:
+        endpoint = self._endpoint("GET", "/api/agents/runs/{id}/coding/diff")
+        return endpoint.__globals__.get("CODING_ARTIFACT_PATCH", "proposed.patch")
+
+    def _cleanup(self, run_id: str) -> None:
+        from orchestrator.api import main as main_module
+        from orchestrator.api import spec_files
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        with Session(engine) as session:
+            for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                session.delete(event)
+            run = session.get(AgentRun, run_id)
+            if run:
+                session.delete(run)
+            session.commit()
+
+        for root in {self._runs_dir(), main_module.RUNS_DIR, spec_files.RUNS_DIR}:
+            if root:
+                shutil.rmtree(Path(root) / run_id, ignore_errors=True)
+
+    def _seed_run(
+        self,
+        run_id: str,
+        *,
+        agent_type: str = "coding",
+        status: str = "completed",
+        patch_text: str | None = PATCH_TEXT,
+        result: dict | None = None,
+    ) -> None:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        self._cleanup(run_id)
+        with Session(engine) as session:
+            run = AgentRun(
+                id=run_id,
+                agent_type=agent_type,
+                status=status,
+                config_json=json.dumps({"prompt": "patch checkout"}),
+            )
+            if result is not None:
+                run.result = result
+            session.add(run)
+            session.commit()
+
+        if patch_text is not None:
+            run_dir = self._runs_dir() / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / self._patch_artifact_name()).write_text(patch_text, encoding="utf-8")
+            (run_dir / "summary.md").write_text("Summary body\n", encoding="utf-8")
+            (run_dir / "review.md").write_text("Review body\n", encoding="utf-8")
+
+    def test_coding_patch_routes_registered_from_coding_patch_router(self):
+        from orchestrator.api.main import app
+
+        registered_routes = [
+            (method, route.path, route.endpoint.__module__)
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        ]
+
+        expected_module = "orchestrator.api.agent_coding_patch"
+        expected_routes = (
+            ("GET", "/api/agents/runs/{id}/coding/diff"),
+            ("POST", "/api/agents/runs/{id}/coding/reject"),
+            ("POST", "/api/agents/runs/{id}/coding/apply"),
+        )
+        for expected_route in expected_routes:
+            matches = [module for method, path, module in registered_routes if (method, path) == expected_route]
+            assert matches == [expected_module]
+
+    def test_coding_patch_docs_source_map_points_to_coding_patch_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_coding_patch.py`"
+        for route in (
+            "/api/agents/runs/{id}/coding/diff",
+            "/api/agents/runs/{id}/coding/reject",
+            "/api/agents/runs/{id}/coding/apply",
+        ):
+            assert f"| GET | `{route}`" in endpoints_doc or f"| POST | `{route}`" in endpoints_doc
+            assert f"| GET | `{route}` | {expected_source} |" in endpoints_doc or f"| POST | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent coding patch review" in router_map
+        assert expected_source in router_map
+
+    def test_get_coding_patch_diff_returns_diff_payload(self, client, monkeypatch):
+        run_id = f"coding-diff-{uuid4()}"
+        diff_endpoint = self._endpoint("GET", "/api/agents/runs/{id}/coding/diff")
+        monkeypatch.setitem(
+            diff_endpoint.__globals__,
+            "validate_patch_for_repo",
+            lambda _patch_text, _repo_root: types.SimpleNamespace(paths=("docs/reference/coding-patch-test.md",)),
+        )
+
+        self._seed_run(run_id)
+        try:
+            response = client.get(f"/api/agents/runs/{run_id}/coding/diff")
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["run_id"] == run_id
+            assert data["status"] == "completed"
+            assert data["valid"] is True
+            assert data["validation_error"] is None
+            assert data["affected_files"] == ["docs/reference/coding-patch-test.md"]
+            assert data["diff"] == self.PATCH_TEXT
+            assert data["summary"] == "Summary body\n"
+            assert data["review"] == "Review body\n"
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/agents/runs/{run_id}/coding/diff"),
+            ("post", "/api/agents/runs/{run_id}/coding/reject"),
+            ("post", "/api/agents/runs/{run_id}/coding/apply"),
+        ],
+    )
+    def test_coding_patch_endpoints_return_404_for_missing_run(self, client, method, path):
+        run_id = f"missing-coding-run-{uuid4()}"
+        response = getattr(client, method)(path.format(run_id=run_id))
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/agents/runs/{run_id}/coding/diff"),
+            ("post", "/api/agents/runs/{run_id}/coding/reject"),
+            ("post", "/api/agents/runs/{run_id}/coding/apply"),
+        ],
+    )
+    def test_coding_patch_endpoints_reject_non_coding_run(self, client, method, path):
+        run_id = f"non-coding-run-{uuid4()}"
+        self._seed_run(run_id, agent_type="custom")
+        try:
+            response = getattr(client, method)(path.format(run_id=run_id))
+            assert response.status_code == 400
+            assert response.json()["detail"] == "Run is not a coding agent run"
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/agents/runs/{run_id}/coding/diff"),
+            ("post", "/api/agents/runs/{run_id}/coding/apply"),
+        ],
+    )
+    def test_coding_patch_endpoints_return_404_for_missing_patch_artifact(self, client, method, path):
+        run_id = f"missing-patch-{uuid4()}"
+        self._seed_run(run_id, patch_text=None)
+        try:
+            response = getattr(client, method)(path.format(run_id=run_id))
+            assert response.status_code == 404
+            assert response.json()["detail"] == "Coding patch artifact not found"
+        finally:
+            self._cleanup(run_id)
+
+    def test_reject_coding_patch_persists_status_and_event(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        run_id = f"reject-coding-patch-{uuid4()}"
+        self._seed_run(run_id, status="running")
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/reject")
+            assert response.status_code == 200, response.text
+            assert response.json() == {"status": "rejected", "run_id": run_id}
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert run.result["patch_status"] == "rejected"
+                assert run.progress["phase"] == "rejected"
+                assert run.progress["patch_status"] == "rejected"
+                event = session.exec(
+                    select(AgentRunEvent).where(
+                        AgentRunEvent.run_id == run_id,
+                        AgentRunEvent.event_type == "coding_patch_rejected",
+                    )
+                ).one()
+                assert event.message == "Coding agent patch rejected."
+                assert event.payload["patch_status"] == "rejected"
+        finally:
+            self._cleanup(run_id)
+
+    def test_apply_coding_patch_requires_completed_or_partial_run(self, client):
+        run_id = f"running-coding-patch-{uuid4()}"
+        self._seed_run(run_id, status="running")
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/apply")
+            assert response.status_code == 409
+            assert response.json()["detail"] == "Coding run must be completed before applying a patch"
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize("status", ["completed", "completed_partial"])
+    def test_apply_coding_patch_uses_patched_helper_for_completed_and_partial_runs(self, client, monkeypatch, status):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        run_id = f"apply-coding-patch-{status}-{uuid4()}"
+        calls = []
+
+        def fake_apply_patch_to_repo(patch_text: str, repo_root):
+            calls.append((patch_text, repo_root))
+            return {"affected_files": ["docs/reference/coding-patch-test.md"], "stdout": "ok"}
+
+        apply_endpoint = self._endpoint("POST", "/api/agents/runs/{id}/coding/apply")
+        monkeypatch.setitem(apply_endpoint.__globals__, "apply_patch_to_repo", fake_apply_patch_to_repo)
+
+        self._seed_run(run_id, status=status)
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/apply")
+            assert response.status_code == 200, response.text
+            assert response.json() == {
+                "status": "applied",
+                "run_id": run_id,
+                "affected_files": ["docs/reference/coding-patch-test.md"],
+            }
+            assert calls and calls[0][0] == self.PATCH_TEXT
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert run.result["patch_status"] == "applied"
+                assert run.result["applied_files"] == ["docs/reference/coding-patch-test.md"]
+                assert run.progress["phase"] == "applied"
+                assert run.progress["patch_status"] == "applied"
+                event = session.exec(
+                    select(AgentRunEvent).where(
+                        AgentRunEvent.run_id == run_id,
+                        AgentRunEvent.event_type == "coding_patch_applied",
+                    )
+                ).one()
+                assert event.payload["affected_files"] == ["docs/reference/coding-patch-test.md"]
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize(
+        ("patch_status", "expected_detail"),
+        [
+            ("applied", "Coding patch has already been applied"),
+            ("rejected", "Coding patch has been rejected"),
+        ],
+    )
+    def test_apply_coding_patch_rejects_already_applied_or_rejected_state(
+        self, client, monkeypatch, patch_status, expected_detail
+    ):
+        run_id = f"conflict-coding-patch-{patch_status}-{uuid4()}"
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("apply_patch_to_repo should not run for conflicting patch state")
+
+        apply_endpoint = self._endpoint("POST", "/api/agents/runs/{id}/coding/apply")
+        monkeypatch.setitem(apply_endpoint.__globals__, "apply_patch_to_repo", fail_if_called)
+
+        self._seed_run(run_id, result={"patch_status": patch_status})
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/apply")
+            assert response.status_code == 409
+            assert response.json()["detail"] == expected_detail
+        finally:
+            self._cleanup(run_id)
+
+
+class TestAgentReportEndpoints:
+    """Test custom agent report API endpoints."""
+
+    REPORT_ROUTES = (
+        ("GET", "/api/agents/runs/{id}/report"),
+        ("PATCH", "/api/agents/runs/{run_id}/report"),
+        ("PATCH", "/api/agents/runs/{run_id}/report-items/{item_id}"),
+        ("GET", "/api/agents/reports/search"),
+        ("POST", "/api/agents/runs/{run_id}/report-requirements/import"),
+    )
+
+    def test_agent_report_routes_registered_from_report_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_reports"
+        for route in self.REPORT_ROUTES:
+            assert endpoints[route] == expected_module
+
+    def test_agent_report_docs_source_map_points_to_report_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_reports.py`"
+        for method, route in self.REPORT_ROUTES:
+            assert f"| {method} | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent reports" in router_map
+        assert expected_source in router_map
+
+    @pytest.mark.parametrize(
+        ("method", "path", "payload"),
+        [
+            ("get", "/api/agents/runs/missing-report-run/report?project_id=default", None),
+            ("patch", "/api/agents/runs/missing-report-run/report?project_id=default", {"summary": "Updated"}),
+            (
+                "patch",
+                "/api/agents/runs/missing-report-run/report-items/F-001?item_type=finding&project_id=default",
+                {"patch": {"title": "Updated"}},
+            ),
+            (
+                "post",
+                "/api/agents/runs/missing-report-run/report-requirements/import?project_id=default",
+                {"item_ids": ["R-001"]},
+            ),
+        ],
+    )
+    def test_agent_report_missing_run_returns_404(self, client, method, path, payload):
+        response = getattr(client, method)(path, json=payload) if payload is not None else getattr(client, method)(path)
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
+
+class TestAgentExploratoryEndpoints:
+    """Test exploratory and spec generation API route ownership."""
+
+    EXPLORATORY_ROUTES = (
+        ("POST", "/api/agents/exploratory"),
+        ("GET", "/api/agents/exploratory/flow-spec-jobs/{job_id}"),
+        ("POST", "/api/agents/exploratory/{run_id}/analyze-prerequisites"),
+        ("DELETE", "/api/agents/exploratory/{run_id}/flows/{flow_id}"),
+        ("GET", "/api/agents/exploratory/{run_id}/flows/{flow_id}"),
+        ("PUT", "/api/agents/exploratory/{run_id}/flows/{flow_id}"),
+        ("POST", "/api/agents/exploratory/{run_id}/flows/{flow_id}/generate"),
+        ("POST", "/api/agents/exploratory/{run_id}/flows/{flow_id}/spec"),
+        ("GET", "/api/agents/exploratory/{run_id}/specs"),
+        ("POST", "/api/agents/exploratory/{run_id}/synthesize"),
+        ("POST", "/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec"),
+    )
+
+    def test_agent_exploratory_routes_registered_from_exploratory_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_exploratory"
+        for route in self.EXPLORATORY_ROUTES:
+            assert endpoints[route] == expected_module
+
+    def test_agent_exploratory_docs_source_map_points_to_exploratory_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_exploratory.py`"
+        for method, route in self.EXPLORATORY_ROUTES:
+            assert f"| {method} | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent exploratory/spec generation" in router_map
+        assert expected_source in router_map
+
 
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
+
+    def test_agent_definition_routes_registered_from_agent_definitions_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_definitions"
+        assert endpoints[("GET", "/api/agents/tools/catalog")] == expected_module
+        assert endpoints[("GET", "/api/agents/definitions")] == expected_module
+        assert endpoints[("POST", "/api/agents/definitions")] == expected_module
+        assert endpoints[("GET", "/api/agents/definitions/{definition_id}")] == expected_module
+        assert endpoints[("PUT", "/api/agents/definitions/{definition_id}")] == expected_module
+        assert endpoints[("DELETE", "/api/agents/definitions/{definition_id}")] == expected_module
+        assert endpoints[("POST", "/api/agents/definitions/{definition_id}/runs")] == expected_module
+
+    def test_agent_tool_catalog_groups_tools_by_category(self, client):
+        response = client.get("/api/agents/tools/catalog")
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert isinstance(data["tools"], list)
+        assert isinstance(data["categories"], dict)
+        assert data["tools"]
+        assert data["categories"]
+        for tool in data["tools"]:
+            assert tool in data["categories"][tool["category"]]
 
     def test_create_list_and_archive_agent_definition(self, client):
         """POST /api/agents/definitions should persist custom agents without server errors."""
@@ -413,6 +991,136 @@ class TestAgentDefinitionEndpoints:
         finally:
             archive_response = client.delete(f"/api/agents/definitions/{definition_id}?project_id=default")
             assert archive_response.status_code == 200, archive_response.text
+
+    def test_create_agent_definition_rejects_blank_name(self, client):
+        response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": "   ",
+                "system_prompt": "Inspect the target.",
+                "tool_ids": ["read_file"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Agent name is required"}
+
+    def test_create_agent_definition_rejects_blank_system_prompt(self, client):
+        response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": "Blank System Prompt Probe",
+                "system_prompt": "   ",
+                "tool_ids": ["read_file"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": "System prompt is required"}
+
+    @pytest.mark.parametrize(
+        ("tool_ids", "expected_detail"),
+        [
+            ([], "Select at least one tool for this agent"),
+            (["missing-tool"], "Unknown or disabled tools: missing-tool"),
+        ],
+    )
+    def test_create_agent_definition_preserves_invalid_tool_id_errors(self, client, tool_ids, expected_detail):
+        response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": "Invalid Tool Probe",
+                "system_prompt": "Inspect the target.",
+                "tool_ids": tool_ids,
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": expected_detail}
+
+    def test_run_agent_definition_creates_queued_temporal_agent_run(self, client, monkeypatch):
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+
+        class FakeAgentStatus:
+            active = 1
+            max_slots = 3
+            queued = 2
+
+        class FakeResourceManager:
+            def get_agent_status(self):
+                return FakeAgentStatus()
+
+        async def fake_get_resource_manager():
+            return FakeResourceManager()
+
+        async def fake_start_agent_run_temporal_or_fail(run, session, *, workflow_attempt=None):
+            run.temporal_workflow_id = f"agent-workflow-{run.id}"
+            run.temporal_run_id = "temporal-run-1"
+            session.add(run)
+            session.commit()
+
+        monkeypatch.setattr(main_module, "get_resource_manager", fake_get_resource_manager)
+        monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
+
+        create_response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": f"Run Probe {uuid4().hex}",
+                "system_prompt": "Inspect the target and report findings.",
+                "runtime": "claude_sdk",
+                "model_tier": "tool_deep",
+                "tool_ids": ["read_file"],
+            },
+        )
+        assert create_response.status_code == 200, create_response.text
+        definition_id = create_response.json()["id"]
+        run_id = None
+
+        try:
+            run_response = client.post(
+                f"/api/agents/definitions/{definition_id}/runs",
+                json={"project_id": "default", "prompt": "Inspect https://example.com", "url": "https://example.com"},
+            )
+
+            assert run_response.status_code == 200, run_response.text
+            data = run_response.json()
+            run_id = data["run_id"]
+            assert data["status"] == "queued"
+            assert data["agent_definition_id"] == definition_id
+            assert data["temporal_workflow_id"] == f"agent-workflow-{run_id}"
+            assert data["temporal_run_id"] == "temporal-run-1"
+            assert data["agent_runtime"] == "claude_sdk"
+            assert data["queue_position"] == 3
+            assert data["agent_slots"] == {"active": 1, "max": 3, "queued": 3}
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert run.agent_type == "custom"
+                assert run.status == "queued"
+                assert run.project_id == "default"
+                config = json.loads(run.config_json)
+                assert config["agent_definition_id"] == definition_id
+                assert config["allowed_tools"] == ["Read"]
+                assert config["selected_tools"][0]["id"] == "read_file"
+        finally:
+            with Session(engine) as session:
+                if run_id:
+                    for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                        session.delete(event)
+                    run = session.get(AgentRun, run_id)
+                    if run:
+                        session.delete(run)
+                definition = session.get(AgentDefinition, definition_id)
+                if definition:
+                    session.delete(definition)
+                session.commit()
 
     def test_get_run_includes_live_browser_metadata(self, client, monkeypatch):
         """GET /runs/{id} should expose runtime metadata for live browser view."""
@@ -655,6 +1363,45 @@ class TestAgentDefinitionEndpoints:
 class TestAgentRunControlEndpoints:
     """Test autonomous agent pause/resume API endpoints."""
 
+    CONTROL_ROUTES = (
+        ("POST", "/api/agents/runs/{id}/pause"),
+        ("POST", "/api/agents/runs/{id}/resume"),
+        ("POST", "/api/agents/runs/{id}/cancel"),
+        ("POST", "/api/agents/runs/{id}/retry"),
+    )
+
+    def test_agent_run_control_routes_registered_from_control_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_run_control"
+        for route in self.CONTROL_ROUTES:
+            assert endpoints[route] == expected_module
+
+    def test_agent_run_control_docs_source_map_points_to_control_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_run_control.py`"
+        for method, route in self.CONTROL_ROUTES:
+            assert f"| {method} | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent run control" in router_map
+        assert expected_source in router_map
+
+    @pytest.mark.parametrize("action", ["pause", "resume", "cancel", "retry"])
+    def test_agent_run_control_missing_run_returns_404(self, client, action):
+        response = client.post(f"/api/agents/runs/missing-run/{action}")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
     def test_get_agent_run_merges_and_normalizes_live_queue_progress(self, client, monkeypatch):
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AgentRun
@@ -862,7 +1609,7 @@ class TestSpecEndpoints:
 
     def test_split_spec_regex_returns_extraction_metadata(self, client, tmp_path, monkeypatch):
         """POST /specs/split should report regex extraction when explicitly selected."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
 
         specs_dir = tmp_path / "specs"
         specs_dir.mkdir()
@@ -893,7 +1640,7 @@ Category: Happy Path
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         response = client.post(
             "/specs/split",
@@ -909,7 +1656,7 @@ Category: Happy Path
 
     def test_split_spec_rejects_regex_grouped_mode(self, client, tmp_path, monkeypatch):
         """Smart Groups require AI extraction."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
 
         specs_dir = tmp_path / "specs"
         specs_dir.mkdir()
@@ -928,7 +1675,7 @@ Category: Happy Path
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         response = client.post(
             "/specs/split",
@@ -940,13 +1687,13 @@ Category: Happy Path
 
     def test_list_specs_excludes_templates_by_default_and_can_return_templates(self, client, tmp_path, monkeypatch):
         """GET /specs/list should keep templates separate unless templates_only=true."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
 
         specs_dir = tmp_path / "specs"
         (specs_dir / "templates").mkdir(parents=True)
         (specs_dir / "regular.md").write_text("# Regular\n", encoding="utf-8")
         (specs_dir / "templates" / "example.md").write_text("# Template\n", encoding="utf-8")
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         response = client.get("/specs/list")
         assert response.status_code == 200
@@ -962,7 +1709,7 @@ Category: Happy Path
 
     def test_list_templates_respects_project_filter(self, client, tmp_path, monkeypatch):
         """GET /specs/list?templates_only=true should preserve project filtering."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
         from orchestrator.api.models_db import get_spec_metadata
@@ -975,7 +1722,7 @@ Category: Happy Path
         (specs_dir / "templates").mkdir(parents=True)
         (specs_dir / included_name).write_text("# Project Template\n", encoding="utf-8")
         (specs_dir / excluded_name).write_text("# Other Template\n", encoding="utf-8")
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         with Session(engine) as session:
             session.add(DBSpecMetadata(spec_name=included_name, project_id=project_id, tags_json='["template"]'))
@@ -998,7 +1745,7 @@ Category: Happy Path
 
     def test_list_specs_includes_autopilot_spec_only_for_registered_project(self, client, tmp_path, monkeypatch):
         """Autopilot specs are visible only through the project recorded in SpecMetadata."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import Project, SpecMetadata, get_spec_metadata
 
@@ -1008,7 +1755,7 @@ Category: Happy Path
         specs_dir = tmp_path / "specs"
         (specs_dir / "autopilot" / session_id).mkdir(parents=True)
         (specs_dir / spec_name).write_text("# Checkout Flow\n", encoding="utf-8")
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         with Session(engine) as session:
             session.add(Project(id=project_id, name="Wetravel Project"))
@@ -1968,6 +2715,21 @@ class TestAISettings:
 class TestQueueEndpoints:
     """Test queue-related endpoints."""
 
+    def test_agent_queue_operation_routes_registered_from_agent_queue_ops(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        assert endpoints[("GET", "/api/agents/queue-status")] == "orchestrator.api.agent_queue_ops"
+        assert endpoints[("POST", "/api/agents/queue-flush")] == "orchestrator.api.agent_queue_ops"
+        assert endpoints[("POST", "/api/agents/queue-clean-stale")] == "orchestrator.api.agent_queue_ops"
+        assert endpoints[("POST", "/api/agents/queue-clean-orphans")] == "orchestrator.api.agent_queue_ops"
+
     def test_get_queue_status(self, client):
         """GET /queue-status should return queue information."""
         response = client.get("/queue-status")
@@ -2195,6 +2957,58 @@ class TestQueueEndpoints:
         assert data["cleaned"] == 1
         assert data["cancelled_orphaned"] == 1
         assert data["skipped_active"] == 2
+
+    def test_clean_orphaned_agent_queue_tasks_matches_stale_cleanup(
+        self, client, monkeypatch
+    ):
+        """POST /api/agents/queue-clean-orphans should remain a cleanup alias."""
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        cleanup_result = {
+            "cancelled_orphaned": 0,
+            "timed_out": 1,
+            "terminal_owner": 2,
+            "orphaned_queued": 0,
+            "stale_ownerless_queued": 0,
+            "missing_task_refs": 0,
+            "skipped_active": 3,
+        }
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def cleanup_orphaned_and_stale_tasks(self):
+                return cleanup_result.copy()
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+        monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+
+        stale_response = client.post("/api/agents/queue-clean-stale")
+        orphan_response = client.post("/api/agents/queue-clean-orphans")
+
+        assert stale_response.status_code == 200
+        assert orphan_response.status_code == 200
+        assert orphan_response.json() == stale_response.json()
+        assert orphan_response.json()["cleaned"] == 3
+
+    def test_flush_agent_queue_skips_when_redis_queue_inactive(
+        self, client, monkeypatch
+    ):
+        """POST /api/agents/queue-flush should skip when Redis queue mode is inactive."""
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", False)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+
+        response = client.post("/api/agents/queue-flush")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "skipped",
+            "message": "Agent queue not active (no Redis)",
+        }
 
 
 class TestDashboardEndpoints:

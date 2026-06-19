@@ -1,8 +1,11 @@
+import logging
 import os
 import sys
 import types
 from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-agent-memory-tests")
 os.environ.setdefault("REQUIRE_AUTH", "false")
@@ -12,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
 
 
 def _stub_chromadb(monkeypatch):
@@ -604,7 +607,11 @@ def test_memory_graph_llm_risky_edges_require_review(monkeypatch):
     from orchestrator.memory import agent_memory as agent_memory_module
     from orchestrator.memory import knowledge_graph as knowledge_graph_module
     from orchestrator.memory.agent_memory import AgentMemoryService
-    from orchestrator.memory.knowledge_graph import ExtractedEntity, MemoryKnowledgeGraphService, get_memory_knowledge_graph_service
+    from orchestrator.memory.knowledge_graph import (
+        ExtractedEntity,
+        MemoryKnowledgeGraphService,
+        get_memory_knowledge_graph_service,
+    )
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(engine)
@@ -1744,9 +1751,9 @@ def test_agent_runner_explicit_memory_scope_overrides_env_and_records_telemetry(
 
 def test_custom_agent_report_memory_capture_is_review_required(monkeypatch):
     _stub_slowapi(monkeypatch)
+    from orchestrator.api.main import _capture_custom_agent_report_memory
     from orchestrator.memory import agent_memory as agent_memory_module
     from orchestrator.memory.agent_memory import AgentMemoryService
-    from orchestrator.api.main import _capture_custom_agent_report_memory
 
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
@@ -1822,3 +1829,57 @@ def test_find_navigation_path_uses_page_node_type(monkeypatch):
     finally:
         sys.modules.pop("orchestrator.memory.vector_store", None)
         sys.modules.pop("orchestrator.memory.manager", None)
+
+
+def test_index_memory_skips_optional_vector_backend_base_exception(monkeypatch, caplog):
+    from orchestrator.api.models_db import AgentMemory
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    class VectorBackendPanic(BaseException):
+        pass
+
+    class FailingVectorStore:
+        def add_agent_memory(self, *args, **kwargs):
+            raise VectorBackendPanic("synthetic vector backend panic")
+
+    vector_store = types.ModuleType("orchestrator.memory.vector_store")
+    vector_store.get_vector_store = lambda project_id=None: FailingVectorStore()
+    monkeypatch.setitem(sys.modules, "orchestrator.memory.vector_store", vector_store)
+
+    memory = AgentMemory(
+        id="memory-panic",
+        kind="project_fact",
+        content="The dashboard route is /dashboard.",
+        project_id="project-a",
+    )
+
+    caplog.set_level(logging.WARNING, logger="orchestrator.memory.agent_memory")
+
+    AgentMemoryService()._index_memory(memory)
+
+    assert "Skipped optional vector indexing" in caplog.text
+    assert "memory-panic" in caplog.text
+    assert "project-a" in caplog.text
+
+
+def test_index_memory_reraises_process_control_base_exceptions(monkeypatch):
+    from orchestrator.api.models_db import AgentMemory
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    class InterruptingVectorStore:
+        def add_agent_memory(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    vector_store = types.ModuleType("orchestrator.memory.vector_store")
+    vector_store.get_vector_store = lambda project_id=None: InterruptingVectorStore()
+    monkeypatch.setitem(sys.modules, "orchestrator.memory.vector_store", vector_store)
+
+    memory = AgentMemory(
+        id="memory-interrupt",
+        kind="project_fact",
+        content="The dashboard route is /dashboard.",
+        project_id="project-a",
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        AgentMemoryService()._index_memory(memory)

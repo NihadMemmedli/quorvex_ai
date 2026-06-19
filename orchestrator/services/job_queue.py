@@ -88,7 +88,7 @@ class TestJob:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "TestJob":
+    def from_dict(cls, data: dict) -> TestJob:
         """Create from dictionary."""
         return cls(
             id=data["id"],

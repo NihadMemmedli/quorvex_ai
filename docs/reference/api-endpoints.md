@@ -61,7 +61,7 @@ Prefix: `/projects` | Source: `orchestrator/api/projects.py`
 
 ## Specs
 
-Source: `orchestrator/api/main.py` (registered directly on app)
+Source: `orchestrator/api/specs.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -85,7 +85,7 @@ Source: `orchestrator/api/main.py` (registered directly on app)
 
 ## Spec Metadata
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/specs.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -95,7 +95,7 @@ Source: `orchestrator/api/main.py`
 
 ## Runs
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/runs.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/agent_run_launch.py`; exploratory/spec generation: `orchestrator/api/agent_exploratory.py`; run control: `orchestrator/api/agent_run_control.py`; reports: `orchestrator/api/agent_reports.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -302,10 +302,16 @@ Source: `orchestrator/api/main.py`
 | GET | `/api/agents/runs/{id}` | Get agent run details | Optional |
 | GET | `/api/agents/runs/{id}/events` | List persisted lifecycle events for an agent run | Optional |
 | GET | `/api/agents/runs/{id}/events/stream` | Stream agent run lifecycle events over SSE | Optional |
+| GET | `/api/agents/runs/{id}/trace` | Get an agent run trace bundle | Optional |
+| GET | `/api/agents/runs/{id}/trace/spans` | List spans recorded for an agent run trace | Optional |
+| GET | `/api/agents/runs/{id}/trace/export` | Export an agent run trace bundle | Optional |
 | GET | `/api/agents/temporal/health` | Check Temporal readiness for standalone agent runs | Optional |
 | POST | `/api/agents/runs/{id}/pause` | Pause an agent run | Optional |
 | POST | `/api/agents/runs/{id}/resume` | Resume an agent run | Optional |
 | POST | `/api/agents/runs/{id}/cancel` | Cancel an agent run | Optional |
+| GET | `/api/agents/runs/{id}/coding/diff` | Preview a coding agent patch diff and validation status | Optional |
+| POST | `/api/agents/runs/{id}/coding/reject` | Mark a coding agent patch as rejected | Optional |
+| POST | `/api/agents/runs/{id}/coding/apply` | Apply a completed coding agent patch to the repository | Optional |
 | GET | `/api/agents/runs/{id}/report` | Get an agent run report | Optional |
 | GET | `/api/agents/reports/search` | Search generated agent reports | Optional |
 | GET | `/api/agents/tools/catalog` | List available agent tools | Optional |
@@ -325,14 +331,23 @@ Source: `orchestrator/api/main.py`
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | Generate spec for one flow | Optional |
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | Generate validated test via native pipeline | Optional |
 | GET | `/api/agents/exploratory/flow-spec-jobs/{id}` | Get exploratory flow-spec job status | Optional |
-| POST | `/api/agents/queue-flush` | Clear queued agent work | Optional |
-| POST | `/api/agents/queue-clean-orphans` | Clean orphaned agent queue entries | Optional |
 
-Agent types: `exploratory`, `writer`, `spec-synthesis`.
+Agent types: `coding`, `exploratory`, `writer`, `spec-synthesis`.
+
+## Agent Queue Operations
+
+Source: `orchestrator/api/agent_queue_ops.py`
+
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/api/agents/queue-status` | Agent queue status and browser slot usage | Optional |
+| POST | `/api/agents/queue-flush` | Clear queued agent work | Optional |
+| POST | `/api/agents/queue-clean-stale` | Clean stale agent queue entries | Optional |
+| POST | `/api/agents/queue-clean-orphans` | Clean orphaned agent queue entries | Optional |
 
 ## Auth Sessions
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/agent_sessions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -362,7 +377,7 @@ Source: `orchestrator/api/settings.py`
 
 ## Execution Settings
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/runtime_ops.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -371,7 +386,7 @@ Source: `orchestrator/api/main.py`
 
 ## Queue Management
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/runtime_ops.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -380,7 +395,7 @@ Source: `orchestrator/api/main.py`
 
 ## Browser Pool
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/runtime_ops.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -390,21 +405,21 @@ Source: `orchestrator/api/main.py`
 
 ## Resource Management
 
-Source: `orchestrator/api/main.py`
+Sources: `orchestrator/api/runtime_ops.py` (`/api/resources/*`), `orchestrator/api/agent_queue_ops.py` (`/api/agents/queue-status`)
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
 | GET | `/api/resources/status` | **DEPRECATED** -- use `/api/browser-pool/status` | Optional |
-| GET | `/api/agents/queue-status` | Agent queue status and browser slot usage | Optional |
+| GET | `/api/agents/queue-status` | Agent queue status and browser slot usage | Optional; source: `orchestrator/api/agent_queue_ops.py` |
 | POST | `/api/resources/cleanup` | Force cleanup of stale resources | Optional |
 
 ## Health
 
-Prefix: `/health` | Source: `orchestrator/api/health.py`
+Prefix: `/health` | Sources: `orchestrator/api/runtime_ops.py` (`GET /health`), `orchestrator/api/health.py` (storage health routes)
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
-| GET | `/health` | Basic health check (returns `{"status": "ok"}`) | No |
+| GET | `/health` | Runtime dependency health check | No |
 | GET | `/health/storage` | Comprehensive storage health (DB, MinIO, local) | No |
 | GET | `/health/backup` | Backup status and recent backups | No |
 | GET | `/health/alerts` | Active health alerts | No |
@@ -421,7 +436,7 @@ Prefix: `/health` | Source: `orchestrator/api/health.py`
 
 ## Backup
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/backup_control.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -752,7 +767,7 @@ AI assistant chat endpoints with conversation persistence and tool invocation.
 
 ## Import / Export
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/testrail_files.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -767,7 +782,7 @@ Source: `orchestrator/api/main.py`
 
 ## Debug
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/runtime_ops.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -777,7 +792,7 @@ Not intended for production use.
 
 ## Complete Route Coverage Index
 
-This generated index is used by `scripts/check_docs_drift.py` to keep the endpoint reference aligned with FastAPI decorators. The curated sections above explain the main product surfaces; this table provides full method/path coverage.
+This generated index is used by `scripts/check_docs_drift.py` to keep the endpoint reference aligned with FastAPI decorators and literal route tables. The curated sections above explain the main product surfaces; this table provides full method/path coverage.
 
 | Method | Path | Source |
 |--------|------|--------|
@@ -817,47 +832,59 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
 | PUT | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
 | PUT | `/api-testing/specs/{name}/tags` | `orchestrator/api/api_testing.py` |
-| GET | `/api/agents/definitions` | `orchestrator/api/main.py` |
-| POST | `/api/agents/definitions` | `orchestrator/api/main.py` |
-| DELETE | `/api/agents/definitions/{definition_id}` | `orchestrator/api/main.py` |
-| GET | `/api/agents/definitions/{definition_id}` | `orchestrator/api/main.py` |
-| PUT | `/api/agents/definitions/{definition_id}` | `orchestrator/api/main.py` |
-| POST | `/api/agents/definitions/{definition_id}/runs` | `orchestrator/api/main.py` |
-| POST | `/api/agents/exploratory` | `orchestrator/api/main.py` |
-| GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/main.py` |
-| POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/main.py` |
-| DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/main.py` |
-| GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/main.py` |
-| PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/main.py` |
-| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | `orchestrator/api/main.py` |
-| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/main.py` |
-| GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/main.py` |
-| POST | `/api/agents/exploratory/{run_id}/synthesize` | `orchestrator/api/main.py` |
-| POST | `/api/agents/queue-clean-orphans` | `orchestrator/api/main.py` |
-| POST | `/api/agents/queue-flush` | `orchestrator/api/main.py` |
-| GET | `/api/agents/queue-status` | `orchestrator/api/main.py` |
-| GET | `/api/agents/reports/search` | `orchestrator/api/main.py` |
-| GET | `/api/agents/runs` | `orchestrator/api/main.py` |
-| POST | `/api/agents/runs` | `orchestrator/api/main.py` |
-| GET | `/api/agents/runs/{id}` | `orchestrator/api/main.py` |
-| POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/main.py` |
-| GET | `/api/agents/runs/{id}/events` | `orchestrator/api/main.py` |
-| GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/main.py` |
-| POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/main.py` |
-| GET | `/api/agents/runs/{id}/report` | `orchestrator/api/main.py` |
-| POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/main.py` |
-| GET | `/api/agents/sessions` | `orchestrator/api/main.py` |
-| DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/main.py` |
-| POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/main.py` |
-| GET | `/api/agents/tools/catalog` | `orchestrator/api/main.py` |
-| POST | `/api/backup` | `orchestrator/api/main.py` |
-| GET | `/api/backup/status` | `orchestrator/api/main.py` |
-| POST | `/api/browser-pool/cleanup` | `orchestrator/api/main.py` |
-| GET | `/api/browser-pool/recent` | `orchestrator/api/main.py` |
-| GET | `/api/browser-pool/status` | `orchestrator/api/main.py` |
-| GET | `/api/key-rotation/status` | `orchestrator/api/main.py` |
+| GET | `/api/agents/definitions` | `orchestrator/api/agent_definitions.py` |
+| POST | `/api/agents/definitions` | `orchestrator/api/agent_definitions.py` |
+| DELETE | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
+| GET | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
+| PUT | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
+| POST | `/api/agents/definitions/{definition_id}/runs` | `orchestrator/api/agent_definitions.py` |
+| POST | `/api/agents/exploratory` | `orchestrator/api/agent_exploratory.py` |
+| GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/agent_exploratory.py` |
+| DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
+| GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
+| PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/agent_exploratory.py` |
+| GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/synthesize` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/queue-clean-orphans` | `orchestrator/api/agent_queue_ops.py` |
+| POST | `/api/agents/queue-clean-stale` | `orchestrator/api/agent_queue_ops.py` |
+| POST | `/api/agents/queue-flush` | `orchestrator/api/agent_queue_ops.py` |
+| GET | `/api/agents/queue-status` | `orchestrator/api/agent_queue_ops.py` |
+| GET | `/api/agents/reports/search` | `orchestrator/api/agent_reports.py` |
+| GET | `/api/agents/runs` | `orchestrator/api/agent_run_observability.py` |
+| POST | `/api/agents/runs` | `orchestrator/api/agent_run_launch.py` |
+| GET | `/api/agents/runs/{id}` | `orchestrator/api/agent_run_observability.py` |
+| POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/agent_run_control.py` |
+| POST | `/api/agents/runs/{id}/coding/apply` | `orchestrator/api/agent_coding_patch.py` |
+| GET | `/api/agents/runs/{id}/coding/diff` | `orchestrator/api/agent_coding_patch.py` |
+| POST | `/api/agents/runs/{id}/coding/reject` | `orchestrator/api/agent_coding_patch.py` |
+| GET | `/api/agents/runs/{id}/events` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/agent_run_observability.py` |
+| POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/agent_run_control.py` |
+| GET | `/api/agents/runs/{id}/report` | `orchestrator/api/agent_reports.py` |
+| POST | `/api/agents/runs/{id}/retry` | `orchestrator/api/agent_run_control.py` |
+| POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/agent_run_control.py` |
+| GET | `/api/agents/runs/{id}/trace` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/trace/export` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/trace/spans` | `orchestrator/api/agent_run_observability.py` |
+| PATCH | `/api/agents/runs/{run_id}/report` | `orchestrator/api/agent_reports.py` |
+| PATCH | `/api/agents/runs/{run_id}/report-items/{item_id}` | `orchestrator/api/agent_reports.py` |
+| GET | `/api/agents/sessions` | `orchestrator/api/agent_sessions.py` |
+| DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
+| POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
+| GET | `/api/agents/temporal/health` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/tools/catalog` | `orchestrator/api/agent_definitions.py` |
+| POST | `/api/backup` | `orchestrator/api/backup_control.py` |
+| GET | `/api/backup/status` | `orchestrator/api/backup_control.py` |
+| POST | `/api/browser-pool/cleanup` | `orchestrator/api/runtime_ops.py` |
+| GET | `/api/browser-pool/recent` | `orchestrator/api/runtime_ops.py` |
+| GET | `/api/browser-pool/status` | `orchestrator/api/runtime_ops.py` |
+| GET | `/api/key-rotation/status` | `orchestrator/api/runtime_ops.py` |
 | GET | `/api/memory/agent` | `orchestrator/api/memory.py` |
 | POST | `/api/memory/agent` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/agentic-context` | `orchestrator/api/memory.py` |
 | POST | `/api/memory/agent/consolidate` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/agent/context` | `orchestrator/api/memory.py` |
 | POST | `/api/memory/agent/verify-stale` | `orchestrator/api/memory.py` |
@@ -901,7 +928,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/memory/session-recall/window` | `orchestrator/api/memory.py` |
 | POST | `/api/memory/similar` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/stats` | `orchestrator/api/memory.py` |
-| GET | `/api/mobile-testing/health` | `orchestrator/api/main.py` |
+| GET | `/api/mobile-testing/health` | `orchestrator/api/runs.py` |
 | POST | `/api/prd/generate-test` | `orchestrator/api/prd.py` |
 | GET | `/api/prd/generation/{generation_id}` | `orchestrator/api/prd.py` |
 | GET | `/api/prd/generation/{generation_id}/log/stream` | `orchestrator/api/prd.py` |
@@ -918,8 +945,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | PUT | `/api/prd/{project_id}/features/{feature_slug}/requirements/{req_index}` | `orchestrator/api/prd.py` |
 | POST | `/api/prd/{project_id}/generate-plan` | `orchestrator/api/prd.py` |
 | GET | `/api/prd/{project_id}/generations` | `orchestrator/api/prd.py` |
-| POST | `/api/resources/cleanup` | `orchestrator/api/main.py` |
-| GET | `/api/resources/status` | `orchestrator/api/main.py` |
+| POST | `/api/resources/cleanup` | `orchestrator/api/runtime_ops.py` |
+| GET | `/api/resources/status` | `orchestrator/api/runtime_ops.py` |
 | POST | `/auth/login` | `orchestrator/api/auth.py` |
 | POST | `/auth/logout` | `orchestrator/api/auth.py` |
 | POST | `/auth/logout-all` | `orchestrator/api/auth.py` |
@@ -1031,9 +1058,9 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | PUT | `/database-testing/specs/{name}` | `orchestrator/api/database_testing.py` |
 | POST | `/database-testing/suggest/{run_id}` | `orchestrator/api/database_testing.py` |
 | GET | `/database-testing/summary` | `orchestrator/api/database_testing.py` |
-| GET | `/debug-imports` | `orchestrator/api/main.py` |
-| GET | `/execution-settings` | `orchestrator/api/main.py` |
-| PUT | `/execution-settings` | `orchestrator/api/main.py` |
+| GET | `/debug-imports` | `orchestrator/api/runtime_ops.py` |
+| GET | `/execution-settings` | `orchestrator/api/runtime_ops.py` |
+| PUT | `/execution-settings` | `orchestrator/api/runtime_ops.py` |
 | GET | `/exploration` | `orchestrator/api/exploration.py` |
 | GET | `/exploration/health` | `orchestrator/api/exploration.py` |
 | GET | `/exploration/queue/status` | `orchestrator/api/exploration.py` |
@@ -1058,7 +1085,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/exploration/{session_id}/issues` | `orchestrator/api/exploration.py` |
 | GET | `/exploration/{session_id}/results` | `orchestrator/api/exploration.py` |
 | POST | `/exploration/{session_id}/stop` | `orchestrator/api/exploration.py` |
-| POST | `/export/testrail` | `orchestrator/api/main.py` |
+| POST | `/export/testrail` | `orchestrator/api/testrail_files.py` |
 | POST | `/github/webhook/github` | `orchestrator/api/github_ci.py` |
 | DELETE | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
 | GET | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
@@ -1092,13 +1119,13 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/gitlab/{project_id}/remote-projects` | `orchestrator/api/gitlab_ci.py` |
 | POST | `/gitlab/{project_id}/test-connection` | `orchestrator/api/gitlab_ci.py` |
 | POST | `/gitlab/{project_id}/trigger-pipeline` | `orchestrator/api/gitlab_ci.py` |
-| GET | `/health` | `orchestrator/api/main.py` |
+| GET | `/health` | `orchestrator/api/runtime_ops.py` |
 | GET | `/health/alerts` | `orchestrator/api/health.py` |
 | GET | `/health/archival/stats` | `orchestrator/api/health.py` |
 | GET | `/health/backup` | `orchestrator/api/health.py` |
 | GET | `/health/storage` | `orchestrator/api/health.py` |
 | POST | `/health/storage/record` | `orchestrator/api/health.py` |
-| POST | `/import/testrail` | `orchestrator/api/main.py` |
+| POST | `/import/testrail` | `orchestrator/api/testrail_files.py` |
 | GET | `/jira/{project_id}/bug-report-jobs/{job_id}` | `orchestrator/api/jira.py` |
 | DELETE | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
 | GET | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
@@ -1240,8 +1267,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | DELETE | `/projects/{project_id}/members/{user_id}` | `orchestrator/api/projects.py` |
 | PUT | `/projects/{project_id}/members/{user_id}` | `orchestrator/api/projects.py` |
 | GET | `/projects/{project_id}/my-role` | `orchestrator/api/projects.py` |
-| GET | `/queue-status` | `orchestrator/api/main.py` |
-| POST | `/queue/clear` | `orchestrator/api/main.py` |
+| GET | `/queue-status` | `orchestrator/api/runtime_ops.py` |
+| POST | `/queue/clear` | `orchestrator/api/runtime_ops.py` |
 | GET | `/recordings` | `orchestrator/api/recordings.py` |
 | POST | `/recordings/start` | `orchestrator/api/recordings.py` |
 | GET | `/recordings/{recording_id}` | `orchestrator/api/recordings.py` |
@@ -1299,15 +1326,15 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/rtm/snapshots` | `orchestrator/api/rtm.py` |
 | GET | `/rtm/test/{test_name}/requirements` | `orchestrator/api/rtm.py` |
 | GET | `/rtm/trend` | `orchestrator/api/rtm.py` |
-| GET | `/runs` | `orchestrator/api/main.py` |
-| POST | `/runs` | `orchestrator/api/main.py` |
-| POST | `/runs/bulk` | `orchestrator/api/main.py` |
-| DELETE | `/runs/{id}` | `orchestrator/api/main.py` |
-| GET | `/runs/{id}` | `orchestrator/api/main.py` |
-| POST | `/runs/{id}/agentic-summary` | `orchestrator/api/main.py` |
-| GET | `/runs/{id}/log/stream` | `orchestrator/api/main.py` |
-| POST | `/runs/{id}/progress` | `orchestrator/api/main.py` |
-| POST | `/runs/{id}/stop` | `orchestrator/api/main.py` |
+| GET | `/runs` | `orchestrator/api/runs.py` |
+| POST | `/runs` | `orchestrator/api/runs.py` |
+| POST | `/runs/bulk` | `orchestrator/api/runs.py` |
+| DELETE | `/runs/{id}` | `orchestrator/api/runs.py` |
+| GET | `/runs/{id}` | `orchestrator/api/runs.py` |
+| POST | `/runs/{id}/agentic-summary` | `orchestrator/api/runs.py` |
+| GET | `/runs/{id}/log/stream` | `orchestrator/api/runs.py` |
+| POST | `/runs/{id}/progress` | `orchestrator/api/runs.py` |
+| POST | `/runs/{id}/stop` | `orchestrator/api/runs.py` |
 | POST | `/scheduling/validate-cron` | `orchestrator/api/scheduling.py` |
 | GET | `/scheduling/{project_id}/executions` | `orchestrator/api/scheduling.py` |
 | GET | `/scheduling/{project_id}/schedules` | `orchestrator/api/scheduling.py` |
@@ -1344,27 +1371,27 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/settings` | `orchestrator/api/settings.py` |
 | POST | `/settings` | `orchestrator/api/settings.py` |
 | POST | `/settings/test-connection` | `orchestrator/api/settings.py` |
-| GET | `/spec-metadata` | `orchestrator/api/main.py` |
-| GET | `/spec-metadata/{spec_name}` | `orchestrator/api/main.py` |
-| PUT | `/spec-metadata/{spec_name}` | `orchestrator/api/main.py` |
-| GET | `/specs` | `orchestrator/api/main.py` |
-| POST | `/specs` | `orchestrator/api/main.py` |
-| GET | `/specs/automated` | `orchestrator/api/main.py` |
-| POST | `/specs/create-folder` | `orchestrator/api/main.py` |
-| DELETE | `/specs/folder/{folder_path}` | `orchestrator/api/main.py` |
-| GET | `/specs/folders` | `orchestrator/api/main.py` |
-| GET | `/specs/list` | `orchestrator/api/main.py` |
-| POST | `/specs/move` | `orchestrator/api/main.py` |
-| POST | `/specs/register-folder` | `orchestrator/api/main.py` |
-| POST | `/specs/rename` | `orchestrator/api/main.py` |
-| POST | `/specs/split` | `orchestrator/api/main.py` |
-| DELETE | `/specs/{name}` | `orchestrator/api/main.py` |
-| GET | `/specs/{name}` | `orchestrator/api/main.py` |
-| PUT | `/specs/{name}` | `orchestrator/api/main.py` |
-| GET | `/specs/{name}/generated-code` | `orchestrator/api/main.py` |
-| PUT | `/specs/{name}/generated-code` | `orchestrator/api/main.py` |
-| GET | `/specs/{name}/info` | `orchestrator/api/main.py` |
-| POST | `/stop-all` | `orchestrator/api/main.py` |
+| GET | `/spec-metadata` | `orchestrator/api/specs.py` |
+| GET | `/spec-metadata/{spec_name}` | `orchestrator/api/specs.py` |
+| PUT | `/spec-metadata/{spec_name}` | `orchestrator/api/specs.py` |
+| GET | `/specs` | `orchestrator/api/specs.py` |
+| POST | `/specs` | `orchestrator/api/specs.py` |
+| GET | `/specs/automated` | `orchestrator/api/specs.py` |
+| POST | `/specs/create-folder` | `orchestrator/api/specs.py` |
+| DELETE | `/specs/folder/{folder_path}` | `orchestrator/api/specs.py` |
+| GET | `/specs/folders` | `orchestrator/api/specs.py` |
+| GET | `/specs/list` | `orchestrator/api/specs.py` |
+| POST | `/specs/move` | `orchestrator/api/specs.py` |
+| POST | `/specs/register-folder` | `orchestrator/api/specs.py` |
+| POST | `/specs/rename` | `orchestrator/api/specs.py` |
+| POST | `/specs/split` | `orchestrator/api/specs.py` |
+| DELETE | `/specs/{name}` | `orchestrator/api/specs.py` |
+| GET | `/specs/{name}` | `orchestrator/api/specs.py` |
+| PUT | `/specs/{name}` | `orchestrator/api/specs.py` |
+| GET | `/specs/{name}/generated-code` | `orchestrator/api/specs.py` |
+| PUT | `/specs/{name}/generated-code` | `orchestrator/api/specs.py` |
+| GET | `/specs/{name}/info` | `orchestrator/api/specs.py` |
+| POST | `/stop-all` | `orchestrator/api/runtime_ops.py` |
 | DELETE | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
 | GET | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
 | POST | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
@@ -1434,8 +1461,8 @@ These routes are included in the generated public-route drift check and are grou
 | GET | `/api/prd/generation/{generation_id}/events` | `orchestrator/api/prd.py` |
 | GET | `/api/prd/generation/{generation_id}/events/stream` | `orchestrator/api/prd.py` |
 | POST | `/api/prd/{prd_project_id}/import-requirements` | `orchestrator/api/prd.py` |
-| POST | `/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec` | `orchestrator/api/main.py` |
-| POST | `/api/agents/runs/{run_id}/report-requirements/import` | `orchestrator/api/main.py` |
+| POST | `/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/runs/{run_id}/report-requirements/import` | `orchestrator/api/agent_reports.py` |
 | GET | `/autonomous/{project_id}/missions/{mission_id}/artifacts` | `orchestrator/api/autonomous.py` |
 | POST | `/autopilot/recover-orphans` | `orchestrator/api/autopilot.py` |
 | GET | `/autopilot/temporal/health` | `orchestrator/api/autopilot.py` |

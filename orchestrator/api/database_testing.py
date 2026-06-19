@@ -1329,7 +1329,6 @@ async def list_db_specs(project_id: str = Query(...)):
 @router.get("/specs/{name:path}")
 async def get_db_spec(name: str, project_id: str = Query(...)):
     """Get a single database spec content."""
-    specs_dir = _get_specs_dir(project_id)
     target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
@@ -1365,7 +1364,6 @@ async def create_db_spec(req: CreateDbSpecRequest):
 @router.put("/specs/{name:path}")
 async def update_db_spec(name: str, req: UpdateDbSpecRequest, project_id: str = Query(...)):
     """Update an existing database spec."""
-    specs_dir = _get_specs_dir(project_id)
     target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
@@ -1378,7 +1376,6 @@ async def update_db_spec(name: str, req: UpdateDbSpecRequest, project_id: str = 
 @router.delete("/specs/{name:path}")
 async def delete_db_spec(name: str, project_id: str = Query(...)):
     """Delete a database spec."""
-    specs_dir = _get_specs_dir(project_id)
     target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():

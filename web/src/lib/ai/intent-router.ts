@@ -6,6 +6,7 @@ export type AssistantIntentName =
   | 'startExplorerAgent'
   | 'startDiscoveryExploration'
   | 'startAdhocCustomAgent'
+  | 'startCodingAgent'
   | 'createCustomAgentDefinition'
   | 'createWorkflow'
   | 'startAutoPilot'
@@ -72,6 +73,7 @@ const intentSchema = z.object({
     'startExplorerAgent',
     'startDiscoveryExploration',
     'startAdhocCustomAgent',
+    'startCodingAgent',
     'createCustomAgentDefinition',
     'createWorkflow',
     'startAutoPilot',
@@ -511,6 +513,19 @@ function normalizeRoute(route: RawIntentRoute, ctx: IntentRouterContext): Promis
   const url = firstUrlFromInput(input);
   const latestUserText = extractLatestUserText(ctx.messages);
 
+  if (route.intent === 'startCodingAgent') {
+    return action(
+      route,
+      'startCodingAgent',
+      {
+        prompt: asString(input.prompt) || asString(input.task) || latestUserText,
+        timeoutSeconds: asNumber(input.timeoutSeconds, 1800),
+        modelTier: asString(input.modelTier) || 'tool_deep',
+      },
+      'I prepared a coding agent approval action below. It will inspect the current repository and propose a diff only; applying the diff is a separate approval step.'
+    );
+  }
+
   if (['startExplorerAgent', 'startDiscoveryExploration', 'startAdhocCustomAgent', 'createCustomAgentDefinition', 'startAutoPilot', 'importOpenApiSpec'].includes(route.intent) && !url) {
     return clarify(route, Array.from(new Set([...missingFields, 'url'])));
   }
@@ -694,6 +709,7 @@ export async function routeAssistantIntent(ctx: IntentRouterContext): Promise<As
         'You classify Quorvex AI chatbot requests into structured intents.',
         'Only classify a mutating or start/generate intent when the user explicitly asks to create, generate, import, run, start, launch, or proceed.',
         'Use createCustomAgentDefinition when the user asks to save, define, or build a reusable custom agent without starting it now.',
+        'Use startCodingAgent when the user asks to inspect or modify the Quorvex repository code, fix tests/selectors/locators, update implementation files, or prepare a code diff. This intent does not require a URL.',
         'Use createWorkflow when the user asks to create, save, define, or build a reusable workflow/process/pipeline that runs a custom agent and turns its report into requirements or specs.',
         'For normal questions, status questions, explanations, analysis requests, and vague asks, use intent "unknown" so the main assistant can answer.',
         'Never invent required identifiers. If a required URL, spec name, or database connection is missing, set missingFields and write one concise clarifyingQuestion.',

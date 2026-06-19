@@ -30,15 +30,15 @@ from .models_db import PrdGenerationEvent, PrdGenerationResult, Project, Require
 
 # Import resource managers - using relative import since we're in orchestrator/api
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from services.browser_pool import OperationType as BrowserOpType
-from services.browser_pool import get_browser_pool
+from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 from orchestrator.utils.playwright_mcp import (
     browser_runtime_status,
     live_browser_display_diagnostics,
     prepare_run_playwright_config_content,
     write_playwright_test_mcp_config,
 )
-from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
+from services.browser_pool import OperationType as BrowserOpType
+from services.browser_pool import get_browser_pool
 
 logger = logging.getLogger(__name__)
 

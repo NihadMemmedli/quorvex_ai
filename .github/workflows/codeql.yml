@@ -1,0 +1,43 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "31 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  pr-scan-disabled:
+    name: CodeQL PR scan disabled
+    if: ${{ github.event_name == 'pull_request' && vars.CODEQL_PR_ENABLED != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Set repository variable CODEQL_PR_ENABLED=true to enable CodeQL pull request scanning."
+
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    if: ${{ github.event_name != 'pull_request' || vars.CODEQL_PR_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

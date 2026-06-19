@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlmodel import SQLModel, Session, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 
 os.environ.setdefault(
     "JWT_SECRET_KEY", "test-secret-key-for-native-pipeline-credentials"

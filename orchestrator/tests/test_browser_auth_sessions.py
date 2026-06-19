@@ -1,8 +1,8 @@
 import asyncio
-from contextlib import asynccontextmanager
 import os
 import sys
 import types
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -43,7 +43,6 @@ from sqlmodel import Session, SQLModel
 from orchestrator.api.credentials import set_project_credential
 from orchestrator.api.db import _run_migrations, engine
 from orchestrator.api.models_db import BrowserAuthSession, Project
-from orchestrator.services.temporal_client import TemporalWorkflowStart
 from orchestrator.services.browser_auth_sessions import (
     BROWSER_AUTH_CAPTURE_VERSION,
     BrowserAuthSessionError,
@@ -54,6 +53,7 @@ from orchestrator.services.browser_auth_sessions import (
     resolve_browser_auth_for_run,
     validate_browser_auth_session,
 )
+from orchestrator.services.temporal_client import TemporalWorkflowStart
 from orchestrator.utils.agent_runner import AgentResult
 
 

@@ -41,7 +41,8 @@ from sqlmodel import Session, SQLModel, select
 
 from orchestrator.api.db import _run_migrations, engine
 from orchestrator.api.main import app
-from orchestrator.api.models_db import AgentRun, BrowserAuthSession, Project, TestDataItem as DBTestDataItem
+from orchestrator.api.models_db import AgentRun, BrowserAuthSession, Project
+from orchestrator.api.models_db import TestDataItem as DBTestDataItem
 from orchestrator.api.models_db import TestDataSet as DBTestDataSet
 from orchestrator.memory.exploration_store import get_exploration_store
 from orchestrator.services.browser_auth_sessions import encrypt_storage_state

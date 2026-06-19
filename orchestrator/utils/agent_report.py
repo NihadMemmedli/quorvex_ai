@@ -6,7 +6,6 @@ import json
 import re
 from typing import Any
 
-
 CUSTOM_AGENT_REPORT_INSTRUCTIONS = """
 Final output contract:
 After your concise human-readable summary, include exactly one fenced JSON block with a top-level

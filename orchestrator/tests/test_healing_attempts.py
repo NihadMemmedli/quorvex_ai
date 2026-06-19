@@ -9,9 +9,9 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-healing-attempts")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
 from orchestrator.services.handoff_manifest import init_manifest, record_artifact
 from orchestrator.utils.agent_runner import AgentResult
+from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
 
 
 def _bare_pipeline() -> FullNativePipeline:

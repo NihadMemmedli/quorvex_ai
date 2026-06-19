@@ -1,5 +1,5 @@
-import sys
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner, ToolCall
 from orchestrator.workflows.native_planner import NativePlanner, SpecGenerationError
-
 
 VALID_PLAN = """# Test Plan: Checkout
 

@@ -14,8 +14,9 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
@@ -336,7 +337,7 @@ Then add:
                 "the input split spec explicitly asks for them."
             )
         else:
-            output_requirements = """
+            output_requirements = f"""
 ## Output Requirements
 Create balanced E2E scenario specs for "{feature_name}". Prefer 6-12 scenarios when the evidence supports it. Each scenario must be specific enough to run through the existing markdown-to-Playwright pipeline.
 
@@ -361,9 +362,7 @@ Return a split-ready plan with TC-XXX sections. Every TC must be independently r
 Then add:
 - `## Draft Playwright Script`
 - one fenced `typescript` code block containing a draft Playwright test file that covers the TC sections
-""".format(
-                feature_name=feature_name
-            )
+"""
             critical_scope = (
                 "**CRITICAL**: Your final text response MUST contain the full test "
                 "plan with all TC-XXX test cases, steps, and expected results. "

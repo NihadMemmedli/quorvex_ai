@@ -723,8 +723,15 @@ class AgentMemoryService:
                 "agent_type": memory.agent_type or "",
             }
             get_vector_store(project_id=memory.project_id or "default").add_agent_memory(memory.id, text, metadata)
-        except Exception:
-            logger.debug("Failed to index agent memory", exc_info=True)
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+            logger.warning(
+                "Skipped optional vector indexing for agent memory %s in project %s.",
+                memory.id,
+                memory.project_id or "default",
+                exc_info=True,
+            )
 
     def _sync_knowledge_graph(self, memory: AgentMemory) -> None:
         try:

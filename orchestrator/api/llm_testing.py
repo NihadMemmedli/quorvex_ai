@@ -162,7 +162,7 @@ You convert user requests into strict JSON. Return JSON only. Do not wrap the JS
 - json-valid: true
 - contains: high
 - contains: authentication
-- not-contains: ``` 
+- not-contains: ```
 
 ### TC-002: Test Case JSON
 **Input:** Create JSON for a test case named "Password reset email" with steps request reset and verify email arrives.
@@ -1568,7 +1568,7 @@ async def get_comparison(comparison_id: str, project_id: str = Query(...)):
 async def get_comparison_matrix(comparison_id: str, project_id: str = Query(...)):
     """Get case-by-case comparison matrix for a comparison run."""
     with Session(engine) as session:
-        comp = _get_comparison(session, comparison_id, project_id)
+        _get_comparison(session, comparison_id, project_id)
 
         runs = session.exec(select(LlmTestRun).where(LlmTestRun.comparison_id == comparison_id)).all()
 
@@ -2014,7 +2014,7 @@ async def import_csv_dataset(
 async def export_dataset(dataset_id: str, project_id: str = Query(...), format: str = Query("csv")):
     """Export dataset cases as CSV or JSON."""
     with Session(engine) as session:
-        dataset = _get_dataset(session, dataset_id, project_id)
+        _get_dataset(session, dataset_id, project_id)
 
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
@@ -2697,7 +2697,7 @@ async def bulk_compare_dataset(req: BulkCompareRequest):
 async def create_schedule(req: CreateScheduleRequest):
     """Create a new recurring dataset test schedule."""
     with Session(engine) as session:
-        dataset = _get_dataset(session, req.dataset_id, req.project_id or "default")
+        _get_dataset(session, req.dataset_id, req.project_id or "default")
         for pid in req.provider_ids:
             _get_provider(session, pid, req.project_id or "default")
 

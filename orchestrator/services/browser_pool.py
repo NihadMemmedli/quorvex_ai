@@ -47,7 +47,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Optional
 
 try:
     import redis.asyncio as redis
@@ -160,7 +159,7 @@ class InMemoryBrowserPool(AbstractBrowserPool):
     must acquire a slot from this pool before starting.
     """
 
-    _instance: Optional["InMemoryBrowserPool"] = None
+    _instance: InMemoryBrowserPool | None = None
     _lock: asyncio.Lock = None
 
     def __init__(self, max_browsers: int = None):
@@ -178,7 +177,7 @@ class InMemoryBrowserPool(AbstractBrowserPool):
         self._waiters: deque = deque()  # deque of (request_id, asyncio.Event) for FIFO ordering
 
     @classmethod
-    async def get_instance(cls, max_browsers: int = None) -> "InMemoryBrowserPool":
+    async def get_instance(cls, max_browsers: int = None) -> InMemoryBrowserPool:
         """Get or create singleton instance.
 
         Args:
@@ -195,7 +194,7 @@ class InMemoryBrowserPool(AbstractBrowserPool):
             return cls._instance
 
     @classmethod
-    def get_instance_sync(cls) -> Optional["InMemoryBrowserPool"]:
+    def get_instance_sync(cls) -> InMemoryBrowserPool | None:
         """Get existing instance synchronously (may be None if not initialized)."""
         return cls._instance
 
@@ -580,7 +579,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
     Uses Redis List for queue and Set for running instances.
     """
 
-    _instance: Optional["RedisBrowserResourcePool"] = None
+    _instance: RedisBrowserResourcePool | None = None
     _lock: asyncio.Lock = None
 
     def __init__(self, redis_url: str, max_browsers: int = None):
@@ -598,7 +597,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         self._ping_interval: float = 5.0
 
     @classmethod
-    async def get_instance(cls, redis_url: str, max_browsers: int = None) -> "RedisBrowserResourcePool":
+    async def get_instance(cls, redis_url: str, max_browsers: int = None) -> RedisBrowserResourcePool:
         if cls._lock is None:
             cls._lock = asyncio.Lock()
         async with cls._lock:
@@ -917,6 +916,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         if operation_type == OperationType.TEST_RUN.value:
             try:
                 from sqlmodel import Session
+
                 from orchestrator.api.db import engine
                 from orchestrator.api.models_db import TestRun
 
@@ -932,6 +932,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         if operation_type == OperationType.AGENT.value:
             try:
                 from sqlmodel import Session
+
                 from orchestrator.api.db import engine
                 from orchestrator.api.models_db import AgentRun
 
@@ -947,6 +948,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         if operation_type == OperationType.PRD.value and request_id.startswith("gen_"):
             try:
                 from sqlmodel import Session
+
                 from orchestrator.api.db import engine
                 from orchestrator.api.models_db import PrdGenerationResult
 

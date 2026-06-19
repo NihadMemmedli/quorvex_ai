@@ -15,7 +15,9 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Users | `orchestrator/api/users.py` | `/users` | user and project membership models |
 | Projects | `orchestrator/api/projects.py` | `/projects` | project, credential, membership models |
 | Settings | `orchestrator/api/settings.py` | `/settings` | LLM and runtime settings validation |
-| Core specs and runs | `orchestrator/api/main.py` | `/specs`, `/runs`, queue routes | native planner, generator, healer, process manager |
+| Core specs | `orchestrator/api/specs.py` | `/specs`, spec metadata routes | native planner, generator, healer, filesystem metadata |
+| Run lifecycle | `orchestrator/api/runs.py` | `/runs` | process manager, run directories, generated artifacts |
+| Runtime operations | `orchestrator/api/runtime_ops.py` | `/health`, `/queue-status`, `/api/browser-pool`, `/api/resources` | browser pool, resource manager, queue settings, emergency stop |
 | Dashboard analytics | `orchestrator/api/dashboard.py`, `analytics.py` | dashboard-specific prefixes | run, spec, coverage, analytics queries |
 | Memory | `orchestrator/api/memory.py` | `/api/memory` | `orchestrator/memory/*` |
 | PRD processing | `orchestrator/api/prd.py` | `/api/prd` | `orchestrator/workflows/prd_processor.py` |
@@ -26,6 +28,8 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | RTM | `orchestrator/api/rtm.py` | `/rtm` | RTM generator and requirement/spec links |
 | Scheduling | `orchestrator/api/scheduling.py` | `/scheduling` | `orchestrator/services/scheduler.py` |
 | TestRail | `orchestrator/api/testrail.py` | TestRail routes | `orchestrator/services/testrail_client.py` |
+| TestRail file import/export | `orchestrator/api/testrail_files.py` | `/import/testrail`, `/export/testrail` | legacy TestRail CSV/XML file compatibility |
+| Backup control | `orchestrator/api/backup_control.py` | `/api/backup`, `/api/backup/status` | manual database backup operations |
 | Jira | `orchestrator/api/jira.py` | Jira routes | `orchestrator/services/jira_client.py` |
 | CI control | `orchestrator/api/ci_control.py` | `/projects/{project_id}/ci` | provider-neutral CI orchestration |
 | GitHub CI | `orchestrator/api/github_ci.py` | GitHub routes | GitHub client, PR advisor, quality gates |
@@ -35,10 +39,19 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Security testing | `orchestrator/api/security_testing.py` | security testing routes | quick scanner, Nuclei, ZAP client |
 | Database testing | `orchestrator/api/database_testing.py` | database testing routes | database connector, schema analyzer, DB test generator |
 | LLM testing | `orchestrator/api/llm_testing.py` | LLM testing routes | LLM evaluator and test generator |
-| Storage health | `orchestrator/api/health.py` | `/health` | storage, MinIO, database checks |
+| Storage health | `orchestrator/api/health.py` | `/health/storage`, `/health/backup`, `/health/alerts` | storage, MinIO, database checks |
 | Assistant chat | `orchestrator/api/chat.py` | `/chat` | conversation models, memory context |
 | AutoPilot | `orchestrator/api/autopilot.py` | AutoPilot routes | AutoPilot pipeline |
 | Autonomous missions | `orchestrator/api/autonomous.py` | `/autonomous` | Temporal client, autonomous activities, agent queue |
+| Agent queue operations | `orchestrator/api/agent_queue_ops.py` | `/api/agents/queue-*` | Redis agent queue status, cleanup, flush, Temporal/browser pool fallback status |
+| Agent definitions | `orchestrator/api/agent_definitions.py` | `/api/agents/tools/catalog`, `/api/agents/definitions` | custom agent tool catalog, definition CRUD, custom definition run launch |
+| Agent run launch | `orchestrator/api/agent_run_launch.py` | `/api/agents/runs` | Temporal-backed standalone agent run launch |
+| Agent run observability | `orchestrator/api/agent_run_observability.py` | `/api/agents/runs`, `/api/agents/temporal/health` | read-only run history, live run details, events, traces, Temporal health |
+| Agent coding patch review | `orchestrator/api/agent_coding_patch.py` | `/api/agents/runs/{id}/coding/*` | coding agent patch diff preview, rejection, and apply state transitions |
+| Agent run control | `orchestrator/api/agent_run_control.py` | `/api/agents/runs/{id}/pause`, `/resume`, `/cancel`, `/retry` | pause, resume, cancel, and retry state transitions |
+| Agent reports | `orchestrator/api/agent_reports.py` | `/api/agents/runs/{id}/report`, `/api/agents/reports/search`, report edit/import routes | custom agent report retrieval, editing, search, and requirement import |
+| Agent exploratory/spec generation | `orchestrator/api/agent_exploratory.py` | `/api/agents/exploratory/*`, `/api/agents/runs/{id}/report-items/{item_id}/generate-spec` | exploratory run launch, flow details/editing, flow/report item spec generation, and flow test generation |
+| Agent auth sessions | `orchestrator/api/agent_sessions.py` | `/api/agents/sessions` | persisted browser auth session files |
 | Custom workflows | `orchestrator/api/workflows.py` | workflow routes | workflow runner, step registry, Temporal client |
 
 ## Boundary Rules
@@ -53,15 +66,10 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 
 ## Direct Routes in `main.py`
 
-`orchestrator/api/main.py` still owns some direct app routes for legacy core behavior:
+`orchestrator/api/main.py` still owns the static artifact mount:
 
 | Area | Examples | Notes |
 |------|----------|-------|
-| Spec CRUD | `/specs`, `/specs/list`, `/specs/{name}` | Closely tied to filesystem and metadata sync |
-| Run execution | `/runs`, `/runs/{id}`, progress and log stream routes | Integrates process manager, run directories, and generated artifacts |
-| Queue control | `/queue-status`, `/queue/clear` | Handles in-process queue compatibility |
-| Browser pool control | `/api/browser-pool/*` | Operational status and manual cleanup |
-| Agent queue control | `/api/agents/queue-*` | Operational cleanup and queue status |
 | Static artifacts | `/artifacts/{run_id}/...` | Mounted from the runs directory |
 
 Prefer a dedicated router for new domains. Extend `main.py` only when the new behavior is part of an existing direct route family.

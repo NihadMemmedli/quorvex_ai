@@ -18,16 +18,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
+from orchestrator.services.agent_cancellation import (
+    cancel_active_autonomous_work_items,
+    cancel_agent_task_id,
+    cancel_autonomous_work_item_task,
+)
 from orchestrator.services.autonomous_activities import (
     autonomous_health_diagnostics,
     backfill_autonomous_canonical_state,
     monitor_autonomous_project,
     recover_autonomous_project_stale_work,
-)
-from orchestrator.services.agent_cancellation import (
-    cancel_active_autonomous_work_items,
-    cancel_autonomous_work_item_task,
-    cancel_agent_task_id,
 )
 from orchestrator.services.autonomous_events import (
     create_autonomous_agent_event,

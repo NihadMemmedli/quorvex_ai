@@ -22,9 +22,8 @@ from sqlalchemy import and_, func
 from sqlmodel import Session, select
 
 from .db import engine, get_session
-from .models_db import OpenApiImportHistory, SpecMetadata
+from .models_db import OpenApiImportHistory, SpecMetadata, normalize_project_id
 from .models_db import TestRun as DBTestRun
-from .models_db import normalize_project_id
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

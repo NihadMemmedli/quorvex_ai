@@ -53,11 +53,11 @@ from orchestrator.ai.prompt_registry import (
 )
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner
 from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
+from orchestrator.utils.text_utils import truncate_middle
 from orchestrator.utils.token_budget import (
     context_budget_for_stage,
     truncate_text_to_tokens,
 )
-from orchestrator.utils.text_utils import truncate_middle
 
 
 class NativeHealer:

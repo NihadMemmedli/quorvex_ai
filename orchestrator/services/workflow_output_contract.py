@@ -7,7 +7,6 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-
 STANDARD_OUTPUT_CONTRACT_VERSION = 1
 
 STANDARD_OUTPUT_JSON_SCHEMA: dict[str, Any] = {

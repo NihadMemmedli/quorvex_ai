@@ -3,12 +3,9 @@ Tests for credential management utilities.
 """
 
 import os
-from unittest.mock import patch
-
-import pytest
-
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 # Ensure test environment
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-credentials-tests")
@@ -17,10 +14,10 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-credentials-tests")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from orchestrator.api.credentials import (
-    encrypt_credential,
     decrypt_credential,
-    mask_credential,
+    encrypt_credential,
     get_env_credentials,
+    mask_credential,
 )
 
 
@@ -102,18 +99,18 @@ class TestEnvCredentials:
     )
     def test_get_env_credentials(self):
         """Should pick up credential patterns and skip internal keys."""
-        # We need to make sure JWT_SECRET_KEY is present if the module needs it, 
+        # We need to make sure JWT_SECRET_KEY is present if the module needs it,
         # but the function get_env_credentials specifically skips it.
         # Actually, credentials.py imports JWT_SECRET_KEY at module level.
-        
+
         creds = get_env_credentials()
-        
+
         # Should include these
         assert creds["LOGIN_USERNAME"] == "testuser"
         assert creds["LOGIN_PASSWORD"] == "testpassword"
         assert creds["CUSTOM_API_KEY"] == "sk-12345"
         assert creds["DB_PASSWORD"] == "dbpass"
-        
+
         # Should NOT include these
         assert "ANTHROPIC_AUTH_TOKEN" not in creds
         assert "JWT_SECRET_KEY" not in creds

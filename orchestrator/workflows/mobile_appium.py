@@ -74,7 +74,7 @@ class MobileAppiumConfig:
         appium_server_url: str | None = None,
         capabilities_file: str | None = None,
         target_url: str | None = None,
-    ) -> "MobileAppiumConfig":
+    ) -> MobileAppiumConfig:
         return cls(
             platform=(platform or os.environ.get("MOBILE_PLATFORM") or "ios").lower(),
             appium_server_url=appium_server_url

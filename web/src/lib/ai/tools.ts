@@ -34,6 +34,7 @@ const CHAT_CONTROL_DOMAINS = [
   { domain: 'Coverage planning', status: 'supported', tools: ['planUiTestCoverage', 'getRTMSummary', 'getRTMGaps', 'getCoverageGaps', 'getTestSuggestions'] },
   { domain: 'Custom workflows', status: 'supported', tools: ['listWorkflows', 'listWorkflowCatalog', 'getWorkflow', 'createWorkflow', 'updateWorkflow', 'duplicateWorkflow', 'archiveWorkflow', 'startWorkflow', 'startWorkflowFromStep', 'getWorkflowStatus', 'retryWorkflowFailedStep', 'pauseWorkflowRun', 'resumeWorkflowRun', 'cancelWorkflowRun'], notes: ['Workflow catalog includes agent report materialization into requirements/specs'] },
   { domain: 'Explorer Agent', status: 'supported', tools: ['startExplorerAgent', 'getAgentRun', 'getExplorerGeneratedSpecs', 'generateExplorerFlowTest'] },
+  { domain: 'Coding Agent', status: 'supported', tools: ['startCodingAgent', 'getAgentRun'], notes: ['Proposes repository diffs only; applying a diff requires separate approval'] },
   { domain: 'Discovery exploration', status: 'supported', tools: ['startDiscoveryExploration', 'getExplorationDetails', 'getExplorationFlows', 'generateApiTestsFromExploration'] },
   { domain: 'Specs and artifacts', status: 'supported', tools: ['getSpecContent', 'getSpecGeneratedCode', 'moveSpec', 'renameSpec', 'splitSpec'] },
   { domain: 'Regression operations', status: 'supported', tools: ['getRegressionBatchDetail', 'cancelRegressionBatch', 'getSpecHistory', 'exportRegressionBatch'] },
@@ -49,6 +50,7 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   startExploration: { label: 'Start Exploration' },
   startExplorerAgent: { label: 'Start Explorer Agent' },
   startAdhocCustomAgent: { label: 'Start Custom Agent' },
+  startCodingAgent: { label: 'Start Coding Agent' },
   createCustomAgentDefinition: { label: 'Save Custom Agent' },
   startCustomAgentFromReport: { label: 'Start Custom Agent From Report' },
   synthesizeExplorerSpecs: { label: 'Synthesize Explorer Specs' },
@@ -1554,6 +1556,16 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         focusAreas: z.array(z.string()).optional().describe('Specific features, pages, or behaviors to focus on'),
         runtime: z.enum(['claude_sdk']).optional().describe('Optional agent runtime.'),
         timeoutSeconds: z.number().optional().default(1800).describe('Maximum custom agent runtime in seconds'),
+      }),
+    }),
+
+    startCodingAgent: tool({
+      description: 'Start a repo-scoped coding agent for the current Quorvex codebase. It may inspect files and propose a unified diff, but it cannot apply file changes. Requires user approval.',
+      inputSchema: z.object({
+        prompt: z.string().describe('The coding task to perform in the current Quorvex repository'),
+        timeoutSeconds: z.number().optional().default(1800).describe('Maximum coding agent runtime in seconds'),
+        runtime: z.enum(['claude_sdk']).optional().describe('Optional agent runtime.'),
+        modelTier: z.enum(['tool_deep', 'deep', 'standard']).optional().default('tool_deep').describe('Model tier for the coding agent'),
       }),
     }),
 

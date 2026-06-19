@@ -9,7 +9,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 _ENCODER = None
 _ENCODER_ATTEMPTED = False
 

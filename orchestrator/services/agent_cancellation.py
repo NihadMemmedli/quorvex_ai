@@ -8,7 +8,13 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from orchestrator.api.models_db import AgentRun, AutonomousAgentWorkItem, AutonomousMission, WorkflowRun, WorkflowRunStep
+from orchestrator.api.models_db import (
+    AgentRun,
+    AutonomousAgentWorkItem,
+    AutonomousMission,
+    WorkflowRun,
+    WorkflowRunStep,
+)
 from orchestrator.services.agent_run_events import create_agent_run_event
 from orchestrator.services.autonomous_events import emit_work_item_status_event
 from orchestrator.services.workflow_operations import emit_workflow_event

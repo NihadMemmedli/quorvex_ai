@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 REAL_BROWSER_EXECUTABLE_NAMES = {
     "chrome",
     "chromium",

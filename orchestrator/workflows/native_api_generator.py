@@ -31,9 +31,9 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
-from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.services.handoff_manifest import record_artifact, record_consumption
+from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 
 
 class NativeApiGenerator:

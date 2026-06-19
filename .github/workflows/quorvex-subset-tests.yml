@@ -65,7 +65,7 @@ jobs:
       playwright_grep: ${{ steps.select.outputs.playwright_grep }}
       base_url: ${{ steps.select.outputs.base_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: select
@@ -163,7 +163,7 @@ jobs:
       PYTEST_MARKER: ${{ needs.select-suite.outputs.pytest_marker }}
       TEST_PATH: ${{ needs.select-suite.outputs.test_path }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -198,7 +198,7 @@ jobs:
       run:
         working-directory: ./web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -209,7 +209,7 @@ jobs:
         if: contains(fromJSON('["frontend-typecheck","all-safe"]'), needs.select-suite.outputs.suite)
         run: npm run typecheck
       - name: Lint frontend
-        if: needs.select-suite.outputs.suite == 'frontend-lint'
+        if: contains(fromJSON('["frontend-lint","all-safe"]'), needs.select-suite.outputs.suite)
         run: npm run lint
 
   playwright-tests:
@@ -223,7 +223,7 @@ jobs:
       PLAYWRIGHT_GREP: ${{ needs.select-suite.outputs.playwright_grep }}
       BASE_URL: ${{ needs.select-suite.outputs.base_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -274,7 +274,7 @@ jobs:
       JWT_SECRET_KEY: test-secret-key-for-ci
       REQUIRE_AUTH: "false"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"

@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 IMPORT_DEADLOCK_MARKERS = ("Resource deadlock avoided", "Errno 35")
 STARTUP_ARTIFACTS = (

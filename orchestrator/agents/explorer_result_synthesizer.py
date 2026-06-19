@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
-
 
 EVENT_TYPES = {
     "page_observed",
@@ -110,7 +108,7 @@ def _tool_success(call: Any) -> bool:
     if getattr(call, "error", None):
         return False
     if hasattr(call, "success"):
-        return bool(getattr(call, "success"))
+        return bool(call.success)
     status = str(getattr(call, "status", "") or "").lower()
     return status in {"success", "succeeded", "completed", "ok"}
 

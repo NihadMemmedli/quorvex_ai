@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
-from temporalio.common import RetryPolicy
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 ACTIVITY_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=5),

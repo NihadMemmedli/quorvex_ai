@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ["OPENAI_API_KEY"] = "demo-key"
 
 # Import memory system
-from orchestrator.coverage import CoverageTracker
 from memory import GraphStore, MemoryManager
+from orchestrator.coverage import CoverageTracker
 
 
 def print_section(title: str):

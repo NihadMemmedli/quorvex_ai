@@ -24,9 +24,9 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from importlib.util import find_spec
 from pathlib import Path
-from dataclasses import dataclass, field
 
 # Setup logging early
 logging.basicConfig(
@@ -41,6 +41,7 @@ if str(project_root) not in sys.path:
 
 from orchestrator.load_env import setup_claude_env
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, get_agent_queue
+from orchestrator.services.agent_run_events import create_agent_run_event
 from orchestrator.services.api_key_rotator import (
     get_api_key_rotator,
     is_rate_limit_error,
@@ -51,17 +52,23 @@ from orchestrator.services.api_key_rotator import (
     provider_retry_delay_seconds,
 )
 from orchestrator.services.autonomous_events import create_event_for_work_item
-from orchestrator.services.agent_run_events import create_agent_run_event
 from orchestrator.services.browser_pool import OperationType as BrowserOpType
 from orchestrator.services.browser_pool import get_browser_pool
 from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree, kill_test_run_process_tree
 from orchestrator.utils.claude_stream import (
     event_content_items as _shared_event_content_items,
+)
+from orchestrator.utils.claude_stream import (
     event_tool_results as _shared_event_tool_results,
+)
+from orchestrator.utils.claude_stream import (
     event_tool_uses as _shared_event_tool_uses,
+)
+from orchestrator.utils.claude_stream import (
     tool_result_text as _shared_tool_result_text,
 )
 from orchestrator.utils.token_budget import build_agent_token_telemetry, extract_provider_usage
+
 
 def _resolve_claude_cli_path() -> str:
     """Resolve the bundled Claude CLI from the active Python environment."""
@@ -403,10 +410,11 @@ class BrowserObservationRecorder:
         self._write_artifact({"event": "snapshot", "url": url, "state_id": state.id, **self.telemetry()})
 
     def _default_service_factory(self):
+        from sqlmodel import Session
+
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import ExplorationSession
         from orchestrator.memory.browser_memory import get_exploration_memory_service
-        from sqlmodel import Session
 
         if self.project_id is None:
             try:

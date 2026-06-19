@@ -18,10 +18,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from ..services.batch_executor import BASE_DIR, SPECS_DIR, _get_try_code_path
+from ..services.github_client import GithubError
 from .credentials import decrypt_credential
 from .db import get_session
 from .github_ci import (
     _build_client as _build_github_client,
+)
+from .github_ci import (
     _get_github_config,
     _require_project,
     _save_github_config,
@@ -32,10 +36,15 @@ from .gitlab_ci import _get_gitlab_config, _save_gitlab_config
 from .middleware.auth import get_current_user_optional
 from .middleware.permissions import EDIT_ROLES, VIEW_ROLES, check_project_access
 from .models_auth import User
-from .models_db import CiAuditEvent, CiPipelineMapping, CiTestSubset, CiTestSubsetItem, CiWorkflowChangeRequest, SpecMetadata
+from .models_db import (
+    CiAuditEvent,
+    CiPipelineMapping,
+    CiTestSubset,
+    CiTestSubsetItem,
+    CiWorkflowChangeRequest,
+    SpecMetadata,
+)
 from .models_db import get_spec_metadata as get_db_spec_metadata
-from ..services.github_client import GithubError
-from ..services.batch_executor import BASE_DIR, SPECS_DIR, _get_try_code_path
 
 router = APIRouter(prefix="/projects/{project_id}/ci", tags=["ci-control"])
 

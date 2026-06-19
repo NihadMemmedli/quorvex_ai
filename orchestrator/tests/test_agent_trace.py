@@ -9,12 +9,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sqlmodel import Session, SQLModel, select
 
+from orchestrator.agents.exploratory_agent import ExploratoryAgent
 from orchestrator.api import db as db_module
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import AgentRun, AgentTraceSnapshot, AgentTraceSpan
-from orchestrator.agents.exploratory_agent import ExploratoryAgent
 from orchestrator.services.agent_run_events import create_agent_run_event
-from orchestrator.services.agent_trace import ensure_trace_snapshot, list_trace_spans, record_trace_span, serialize_span, trace_bundle_for_run
+from orchestrator.services.agent_trace import (
+    ensure_trace_snapshot,
+    list_trace_spans,
+    record_trace_span,
+    serialize_span,
+    trace_bundle_for_run,
+)
 
 
 def _ensure_tables() -> None:

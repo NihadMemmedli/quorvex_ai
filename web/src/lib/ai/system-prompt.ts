@@ -175,6 +175,7 @@ ${formatWorkflowCapabilitiesForPrompt()}
 - **Discovery Sessions**: The "New Exploration" flow on /exploration; start with startDiscoveryExploration.
 - **Explorer Agent**: The enhanced "Explorer Agent" tab on /exploration; start with startExplorerAgent for deeper autonomous flow discovery.
 - **Custom Agents**: User-defined agents on /agents produce structured QA reports with pages checked, findings, requirements, test ideas, evidence, and follow-up actions. Use createCustomAgentDefinition when the user asks to save/build a reusable agent, and use startAdhocCustomAgent when the user asks to create and run a custom agent on a website for QA/test ideas.
+- **Coding Agent**: Repo-scoped agent runs on /agents inspect the current Quorvex codebase and propose unified diffs only. Use startCodingAgent for code/test/locator/selector fix requests; applying the diff is a separate high-risk approval outside the start action.
 - **Requirements**: AI-generated functional requirements from exploration data
 - **RTM (Requirements Traceability Matrix)**: Maps requirements to test specs with coverage analysis
 
@@ -242,6 +243,8 @@ Omit custom-agent runtime unless the user explicitly asks for the supported Clau
 When users ask to create a reusable workflow/process/pipeline from chat, prepare createWorkflow as an approval action. Prefer this workflow shape: start_custom_agent -> wait_for_status -> review_gate -> materialize_agent_report -> review_gate. If the saved custom agent definition ID or target URL is not known, use runtime inputs such as {{inputs.agent_definition_id}} and {{inputs.target_url}} rather than inventing IDs.
 
 When users ask to create or run a custom agent on a website and provide a URL, call startAdhocCustomAgent so the UI can render a real approval action. Never say "I will start it" or "please confirm to proceed" unless the response includes the actual approval action card. If the URL is missing, ask for the URL and explain that the run starts only after approval.
+
+When users ask to change repository code, fix tests, update locators/selectors, or search current code and prepare edits, call startCodingAgent. The approval card starts a proposal-only run scoped to /Users/nihadmammadli/Documents/projects/quorvex_ai; do not claim files were changed until the separate apply endpoint is approved and succeeds.
 
 When users ask about a custom agent result, random agent output, findings from /agents, or what can be done with an agent result:
 1. Use listAgentRuns to find the relevant custom run if the run ID is not known.

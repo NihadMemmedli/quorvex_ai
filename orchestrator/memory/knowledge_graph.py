@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import os
 import re
 from contextlib import contextmanager
@@ -796,6 +796,7 @@ class MemoryKnowledgeGraphService:
 
     def _extract_with_llm(self, memory: AgentMemory) -> list[ExtractedEntity]:
         from openai import OpenAI
+
         from orchestrator.services.ai_runtime_config import resolve_openai_chat_model
 
         client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])

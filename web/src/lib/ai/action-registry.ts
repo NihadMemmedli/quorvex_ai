@@ -104,6 +104,15 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       project_id: pid || 'default',
     }),
   },
+  startCodingAgent: {
+    label: 'Start Coding Agent',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/api/agents/runs',
+    getBody: (args, pid) => buildCodingAgentRunBody(args, pid),
+  },
   createCustomAgentDefinition: {
     label: 'Save Custom Agent',
     method: 'POST',
@@ -1813,6 +1822,30 @@ export function buildAdhocCustomAgentRunBody(args: Record<string, unknown>, proj
         description: typeof args.description === 'string' ? args.description : undefined,
         output_goals: Array.isArray(args.outputGoals) ? args.outputGoals : undefined,
       },
+    },
+  };
+}
+
+export function buildCodingAgentRunBody(args: Record<string, unknown>, projectId?: string) {
+  const prompt = typeof args.prompt === 'string' && args.prompt.trim()
+    ? args.prompt.trim()
+    : typeof args.task === 'string' && args.task.trim()
+      ? args.task.trim()
+      : 'Inspect the current Quorvex repository and propose a safe code diff.';
+  return {
+    agent_type: 'coding',
+    runtime: typeof args.runtime === 'string' ? args.runtime : 'claude_sdk',
+    model_tier: typeof args.modelTier === 'string' ? args.modelTier : 'tool_deep',
+    project_id: projectId || 'default',
+    config: {
+      prompt,
+      task: prompt,
+      source: 'chat_coding_agent',
+      autonomy_mode: 'propose_diff_only',
+      repo_scope: '/Users/nihadmammadli/Documents/projects/quorvex_ai',
+      timeout_seconds: typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 1800,
+      runtime: typeof args.runtime === 'string' ? args.runtime : 'claude_sdk',
+      model_tier: typeof args.modelTier === 'string' ? args.modelTier : 'tool_deep',
     },
   };
 }

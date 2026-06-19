@@ -22,11 +22,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import case, func
 from sqlmodel import Session, select
 
-from .db import engine
-from .models_db import DiscoveredApiEndpoint, ExplorationSession, SecurityFinding, SecurityScanRun
-
 from orchestrator.services.browser_pool import OperationType
 from orchestrator.services.browser_slots import browser_operation_slot
+
+from .db import engine
+from .models_db import DiscoveredApiEndpoint, ExplorationSession, SecurityFinding, SecurityScanRun
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -1109,7 +1109,6 @@ async def list_security_specs(project_id: str = Query(...)):
 @router.get("/specs/{name:path}")
 async def get_security_spec(name: str, project_id: str = Query(...)):
     """Get a single security spec content."""
-    specs_dir = _get_specs_dir(project_id)
     target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
@@ -1146,7 +1145,6 @@ async def create_security_spec(req: CreateSecuritySpecRequest):
 @router.put("/specs/{name:path}")
 async def update_security_spec(name: str, req: UpdateSecuritySpecRequest, project_id: str = Query(...)):
     """Update an existing security spec."""
-    specs_dir = _get_specs_dir(project_id)
     target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
@@ -1159,7 +1157,6 @@ async def update_security_spec(name: str, req: UpdateSecuritySpecRequest, projec
 @router.delete("/specs/{name:path}")
 async def delete_security_spec(name: str, project_id: str = Query(...)):
     """Delete a security spec."""
-    specs_dir = _get_specs_dir(project_id)
     target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():

@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose a scoped Quorvex AI enhancement
+title: "[Feature]: "
+labels:
+  - type:enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What job is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Backend/API
+        - Frontend/dashboard
+        - Playwright generation
+        - AutoPilot/agents
+        - API/load/security/database/LLM testing
+        - Deployment/Docker
+        - Documentation
+        - CI/CD
+        - Community/GitHub
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable outcomes that would make the issue complete.
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and compatibility
+      description: Note deployment, docs, secrets, migrations, generated tests, or CI impact.

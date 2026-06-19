@@ -2,9 +2,11 @@ from pathlib import Path
 
 from orchestrator.services.pr_test_advisor import (
     ChangedFileInput,
-    TestInventoryItem as _TestInventoryItem,
     classify_changed_file,
     select_impacted_tests,
+)
+from orchestrator.services.pr_test_advisor import (
+    TestInventoryItem as _TestInventoryItem,
 )
 
 

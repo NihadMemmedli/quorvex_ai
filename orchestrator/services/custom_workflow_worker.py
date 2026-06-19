@@ -9,10 +9,12 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 
 from orchestrator.config import settings
-from orchestrator.services import agent_run_activities
-from orchestrator.services import custom_workflow_activities
-from orchestrator.services import domain_job_activities
-from orchestrator.services import test_run_activities
+from orchestrator.services import (
+    agent_run_activities,
+    custom_workflow_activities,
+    domain_job_activities,
+    test_run_activities,
+)
 from orchestrator.workflows.agent_run_workflow import AgentRunWorkflow
 from orchestrator.workflows.autopilot_temporal import AutoPilotWorkflow
 from orchestrator.workflows.custom_workflow_temporal import CustomWorkflowRun
