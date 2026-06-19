@@ -1,5 +1,9 @@
 # GitHub Operations Dry-Run Follow-up
 
+![PR advisor dashboard used to review repository operations and pull request status](../assets/ui/pr-advisor.png)
+
+<p class="caption">PR advisor dashboard used to review repository operations and pull request status.</p>
+
 Generated on 2026-06-19 after PR #168 was merged into `refactor/staged-foundation`.
 
 This report is intentionally non-mutating. It records current GitHub state from read-only `gh` queries and the follow-up actions that still require explicit maintainer approval.
