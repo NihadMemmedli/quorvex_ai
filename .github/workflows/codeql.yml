@@ -13,16 +13,8 @@ permissions:
   security-events: write
 
 jobs:
-  pr-scan-disabled:
-    name: CodeQL PR scan disabled
-    if: ${{ github.event_name == 'pull_request' && vars.CODEQL_PR_ENABLED != 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Set repository variable CODEQL_PR_ENABLED=true to enable CodeQL pull request scanning."
-
   analyze:
     name: Analyze ${{ matrix.language }}
-    if: ${{ github.event_name != 'pull_request' || vars.CODEQL_PR_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
