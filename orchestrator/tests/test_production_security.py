@@ -24,6 +24,13 @@ pytestmark = pytest.mark.integration
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
+def _clear_security_module() -> None:
+    sys.modules.pop("orchestrator.api.security", None)
+    api_package = sys.modules.get("orchestrator.api")
+    if api_package is not None and hasattr(api_package, "security"):
+        delattr(api_package, "security")
+
+
 class TestJWTSecretKeyRequired:
     """Test that JWT_SECRET_KEY environment variable is required."""
 
@@ -33,27 +40,22 @@ class TestJWTSecretKeyRequired:
         original = os.environ.get("JWT_SECRET_KEY")
 
         try:
-            # Remove the env var
-            if "JWT_SECRET_KEY" in os.environ:
-                del os.environ["JWT_SECRET_KEY"]
+            os.environ.pop("JWT_SECRET_KEY", None)
 
-            # Clear any cached imports
-            if "orchestrator.api.security" in sys.modules:
-                del sys.modules["orchestrator.api.security"]
+            _clear_security_module()
 
             # Importing should raise ValueError
             with pytest.raises(ValueError) as exc_info:
-                pass
+                __import__("orchestrator.api.security")
 
             assert "JWT_SECRET_KEY" in str(exc_info.value)
             assert "REQUIRED" in str(exc_info.value)
         finally:
             # Restore original value
-            if original:
+            if original is not None:
                 os.environ["JWT_SECRET_KEY"] = original
             # Clear module again
-            if "orchestrator.api.security" in sys.modules:
-                del sys.modules["orchestrator.api.security"]
+            _clear_security_module()
 
     def test_jwt_secret_key_present_works(self):
         """Application should start when JWT_SECRET_KEY is set."""
@@ -64,9 +66,7 @@ class TestJWTSecretKeyRequired:
             # Set a test value
             os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-testing-only"
 
-            # Clear any cached imports
-            if "orchestrator.api.security" in sys.modules:
-                del sys.modules["orchestrator.api.security"]
+            _clear_security_module()
 
             # Should import without error
             from orchestrator.api import security
@@ -74,56 +74,53 @@ class TestJWTSecretKeyRequired:
             assert security.JWT_SECRET_KEY == "test-secret-key-for-testing-only"
         finally:
             # Restore original value
-            if original:
+            if original is not None:
                 os.environ["JWT_SECRET_KEY"] = original
             else:
-                del os.environ["JWT_SECRET_KEY"]
+                os.environ.pop("JWT_SECRET_KEY", None)
             # Clear module
-            if "orchestrator.api.security" in sys.modules:
-                del sys.modules["orchestrator.api.security"]
+            _clear_security_module()
 
 
 class TestCORSConfiguration:
     """Test CORS configuration restricts origins properly."""
 
-    def test_cors_default_localhost(self):
+    def test_cors_default_localhost(self, monkeypatch):
         """Default CORS should allow local browser origins."""
-        # Save and clear
-        original = os.environ.get("ALLOWED_ORIGINS")
-        if "ALLOWED_ORIGINS" in os.environ:
-            del os.environ["ALLOWED_ORIGINS"]
+        from orchestrator.api import main_static_facade_support
 
-        try:
-            # Re-evaluate the default
-            default_allowed = "http://localhost:3000,http://host.docker.internal:3000"
-            allowed = os.getenv("ALLOWED_ORIGINS", default_allowed).split(",")
-            assert allowed == ["http://localhost:3000", "http://host.docker.internal:3000"]
-        finally:
-            if original:
-                os.environ["ALLOWED_ORIGINS"] = original
+        monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+        namespace: dict[str, object] = {}
 
-    def test_cors_custom_origins(self):
+        main_static_facade_support.configure_main_static_facade(namespace)
+
+        assert (
+            main_static_facade_support.DEFAULT_ALLOWED_ORIGINS
+            == "http://localhost:3000,http://host.docker.internal:3000"
+        )
+        assert namespace["ALLOWED_ORIGINS"] == ["http://localhost:3000", "http://host.docker.internal:3000"]
+
+    def test_cors_custom_origins(self, monkeypatch):
         """CORS should accept comma-separated origins."""
-        os.environ["ALLOWED_ORIGINS"] = "https://app.company.com,http://localhost:3000"
+        from orchestrator.api import main_static_facade_support
 
-        try:
-            allowed = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-            assert "https://app.company.com" in allowed
-            assert "http://localhost:3000" in allowed
-            assert len(allowed) == 2
-        finally:
-            del os.environ["ALLOWED_ORIGINS"]
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://app.company.com,http://localhost:3000")
+        namespace: dict[str, object] = {}
 
-    def test_cors_not_wildcard(self):
-        """CORS should never be wildcard in production config."""
-        # Read the main.py file and check CORS config
-        main_py = Path(__file__).parent.parent / "api" / "main.py"
-        content = main_py.read_text()
+        main_static_facade_support.configure_main_static_facade(namespace)
 
-        # Should not have allow_origins=["*"] anymore
+        allowed = namespace["ALLOWED_ORIGINS"]
+        assert "https://app.company.com" in allowed
+        assert "http://localhost:3000" in allowed
+        assert len(allowed) == 2
+
+    def test_cors_wiring_uses_allowed_origins_facade_value(self):
+        """CORS should be wired from the runtime facade value, not wildcarded."""
+        app_wiring_py = Path(__file__).parent.parent / "api" / "app_wiring_support.py"
+        content = app_wiring_py.read_text()
+
         assert 'allow_origins=["*"]' not in content
-        # Should have ALLOWED_ORIGINS env var
-        assert "ALLOWED_ORIGINS" in content
+        assert "allow_origins=runtime.ALLOWED_ORIGINS" in content
 
 
 class TestFileUploadSecurity:
@@ -156,23 +153,26 @@ class TestN1QueryFix:
 
     def test_uses_func_count(self):
         """Query should use func.count() instead of len(all())."""
-        main_py = Path(__file__).parent.parent / "api" / "main.py"
-        content = main_py.read_text()
+        runs_py = Path(__file__).parent.parent / "api" / "runs.py"
+        content = runs_py.read_text()
 
         # Should import func from sqlalchemy
         assert "from sqlalchemy import func" in content
 
         # Should use func.count() for counting
-        assert "func.count()" in content
+        assert "select(func.count())" in content
 
         # The old pattern should not exist
         # Note: There might be other uses of this pattern, so we check the specific runs endpoint
         # Check that the runs endpoint uses efficient counting
         runs_section = content[content.find("def list_runs") :]
-        runs_section = runs_section[: runs_section.find("\n@app.")]  # Get just the list_runs function
+        next_route = runs_section.find("\n\n@router.")
+        if next_route != -1:
+            runs_section = runs_section[:next_route]
 
         # Should have efficient count query
-        assert "func.count()" in runs_section or "select(func.count())" in runs_section
+        assert "count_query = select(func.count()).select_from(DBTestRun)" in runs_section
+        assert "total = session.exec(count_query).one()" in runs_section
 
 
 class TestGitIgnore:
@@ -267,17 +267,23 @@ class TestNginxConfiguration:
         nginx_conf = Path(__file__).parent.parent.parent / "nginx" / "nginx.conf"
         assert nginx_conf.exists()
 
-    def test_tls_configuration(self):
-        """Nginx should have TLS configuration."""
-        nginx_conf = Path(__file__).parent.parent.parent / "nginx" / "nginx.conf"
-        content = nginx_conf.read_text()
+    def test_company_external_nginx_tls_examples(self):
+        """Company external-nginx examples should show TLS termination."""
+        root = Path(__file__).parent.parent.parent
+        example_paths = [
+            root / "deploy" / "examples" / "reverse-proxy.example.conf",
+            root / "deploy" / "private-repo-template" / "reverse-proxy" / "mytest.idda.az.example.conf",
+            root / "docs" / "guides" / "company-deployment.md",
+        ]
 
-        assert "ssl_certificate" in content
-        assert "ssl_protocols" in content
-        assert "TLSv1.2" in content or "TLSv1.3" in content
+        for example_path in example_paths:
+            content = example_path.read_text()
+            assert "listen 443 ssl" in content
+            assert "ssl_certificate " in content
+            assert "ssl_certificate_key " in content
 
     def test_security_headers(self):
-        """Nginx should add security headers."""
+        """Repo-managed nginx should keep security headers for legacy opt-in use."""
         nginx_conf = Path(__file__).parent.parent.parent / "nginx" / "nginx.conf"
         content = nginx_conf.read_text()
 
@@ -285,7 +291,7 @@ class TestNginxConfiguration:
         assert "X-Content-Type-Options" in content
 
     def test_rate_limiting(self):
-        """Nginx should have rate limiting."""
+        """Repo-managed nginx should keep rate limiting for legacy opt-in use."""
         nginx_conf = Path(__file__).parent.parent.parent / "nginx" / "nginx.conf"
         content = nginx_conf.read_text()
 
@@ -327,9 +333,17 @@ class TestEnvProdExample:
             # Actual secrets should be placeholders
             if any(secret in key for secret in ["PASSWORD", "SECRET", "TOKEN", "KEY"]):
                 # Should either be a placeholder or reference to generation
-                assert "<" in value or "generate" in value.lower() or value.strip() == "" or "${" in value, (
-                    f"Potential secret in {key}"
+                normalized_value = value.strip().lower()
+                safe_placeholder = (
+                    "<" in value
+                    or "generate" in normalized_value
+                    or normalized_value == ""
+                    or "${" in value
+                    or normalized_value.startswith("replace-with-")
+                    or (normalized_value.startswith("your-") and normalized_value.endswith("-here"))
+                    or "openssl rand" in normalized_value
                 )
+                assert safe_placeholder, f"Potential secret in {key}"
 
 
 if __name__ == "__main__":
