@@ -41,6 +41,8 @@ This is an open-source project, so response times may vary. The maintainer will 
 
 CodeQL runs on pull requests, pushes to `main`, and the scheduled weekly scan. Existing CodeQL alerts are treated as a known security backlog unless a maintainer escalates a specific alert into an active vulnerability response. Pull request scanning should remain enabled so new or changed code is analyzed while backlog triage continues separately.
 
+Dependency Review is enabled for pull requests after confirming GitHub dependency graph support on June 19, 2026. Maintainers should keep the `DEPENDENCY_REVIEW_ENABLED=true` repository variable set so `.github/workflows/dependency-review.yml` runs `actions/dependency-review-action@v4`; if dependency graph support is unavailable in a fork or future repository configuration, unset the variable instead of removing the workflow gate.
+
 ## Scope
 
 Useful reports include:
