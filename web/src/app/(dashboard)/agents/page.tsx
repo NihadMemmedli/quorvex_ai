@@ -2,7 +2,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Bot from 'lucide-react/dist/esm/icons/bot';
 import FileText from 'lucide-react/dist/esm/icons/file-text';
 import Play from 'lucide-react/dist/esm/icons/play';
@@ -89,17 +88,11 @@ import {
     isBrowserAuthSessionSelectable,
 } from '@/lib/browser-auth-sessions';
 import {
-    applyAgentWorkspaceQueryPatch,
-    parseAgentWorkspaceQuery,
     validateAgentRunInput,
     type AgentHistoryStatusFilter,
     type AgentHistoryTypeFilter,
-    type AgentTraceTab,
-    type AgentWorkspaceMode,
     type AgentWorkspaceView,
     type ReportReviewFilter,
-    type ReportSpecItemType,
-    type ReportSearchTypeFilter,
 } from './agents-workspace-state';
 import {
     AGENT_HISTORY_STATUS_FILTER_LABELS,
@@ -142,9 +135,6 @@ import {
     type AgentActionIntent,
     type AgentArtifact,
     type AgentDefinition,
-    type AgentHistoryCounts,
-    type AgentQueueStatus,
-    type AgentReportSearchItem,
     type AgentRun,
     type AgentRunEvent,
     type AgentTool,
@@ -163,27 +153,25 @@ import {
     type TraceTab,
 } from './agents-model';
 import {
-    EMPTY_AGENT_HISTORY_COUNTS,
     agentRunTraceExportUrl,
-    cleanStaleAgentQueue,
     controlAgentRun as controlAgentRunApi,
     fetchExploratoryFlowDetails,
     fetchFlowSpecAgentRun as fetchFlowSpecAgentRunApi,
-    fetchAgentQueueStatus,
-    fetchAgentRunHistory,
     fetchAgentRuntimeSetting,
     generateExploratoryFlowSpec,
-    queueCleanupSummary,
     retryAgentRun as retryAgentRunApi,
-    searchAgentReports,
     splitSpecFile,
     startAgentDefinitionRun,
     synthesizeExploratorySpecs,
 } from './agents-api';
 import { useAgentDefinitions } from './use-agent-definitions';
+import { useAgentQueueStatus } from './use-agent-queue-status';
+import { useAgentReportSearch } from './use-agent-report-search';
+import { useAgentRunHistory } from './use-agent-run-history';
 import { useAgentReportActions } from './use-agent-report-actions';
 import { useAgentRunDetail } from './use-agent-run-detail';
 import { useAgentRunEventsStream } from './use-agent-run-events-stream';
+import { useAgentWorkspaceQuery } from './use-agent-workspace-query';
 
 const LiveBrowserView = dynamic<any>(() => import('@/components/LiveBrowserView').then(mod => mod.LiveBrowserView), { ssr: false });
 const TestDataPicker = dynamic<any>(() => import('@/components/TestDataPicker').then(mod => mod.TestDataPicker), { ssr: false });
@@ -199,10 +187,6 @@ import {
 
 export default function AgentsPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
-    const router = useRouter();
-    const pathname = usePathname();
-    const searchParams = useSearchParams();
-    const searchParamsString = searchParams.toString();
     const [workspaceView, setWorkspaceView] = useState<AgentWorkspaceView>('run');
     // Basic config
     const [url, setUrl] = useState('');
@@ -215,15 +199,6 @@ export default function AgentsPage() {
     const [testDataRefs, setTestDataRefs] = useState('');
 
     // History & results
-    const [history, setHistory] = useState<AgentRun[]>([]);
-    const [historyTotal, setHistoryTotal] = useState(0);
-    const [historyCounts, setHistoryCounts] = useState<AgentHistoryCounts>({
-        status: { all: 0, active: 0, completed: 0, failed: 0, cancelled: 0, paused: 0 },
-        type: { all: 0, exploratory: 0, custom: 0, writer: 0, spec_generation: 0 },
-    });
-    const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
-    const [historyLoading, setHistoryLoading] = useState(false);
-    const [historyError, setHistoryError] = useState<string | null>(null);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
     const [agentEvents, setAgentEvents] = useState<AgentRunEvent[]>([]);
@@ -232,10 +207,6 @@ export default function AgentsPage() {
     const [traceSearch, setTraceSearch] = useState('');
     const [traceSpanType, setTraceSpanType] = useState('');
     const [specResult, setSpecResult] = useState<SpecResult | null>(null);
-    const [historySearch, setHistorySearch] = useState('');
-    const [debouncedHistorySearch, setDebouncedHistorySearch] = useState('');
-    const [historyStatusFilter, setHistoryStatusFilter] = useState<AgentHistoryStatusFilter>('all');
-    const [historyTypeFilter, setHistoryTypeFilter] = useState<AgentHistoryTypeFilter>('all');
 
     // UI state
     const [isStarting, setIsStarting] = useState(false);
@@ -264,15 +235,6 @@ export default function AgentsPage() {
     const [traceTab, setTraceTab] = useState<TraceTab>('timeline');
     const [reportStatusFilter, setReportStatusFilter] = useState<ReportReviewFilter>('all');
     const [reportSeverityFilter, setReportSeverityFilter] = useState('all');
-    const [reportSearchQuery, setReportSearchQuery] = useState('');
-    const [reportSearchType, setReportSearchType] = useState<ReportSearchTypeFilter>('all');
-    const [reportSearchSeverity, setReportSearchSeverity] = useState('all');
-    const [reportSearchResults, setReportSearchResults] = useState<AgentReportSearchItem[]>([]);
-    const [reportSearchLoading, setReportSearchLoading] = useState(false);
-    const [queueStatus, setQueueStatus] = useState<AgentQueueStatus | null>(null);
-    const [queueLoading, setQueueLoading] = useState(false);
-    const [queueCleanupLoading, setQueueCleanupLoading] = useState(false);
-    const [queueError, setQueueError] = useState<string | null>(null);
     const [runFormError, setRunFormError] = useState<string | null>(null);
     const [definitionFormError, setDefinitionFormError] = useState<string | null>(null);
     const [workspaceStatus, setWorkspaceStatus] = useState('');
@@ -296,12 +258,7 @@ export default function AgentsPage() {
     const [runSetupReady, setRunSetupReady] = useState(false);
     const [definitionForm, setDefinitionForm] = useState(() => defaultDefinitionForm('claude_sdk'));
     const targetUrlRef = useRef('');
-    const historyAbortRef = useRef<AbortController | null>(null);
-    const reportSearchAbortRef = useRef<AbortController | null>(null);
-    const historyRequestIdRef = useRef(0);
     const agentEventsRef = useRef<AgentRunEvent[]>([]);
-    const workspaceQueryRef = useRef(searchParamsString);
-    const queryCreateOpenRef = useRef(false);
     const activeBrowserAuthSessions = useMemo(
         () => sessions.filter(isBrowserAuthSessionSelectable),
         [sessions]
@@ -311,86 +268,89 @@ export default function AgentsPage() {
         [activeBrowserAuthSessions]
     );
 
-    const updateWorkspaceQuery = useCallback((patch: Parameters<typeof applyAgentWorkspaceQueryPatch>[1]) => {
-        const nextParams = applyAgentWorkspaceQueryPatch(new URLSearchParams(workspaceQueryRef.current || searchParamsString), patch);
-        const query = nextParams.toString();
-        workspaceQueryRef.current = query;
-        router.replace(`${pathname}${query ? `?${query}` : ''}`, { scroll: false });
-    }, [pathname, router, searchParamsString]);
+    const {
+        updateWorkspaceQuery,
+        selectRun,
+        selectHistoryRun,
+        selectWorkspaceView,
+        selectAgentMode,
+        selectDefinition,
+        selectCustomResultTab,
+        selectTraceTab,
+        updateReportStatusFilter,
+        updateReportSeverityFilter,
+        setCreateQueryOpen,
+        queryState,
+    } = useAgentWorkspaceQuery({
+        agentRuntime,
+        setWorkspaceView,
+        setSelectedRunId,
+        setSelectedDefinitionId,
+        setCustomResultTab,
+        setTraceTab,
+        setReportStatusFilter,
+        setReportSeverityFilter,
+        setReturnToAfterSave,
+        setDefinitionForm,
+        setDefinitionFormError,
+        setAgentActionIntent,
+        setBuilderOpen,
+        setFlowModalOpen,
+        setWorkspaceStatus,
+    });
 
-    const selectRun = useCallback((runId: string | null) => {
-        setSelectedRunId(runId);
-        updateWorkspaceQuery({ runId });
-    }, [updateWorkspaceQuery]);
+    const {
+        history,
+        setHistory,
+        historyTotal,
+        historyCounts,
+        historyNextCursor,
+        historyLoading,
+        historyError,
+        historySearch,
+        historyStatusFilter,
+        historyTypeFilter,
+        fetchHistory,
+        loadMoreHistory,
+        updateHistorySearch,
+        updateHistoryStatusFilter,
+        updateHistoryTypeFilter,
+    } = useAgentRunHistory({
+        projectId: currentProject?.id,
+        projectLoading,
+        queryState,
+        updateWorkspaceQuery,
+    });
 
-    const selectHistoryRun = useCallback((runId: string) => {
-        setSelectedRunId(runId);
-        setWorkspaceView('run');
-        updateWorkspaceQuery({ runId, view: 'run' });
-    }, [updateWorkspaceQuery]);
+    const {
+        reportSearchQuery,
+        reportSearchType,
+        reportSearchSeverity,
+        reportSearchResults,
+        reportSearchLoading,
+        fetchReportSearch,
+        updateReportSearchQuery,
+        updateReportSearchType,
+        updateReportSearchSeverity,
+    } = useAgentReportSearch({
+        projectId: currentProject?.id,
+        projectLoading,
+        queryState,
+        workspaceView,
+        updateWorkspaceQuery,
+    });
 
-    const selectWorkspaceView = useCallback((view: AgentWorkspaceView) => {
-        setWorkspaceView(view);
-        updateWorkspaceQuery({ view });
-    }, [updateWorkspaceQuery]);
-
-    const selectAgentMode = useCallback((mode: AgentWorkspaceMode) => {
-        updateWorkspaceQuery({ agent: mode });
-    }, [updateWorkspaceQuery]);
-
-    const selectDefinition = useCallback((definitionId: string) => {
-        setSelectedDefinitionId(definitionId);
-        updateWorkspaceQuery({ definitionId });
-    }, [updateWorkspaceQuery]);
-
-    const selectCustomResultTab = useCallback((tab: CustomResultTab) => {
-        setCustomResultTab(tab);
-        updateWorkspaceQuery({ resultTab: tab });
-    }, [updateWorkspaceQuery]);
-
-    const selectTraceTab = useCallback((tab: TraceTab) => {
-        setTraceTab(tab);
-        updateWorkspaceQuery({ traceTab: tab });
-    }, [updateWorkspaceQuery]);
-
-    const updateReportStatusFilter = useCallback((value: ReportReviewFilter) => {
-        setReportStatusFilter(value);
-        updateWorkspaceQuery({ reportStatus: value });
-    }, [updateWorkspaceQuery]);
-
-    const updateReportSeverityFilter = useCallback((value: string) => {
-        setReportSeverityFilter(value);
-        updateWorkspaceQuery({ reportSeverity: value });
-    }, [updateWorkspaceQuery]);
-
-    const updateReportSearchQuery = useCallback((value: string) => {
-        setReportSearchQuery(value);
-        updateWorkspaceQuery({ reportQ: value });
-    }, [updateWorkspaceQuery]);
-
-    const updateReportSearchType = useCallback((value: ReportSearchTypeFilter) => {
-        setReportSearchType(value);
-        updateWorkspaceQuery({ reportType: value });
-    }, [updateWorkspaceQuery]);
-
-    const updateReportSearchSeverity = useCallback((value: string) => {
-        setReportSearchSeverity(value);
-        updateWorkspaceQuery({ reportSeverity: value });
-    }, [updateWorkspaceQuery]);
-
-    const updateHistorySearch = useCallback((value: string) => {
-        setHistorySearch(value);
-    }, []);
-
-    const updateHistoryStatusFilter = useCallback((value: AgentHistoryStatusFilter) => {
-        setHistoryStatusFilter(value);
-        updateWorkspaceQuery({ status: value });
-    }, [updateWorkspaceQuery]);
-
-    const updateHistoryTypeFilter = useCallback((value: AgentHistoryTypeFilter) => {
-        setHistoryTypeFilter(value);
-        updateWorkspaceQuery({ type: value });
-    }, [updateWorkspaceQuery]);
+    const {
+        queueStatus,
+        queueLoading,
+        queueCleanupLoading,
+        queueError,
+        fetchQueueStatus,
+        cleanStaleQueueTasks,
+    } = useAgentQueueStatus({
+        projectLoading,
+        workspaceView,
+    });
 
     const fetchRuntimeSettings = async () => {
         try {
@@ -402,47 +362,6 @@ export default function AgentsPage() {
             console.error('Failed to fetch runtime settings', e);
         }
     };
-
-    // Fetch history summaries (filtered and paged by the API).
-    const fetchHistory = useCallback(async (options: { append?: boolean; cursor?: string | null } = {}) => {
-        if (projectLoading) return;
-        historyAbortRef.current?.abort();
-        const controller = new AbortController();
-        historyAbortRef.current = controller;
-        const requestId = historyRequestIdRef.current + 1;
-        historyRequestIdRef.current = requestId;
-        setHistoryLoading(true);
-        setHistoryError(null);
-        try {
-            const payload = await fetchAgentRunHistory({
-                projectId: currentProject?.id,
-                status: historyStatusFilter,
-                type: historyTypeFilter,
-                query: debouncedHistorySearch,
-                cursor: options.cursor,
-                signal: controller.signal,
-            });
-            if (controller.signal.aborted || historyRequestIdRef.current !== requestId) return;
-            setHistory(prev => options.append ? [...prev, ...(payload.items || [])] : (payload.items || []));
-            setHistoryTotal(Number(payload.total || 0));
-            setHistoryCounts(payload.counts || EMPTY_AGENT_HISTORY_COUNTS);
-            setHistoryNextCursor(payload.next_cursor || null);
-        } catch (e) {
-            if (e instanceof DOMException && e.name === 'AbortError') return;
-            const message = e instanceof Error ? e.message : 'Failed to fetch history';
-            setHistoryError(message);
-            console.error("Failed to fetch history", e);
-        } finally {
-            if (historyRequestIdRef.current === requestId) {
-                setHistoryLoading(false);
-            }
-        }
-    }, [currentProject?.id, debouncedHistorySearch, historyStatusFilter, historyTypeFilter, projectLoading]);
-
-    const loadMoreHistory = useCallback(() => {
-        if (!historyNextCursor || historyLoading) return;
-        void fetchHistory({ append: true, cursor: historyNextCursor });
-    }, [fetchHistory, historyLoading, historyNextCursor]);
 
     const fetchSessions = async () => {
         if (!currentProject?.id) {
@@ -478,109 +397,6 @@ export default function AgentsPage() {
         generateItemSpec,
     } = useAgentReportActions(currentProject?.id);
 
-    const fetchQueueStatus = async () => {
-        setQueueLoading(true);
-        setQueueError(null);
-        try {
-            setQueueStatus(await fetchAgentQueueStatus());
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : 'Failed to fetch queue status.';
-            setQueueError(message);
-        } finally {
-            setQueueLoading(false);
-        }
-    };
-
-    const cleanStaleQueueTasks = async () => {
-        setQueueCleanupLoading(true);
-        try {
-            const data = await cleanStaleAgentQueue();
-            toast.success(queueCleanupSummary(data));
-            await fetchQueueStatus();
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : 'Failed to clean stale queue tasks.';
-            toast.error(message);
-        } finally {
-            setQueueCleanupLoading(false);
-        }
-    };
-
-    const fetchReportSearch = async () => {
-        if (projectLoading) return;
-        reportSearchAbortRef.current?.abort();
-        const controller = new AbortController();
-        reportSearchAbortRef.current = controller;
-        setReportSearchLoading(true);
-        try {
-            const results = await searchAgentReports({
-                projectId: currentProject?.id,
-                query: reportSearchQuery,
-                type: reportSearchType,
-                severity: reportSearchSeverity,
-                signal: controller.signal,
-            });
-            if (controller.signal.aborted) return;
-            setReportSearchResults(results);
-        } catch (e) {
-            if (e instanceof DOMException && e.name === 'AbortError') return;
-            console.error('Failed to search agent reports', e);
-            setReportSearchResults([]);
-        } finally {
-            if (!controller.signal.aborted) {
-                setReportSearchLoading(false);
-            }
-        }
-    };
-
-    useEffect(() => {
-        workspaceQueryRef.current = searchParamsString;
-        const queryState = parseAgentWorkspaceQuery(new URLSearchParams(searchParamsString));
-        setWorkspaceView(queryState.view);
-        if (queryState.runId) setSelectedRunId(queryState.runId);
-        if (queryState.definitionId) setSelectedDefinitionId(queryState.definitionId);
-        setReturnToAfterSave(queryState.returnTo);
-        if (queryState.create) {
-            if (!queryCreateOpenRef.current) {
-                setDefinitionForm(defaultDefinitionForm(agentRuntime));
-                setDefinitionFormError(null);
-            }
-            queryCreateOpenRef.current = true;
-            setAgentActionIntent({ type: 'createAgent' });
-            setBuilderOpen(true);
-        } else {
-            queryCreateOpenRef.current = false;
-        }
-        if (queryState.runId && queryState.specItemId && queryState.specItemType) {
-            setAgentActionIntent({
-                type: 'reviewReportSpec',
-                runId: queryState.runId,
-                itemId: queryState.specItemId,
-                itemType: queryState.specItemType,
-            });
-            setFlowModalOpen(true);
-            setWorkspaceStatus(`Opening report item ${queryState.specItemId} for spec review.`);
-        }
-        setCustomResultTab(queryState.resultTab);
-        setTraceTab(queryState.traceTab);
-        setReportStatusFilter(queryState.reportStatus);
-        setReportSeverityFilter(queryState.reportSeverity);
-        setReportSearchQuery(queryState.reportQ);
-        setReportSearchSeverity(queryState.reportSeverity);
-        setReportSearchType(queryState.reportType);
-        setHistoryStatusFilter(queryState.status);
-        setHistoryTypeFilter(queryState.type);
-        setHistorySearch(queryState.q);
-        setDebouncedHistorySearch(queryState.q);
-    }, [agentRuntime, searchParamsString]);
-
-    useEffect(() => {
-        const timer = window.setTimeout(() => {
-            setDebouncedHistorySearch(historySearch);
-            updateWorkspaceQuery({ q: historySearch });
-        }, 300);
-        return () => window.clearTimeout(timer);
-    }, [historySearch, updateWorkspaceQuery]);
-
     useEffect(() => {
         if (projectLoading) return;
         resetAgentLibraryLoadedProjects();
@@ -595,11 +411,6 @@ export default function AgentsPage() {
         if (projectLoading) return;
         void fetchRuntimeSettings();
     }, [currentProject?.id, projectLoading]);
-
-    useEffect(() => {
-        if (projectLoading) return;
-        void fetchHistory();
-    }, [fetchHistory, projectLoading]);
 
     useEffect(() => {
         if (projectLoading) return;
@@ -623,13 +434,6 @@ export default function AgentsPage() {
     }, []);
 
     useEffect(() => {
-        return () => {
-            historyAbortRef.current?.abort();
-            reportSearchAbortRef.current?.abort();
-        }
-    }, []);
-
-    useEffect(() => {
         const rememberTargetUrl = (event: Event) => {
             const target = event.target as HTMLInputElement | null;
             if (target?.name === 'targetUrl' || target?.id === 'agents-target-url') {
@@ -648,22 +452,6 @@ export default function AgentsPage() {
         if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('resultTab')) return;
         setCustomResultTab('overview');
     }, [activeRun?.id]);
-
-    useEffect(() => {
-        if (projectLoading || workspaceView !== 'reports') return;
-        const timer = window.setTimeout(() => {
-            void fetchReportSearch();
-        }, 200);
-        return () => window.clearTimeout(timer);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [workspaceView, currentProject?.id, reportSearchQuery, reportSearchType, reportSearchSeverity, projectLoading]);
-
-    useEffect(() => {
-        if (projectLoading || workspaceView !== 'queue') return;
-        void fetchQueueStatus();
-        const interval = window.setInterval(() => void fetchQueueStatus(), 5000);
-        return () => window.clearInterval(interval);
-    }, [workspaceView, projectLoading]);
 
     useEffect(() => {
         agentEventsRef.current = agentEvents;
@@ -1286,7 +1074,7 @@ export default function AgentsPage() {
         resetDefinitionForm();
         selectAgentMode('custom');
         setAgentActionIntent({ type: 'createAgent' });
-        queryCreateOpenRef.current = true;
+        setCreateQueryOpen(true);
         setBuilderOpen(true);
         setWorkspaceStatus('Opening custom agent builder.');
         updateWorkspaceQuery({ agent: 'custom', create: true });
@@ -1315,7 +1103,7 @@ export default function AgentsPage() {
         if (agentActionIntent.type === 'createAgent') {
             setAgentActionIntent({ type: 'none' });
         }
-        queryCreateOpenRef.current = false;
+        setCreateQueryOpen(false);
         updateWorkspaceQuery({ create: false });
         markAgentsAction({ action: 'createAgent', phase: 'closed' });
     };
