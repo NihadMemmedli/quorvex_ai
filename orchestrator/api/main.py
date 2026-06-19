@@ -20,10 +20,10 @@ from logging_config import get_logger, setup_logging
 from . import (
     agent_facade_support,
     app_wiring_support,
+    main_lifecycle_event_facade_support,
     main_route_module_facade_support,
     main_runtime_dependency_facade_support,
     main_static_facade_support,
-    runtime_lifecycle_support,
     test_run_facade_support,
 )
 
@@ -49,17 +49,7 @@ def _test_run_runtime():
 
 
 test_run_facade_support.configure_test_run_facade(_test_run_runtime, globals())
-
-
-@app.on_event("startup")
-async def startup_event():
-    await runtime_lifecycle_support.startup(_test_run_runtime())
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Gracefully shut down all running processes."""
-    await runtime_lifecycle_support.shutdown(_test_run_runtime())
+main_lifecycle_event_facade_support.configure_main_lifecycle_event_facade(app, _test_run_runtime, globals())
 
 
 
