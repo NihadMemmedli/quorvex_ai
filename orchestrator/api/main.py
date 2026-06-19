@@ -13,56 +13,9 @@ orchestrator_dir = Path(__file__).resolve().parent.parent
 if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
-import asyncio  # noqa: F401
-import functools  # noqa: F401
-import shutil  # noqa: F401
-import subprocess  # noqa: F401
-import threading  # noqa: F401
-import uuid  # noqa: F401
-from datetime import datetime, timedelta  # noqa: F401
-
 from fastapi import FastAPI
-from sqlmodel import Session, select  # noqa: F401
 
-from logging_config import get_logger, request_id_var, setup_logging  # noqa: F401
-from orchestrator.services.agent_runtimes import normalize_agent_runtime  # noqa: F401
-from orchestrator.services.browser_auth_sessions import (
-    BrowserAuthSessionError,  # noqa: F401
-    ensure_browser_auth_session_usable,  # noqa: F401
-    resolve_browser_auth_for_run,  # noqa: F401
-    resolve_browser_auth_session_row,  # noqa: F401
-)
-from orchestrator.services.browser_slots import browser_operation_slot  # noqa: F401
-from orchestrator.services.coding_agent import (  # noqa: F401
-    CODING_ARTIFACT_PATCH,
-    DEFAULT_REPO_ROOT,
-    build_coding_agent_prompt,
-    build_coding_tool_permission_guard,
-    coding_agent_allowed_tools,
-    coding_agent_subagents,
-    validate_patch_for_repo,
-    write_coding_artifacts,
-)
-from services.browser_pool import AbstractBrowserPool, get_browser_pool  # noqa: F401
-from services.browser_pool import OperationType as BrowserOpType  # noqa: F401
-from services.resource_manager import (
-    ResourceManager,  # noqa: F401
-    get_resource_manager,  # noqa: F401
-)
-from utils.agent_report import (  # noqa: F401
-    CUSTOM_AGENT_REPORT_INSTRUCTIONS,
-    _as_report_list,
-    _build_custom_agent_structured_report,
-    _clean_text,
-)
-from utils.agent_tool_allowlists import get_agent_allowed_tools  # noqa: F401
-from utils.claude_config import copy_claude_project_config  # noqa: F401
-from utils.playwright_mcp import (
-    browser_runtime_status,  # noqa: F401
-    prepare_run_playwright_config_content,  # noqa: F401
-    write_playwright_test_mcp_config,  # noqa: F401
-)
-from utils.project_utils import derive_project_id_from_url  # noqa: F401
+from logging_config import get_logger, setup_logging
 
 from . import (  # noqa: F401
     agent_coding_patch,
@@ -94,6 +47,7 @@ from . import (  # noqa: F401
     jira,
     llm_testing,
     load_testing,
+    main_runtime_dependency_facade_support,
     main_static_facade_support,
     memory,
     prd,
@@ -127,28 +81,12 @@ from . import (  # noqa: F401
     users,
     workflows,
 )
-from .db import (
-    engine,  # noqa: F401
-    get_database_type,  # noqa: F401
-    init_db,  # noqa: F401
-    is_parallel_mode_available,  # noqa: F401
-)
-from .middleware.permissions import ProjectRole, check_project_access  # noqa: F401
-from .models_db import (
-    AgentRun,  # noqa: F401 - exposed through main for agent dependency compatibility
-    ExplorationSession,  # noqa: F401
-    RegressionBatch,  # noqa: F401
-)
-from .models_db import ExecutionSettings as DBExecutionSettings  # noqa: F401
-from .models_db import SpecMetadata as DBSpecMetadata  # noqa: F401
-from .models_db import TestRun as DBTestRun  # noqa: F401
-from .models_db import get_spec_metadata as get_db_spec_metadata  # noqa: F401
-from .process_manager import ProcessManager, get_process_manager  # noqa: F401
 
 # Initialize logging
 setup_logging(level="INFO", console=True)
 logger = get_logger(__name__)
 
+main_runtime_dependency_facade_support.configure_main_runtime_dependency_facade(globals())
 main_static_facade_support.configure_main_static_facade(globals())
 
 
