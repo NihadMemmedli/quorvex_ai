@@ -18,18 +18,13 @@ import functools
 import shutil  # noqa: F401
 import subprocess
 import threading
-import uuid
+import uuid  # noqa: F401
 from datetime import datetime, timedelta  # noqa: F401
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from slowapi.errors import RateLimitExceeded
 from sqlmodel import Session, select  # noqa: F401
-from starlette.requests import Request
-from starlette.responses import JSONResponse
 
-from logging_config import get_logger, request_id_var, setup_logging
+from logging_config import get_logger, request_id_var, setup_logging  # noqa: F401
 from orchestrator.services.agent_runtimes import normalize_agent_runtime  # noqa: F401
 from orchestrator.services.browser_auth_sessions import (
     BrowserAuthSessionError,  # noqa: F401
@@ -69,7 +64,7 @@ from utils.playwright_mcp import (
 )
 from utils.project_utils import derive_project_id_from_url  # noqa: F401
 
-from . import (
+from . import (  # noqa: F401
     agent_coding_patch,
     agent_compat_alias_support,
     agent_definitions,
@@ -82,6 +77,7 @@ from . import (
     agent_sessions,
     analytics,
     api_testing,
+    app_wiring_support,
     auth,
     autonomous,
     autopilot,
@@ -136,7 +132,6 @@ from .db import (
     is_parallel_mode_available,  # noqa: F401
 )
 from .middleware.permissions import ProjectRole, check_project_access  # noqa: F401
-from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from .models_db import (
     AgentRun,  # noqa: F401 - exposed through main for agent dependency compatibility
     ExplorationSession,  # noqa: F401
@@ -186,145 +181,31 @@ _compose_test_run_log_payload = run_files.compose_test_run_log_payload
 _BACKGROUND_TASKS: list[asyncio.Task] = []
 
 
-app = FastAPI(title="Quorvex AI API")
-
-# Add rate limiter state to app
-app.state.limiter = limiter
-
-# Add rate limit exception handler
-app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    req_id = request_id_var.get("")
-    logger.error(f"Unhandled exception [req={req_id}]: {exc}", exc_info=True)
-    # Include CORS headers so browsers can read the error response
-    origin = request.headers.get("origin", "")
-    headers = {}
-    if origin in ALLOWED_ORIGINS:
-        headers["access-control-allow-origin"] = origin
-        headers["access-control-allow-credentials"] = "true"
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "request_id": req_id},
-        headers=headers,
-    )
-
-
-# Include routers
-app.include_router(auth.router)  # Auth endpoints first
-app.include_router(users.router)  # User management (superuser only)
-app.include_router(dashboard.router)
-app.include_router(settings.router)
-app.include_router(specs.router)
-app.include_router(memory.router)
-app.include_router(prd.router)
-app.include_router(regression.router)
-app.include_router(projects.router)
-app.include_router(test_data.router)
-app.include_router(browser_auth_sessions.router)
-app.include_router(recordings.router)
-app.include_router(exploration.router)
-app.include_router(requirements.router)
-app.include_router(rtm.router)
-app.include_router(testrail.router)  # TestRail integration
-app.include_router(testrail_files.router)  # Legacy TestRail file import/export
-app.include_router(jira.router)  # Jira integration
-app.include_router(scheduling.router)  # Cron scheduling
-app.include_router(ci_control.router)  # Provider-neutral CI/CD control center
-app.include_router(gitlab_ci.router)  # GitLab CI/CD integration
-app.include_router(github_ci.router)  # GitHub Actions integration
-app.include_router(api_testing.router)  # API testing endpoints
-app.include_router(load_testing.router)  # Load testing endpoints
-app.include_router(security_testing.router)  # Security testing endpoints
-app.include_router(database_testing.router)  # Database testing endpoints
-app.include_router(llm_testing.router)  # LLM/AI testing endpoints
-app.include_router(analytics.router)  # Analytics dashboard
-app.include_router(health.router)  # Storage health endpoints
-app.include_router(chat.router)  # AI assistant chat endpoints
-app.include_router(autopilot.router)  # Auto Pilot pipeline endpoints
-app.include_router(autonomous.router)  # Persistent autonomous testing missions
-app.include_router(runs.router)  # Test run lifecycle endpoints
-app.include_router(runtime_ops.router)  # Operational runtime, queue, health, and debug endpoints
-app.include_router(agent_queue_ops.router)  # Legacy agent queue operation endpoints
-app.include_router(workflows.router)  # Custom workflow endpoints
-app.include_router(backup_control.router)  # Database backup control endpoints
-app.include_router(agent_sessions.router)  # Legacy agent authentication session endpoints
-app.mount("/artifacts", StaticFiles(directory=RUNS_DIR), name="artifacts")
-
 # CORS Configuration - restrict origins in production
 # Set ALLOWED_ORIGINS env var with comma-separated URLs (e.g., "https://app.company.com,http://localhost:3000")
 DEFAULT_ALLOWED_ORIGINS = "http://localhost:3000,http://host.docker.internal:3000"
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS).split(",")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
-)
 
-# Add request logging middleware
-from starlette.middleware.base import BaseHTTPMiddleware
+def _main_runtime():
+    return sys.modules[__name__]
 
 
-class RequestLoggingMiddlewareHTTP(BaseHTTPMiddleware):
-    """HTTP middleware wrapper for request logging."""
-
-    async def dispatch(self, request, call_next):
-        import time as time_module
-
-        request_id = str(uuid.uuid4())[:8]
-        start_time = time_module.time()
-
-        # Log request (skip noisy endpoints)
-        path = request.url.path
-        if not path.startswith("/health") and not path.startswith("/artifacts"):
-            logger.info(f"[{request_id}] --> {request.method} {path}")
-
-        try:
-            response = await call_next(request)
-
-            # Log response (skip noisy endpoints)
-            if not path.startswith("/health") and not path.startswith("/artifacts"):
-                duration_ms = (time_module.time() - start_time) * 1000
-                log_level = (
-                    "info" if response.status_code < 400 else "warning" if response.status_code < 500 else "error"
-                )
-                getattr(logger, log_level)(f"[{request_id}] <-- {response.status_code} in {duration_ms:.1f}ms")
-
-            # Add request ID header
-            response.headers["X-Request-ID"] = request_id
-            return response
-
-        except Exception as e:
-            duration_ms = (time_module.time() - start_time) * 1000
-            logger.error(f"[{request_id}] <-- ERROR in {duration_ms:.1f}ms: {e}")
-            raise
+RequestLoggingMiddlewareHTTP = app_wiring_support.RequestLoggingMiddlewareHTTP
+RequestSizeLimitMiddleware = app_wiring_support.RequestSizeLimitMiddleware
+BaseHTTPMiddleware = app_wiring_support.BaseHTTPMiddleware
+CORSMiddleware = app_wiring_support.CORSMiddleware
+JSONResponse = app_wiring_support.JSONResponse
+RateLimitExceeded = app_wiring_support.RateLimitExceeded
+Request = app_wiring_support.Request
+StaticFiles = app_wiring_support.StaticFiles
+global_exception_handler = app_wiring_support.global_exception_handler
+limiter = app_wiring_support.limiter
+rate_limit_exceeded_handler = app_wiring_support.rate_limit_exceeded_handler
 
 
-app.add_middleware(RequestLoggingMiddlewareHTTP)
-
-
-# Request size limit middleware (50MB max)
-class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
-    """Reject requests larger than the configured limit."""
-
-    MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50 MB
-
-    async def dispatch(self, request, call_next):
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > self.MAX_CONTENT_LENGTH:
-            return JSONResponse(
-                status_code=413,
-                content={"detail": f"Request too large. Maximum size is {self.MAX_CONTENT_LENGTH // (1024 * 1024)}MB."},
-            )
-        return await call_next(request)
-
-
-app.add_middleware(RequestSizeLimitMiddleware)
+app = FastAPI(title="Quorvex AI API")
+app_wiring_support.configure_app(_main_runtime(), app)
 
 # Limit concurrent test executions
 EXECUTION_SEMAPHORE: asyncio.Semaphore | None = None
@@ -834,12 +715,3 @@ generate_flow_test = agent_exploratory.generate_flow_test
 
 
 agent_exploratory.configure_dependencies_provider(_agent_exploratory_dependencies)
-
-
-app.include_router(agent_definitions.router)  # Custom agent tool catalog and definition endpoints
-app.include_router(agent_run_launch.router)  # Agent run launch endpoint
-app.include_router(agent_run_observability.router)  # Read-only agent run visibility endpoints
-app.include_router(agent_coding_patch.router)  # Coding agent patch review endpoints
-app.include_router(agent_run_control.router)  # Agent run pause, resume, cancel, and retry endpoints
-app.include_router(agent_reports.router)  # Custom agent report retrieval, editing, search, and import endpoints
-app.include_router(agent_exploratory.router)  # Exploratory agent and spec generation endpoints
