@@ -14,12 +14,12 @@ if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
 import asyncio
+import functools
 import shutil  # noqa: F401
 import subprocess
 import threading
 import uuid
 from datetime import datetime, timedelta  # noqa: F401
-from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -334,39 +334,38 @@ ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
 _processes_lock = threading.Lock()
 
 
-def register_process(run_id: str, proc: subprocess.Popen) -> None:
-    """Thread-safe registration of an active process."""
-    return test_run_process_registry_support.register_process(_test_run_runtime(), run_id, proc)
+def _test_run_runtime():
+    return sys.modules[__name__]
 
 
-def unregister_process(run_id: str) -> subprocess.Popen | None:
-    """Thread-safe removal of an active process. Returns the process if found."""
-    return test_run_process_registry_support.unregister_process(_test_run_runtime(), run_id)
-
-
-def get_process(run_id: str) -> subprocess.Popen | None:
-    """Thread-safe retrieval of an active process."""
-    return test_run_process_registry_support.get_process(_test_run_runtime(), run_id)
-
-
-def is_process_active(run_id: str) -> bool:
-    """Thread-safe check if a process is active."""
-    return test_run_process_registry_support.is_process_active(_test_run_runtime(), run_id)
-
-
-def get_active_process_count() -> int:
-    """Thread-safe count of active processes."""
-    return test_run_process_registry_support.get_active_process_count(_test_run_runtime())
-
-
-def list_active_process_ids() -> list:
-    """Thread-safe list of active process IDs."""
-    return test_run_process_registry_support.list_active_process_ids(_test_run_runtime())
-
-
-def clear_all_processes() -> dict[str, subprocess.Popen]:
-    """Thread-safe clear of all processes. Returns the old dict."""
-    return test_run_process_registry_support.clear_all_processes(_test_run_runtime())
+register_process = functools.partial(
+    test_run_process_registry_support.register_process,
+    _test_run_runtime(),
+)
+unregister_process = functools.partial(
+    test_run_process_registry_support.unregister_process,
+    _test_run_runtime(),
+)
+get_process = functools.partial(
+    test_run_process_registry_support.get_process,
+    _test_run_runtime(),
+)
+is_process_active = functools.partial(
+    test_run_process_registry_support.is_process_active,
+    _test_run_runtime(),
+)
+get_active_process_count = functools.partial(
+    test_run_process_registry_support.get_active_process_count,
+    _test_run_runtime(),
+)
+list_active_process_ids = functools.partial(
+    test_run_process_registry_support.list_active_process_ids,
+    _test_run_runtime(),
+)
+clear_all_processes = functools.partial(
+    test_run_process_registry_support.clear_all_processes,
+    _test_run_runtime(),
+)
 
 
 # Process manager for persistent tracking and graceful termination
@@ -387,34 +386,22 @@ RESOURCE_MANAGER: ResourceManager | None = None
 BROWSER_POOL: AbstractBrowserPool | None = None
 
 
-def cleanup_orphaned_runs():
-    """Mark stuck running/queued entries as stopped on startup.
-
-    This handles the case where the server restarts and loses the in-memory
-    ACTIVE_PROCESSES dict, leaving DB entries in running/queued state.
-
-    IMPORTANT: Preserves runs that already completed (status.txt has terminal status).
-    """
-    return test_run_cleanup_support.cleanup_orphaned_runs(_test_run_runtime())
-
-
-async def _cleanup_test_run_runtime(run_id: str, reason: str = "cleanup requested") -> dict[str, object]:
-    """Cancel agent tasks and browser process trees owned by one test run."""
-    return await test_run_cleanup_support.cleanup_test_run_runtime(
-        _test_run_runtime(),
-        run_id,
-        reason,
-    )
-
-
-def cleanup_terminal_test_run_processes() -> int:
-    """Kill browser process trees for test runs already marked terminal."""
-    return test_run_cleanup_support.cleanup_terminal_test_run_processes(_test_run_runtime())
-
-
-def sync_data_from_files():
-    """Sync existing file-based runs and metadata to DB on startup."""
-    return test_run_read_model_support.sync_data_from_files(_test_run_runtime())
+cleanup_orphaned_runs = functools.partial(
+    test_run_cleanup_support.cleanup_orphaned_runs,
+    _test_run_runtime(),
+)
+_cleanup_test_run_runtime = functools.partial(
+    test_run_cleanup_support.cleanup_test_run_runtime,
+    _test_run_runtime(),
+)
+cleanup_terminal_test_run_processes = functools.partial(
+    test_run_cleanup_support.cleanup_terminal_test_run_processes,
+    _test_run_runtime(),
+)
+sync_data_from_files = functools.partial(
+    test_run_read_model_support.sync_data_from_files,
+    _test_run_runtime(),
+)
 
 
 @app.on_event("startup")
@@ -702,92 +689,50 @@ async def shutdown_event():
 # ========= Execution Logic =========
 
 
-def update_batch_stats(batch_id: str):
-    """Update batch statistics after a run completes.
-
-    Uses explicit transaction with rollback on failure to ensure data integrity.
-    Locks the batch row to prevent race conditions when multiple runs complete simultaneously.
-    """
-    return test_run_batch_watchdog_support.update_batch_stats(_test_run_runtime(), batch_id)
-
-
-async def _finalize_quality_gate_for_batch_safe(batch_id: str):
-    return await test_run_batch_watchdog_support._finalize_quality_gate_for_batch_safe(
-        _test_run_runtime(), batch_id
-    )
-
-
-async def _quality_gate_finalizer_loop():
-    """Periodically publish missed final PR quality gate feedback."""
-    return await test_run_batch_watchdog_support._quality_gate_finalizer_loop(_test_run_runtime())
-
-
-async def _batch_watchdog():
-    """Background task that detects and cleans up stuck runs.
-
-    Runs every 60 seconds. First cleans orphaned runs (running in DB but no
-    active process, >120s old). Then checks for runs stuck beyond MAX_RUN_AGE_MINUTES
-    (default 120, configurable via env). Skips runs with recently-updated log files.
-    """
-    return await test_run_batch_watchdog_support._batch_watchdog(_test_run_runtime())
-
-
-async def _queue_watchdog():
-    """Background task that detects orphaned queued entries after uvicorn reload.
-
-    Runs every 30 seconds. If a run has been in 'queued' status for > 60 seconds
-    and has no backing asyncio task in PROCESS_MANAGER, it's marked as 'stopped'.
-    This catches the case where uvicorn reloads kill asyncio tasks silently.
-    """
-    return await test_run_batch_watchdog_support._queue_watchdog(_test_run_runtime())
-
-
-async def _exploration_cleanup_loop():
-    """Background task that cleans up stuck exploration sessions.
-
-    Runs every 5 minutes. Marks explorations that have been "running" longer than
-    their configured timeout as "failed". Also sweeps the in-memory tracking dict
-    and cleans up stale browser pool slots.
-    """
-    return await test_run_maintenance_loop_support._exploration_cleanup_loop(_test_run_runtime())
-
-
-async def _browser_pool_cleanup_loop():
-    """Periodically clean up stale browser slots every 10 minutes.
-
-    If a browser slot crashes mid-operation, it stays "acquired" forever
-    until the next restart. This loop prevents that leak.
-    """
-    return await test_run_maintenance_loop_support._browser_pool_cleanup_loop(_test_run_runtime())
-
-
-async def _infrastructure_maintenance_loop():
-    """Periodic infrastructure maintenance: orphan cleanup, temp cleanup, DB maintenance.
-
-    Runs every 15 minutes for orphan/temp cleanup.
-    Runs DB maintenance every 24 hours.
-    """
-    return await test_run_maintenance_loop_support._infrastructure_maintenance_loop(_test_run_runtime())
-
-
-async def _schedule_execution_watchdog():
-    """Sync schedule execution status from completed batches.
-
-    Runs every 30 seconds, checks running ScheduleExecution records and
-    syncs their status from the linked RegressionBatch records.
-    Also cleans up stale executions that have no batch or are too old.
-    """
-    return await test_run_schedule_watchdog_support._schedule_execution_watchdog(_test_run_runtime())
-
-
-async def _run_db_maintenance():
-    """Run periodic database maintenance: ANALYZE and old data pruning."""
-    return await test_run_maintenance_loop_support._run_db_maintenance(_test_run_runtime())
-
-
-async def _log_startup_diagnostics():
-    """Log system diagnostics at startup for early problem detection."""
-    return await startup_diagnostics_support._log_startup_diagnostics(_test_run_runtime())
+update_batch_stats = functools.partial(
+    test_run_batch_watchdog_support.update_batch_stats,
+    _test_run_runtime(),
+)
+_finalize_quality_gate_for_batch_safe = functools.partial(
+    test_run_batch_watchdog_support._finalize_quality_gate_for_batch_safe,
+    _test_run_runtime(),
+)
+_quality_gate_finalizer_loop = functools.partial(
+    test_run_batch_watchdog_support._quality_gate_finalizer_loop,
+    _test_run_runtime(),
+)
+_batch_watchdog = functools.partial(
+    test_run_batch_watchdog_support._batch_watchdog,
+    _test_run_runtime(),
+)
+_queue_watchdog = functools.partial(
+    test_run_batch_watchdog_support._queue_watchdog,
+    _test_run_runtime(),
+)
+_exploration_cleanup_loop = functools.partial(
+    test_run_maintenance_loop_support._exploration_cleanup_loop,
+    _test_run_runtime(),
+)
+_browser_pool_cleanup_loop = functools.partial(
+    test_run_maintenance_loop_support._browser_pool_cleanup_loop,
+    _test_run_runtime(),
+)
+_infrastructure_maintenance_loop = functools.partial(
+    test_run_maintenance_loop_support._infrastructure_maintenance_loop,
+    _test_run_runtime(),
+)
+_schedule_execution_watchdog = functools.partial(
+    test_run_schedule_watchdog_support._schedule_execution_watchdog,
+    _test_run_runtime(),
+)
+_run_db_maintenance = functools.partial(
+    test_run_maintenance_loop_support._run_db_maintenance,
+    _test_run_runtime(),
+)
+_log_startup_diagnostics = functools.partial(
+    startup_diagnostics_support._log_startup_diagnostics,
+    _test_run_runtime(),
+)
 
 
 _STARTUP_IMPORT_FAILURE_MESSAGE = (
@@ -795,94 +740,21 @@ _STARTUP_IMPORT_FAILURE_MESSAGE = (
 )
 
 
-def _test_run_runtime():
-    return sys.modules[__name__]
-
-
 test_run_queue_manager_support.configure_runtime(_test_run_runtime)
 
 
-def _record_startup_import_failure(run_id: str, run_dir_path: Path, *, retrying: bool) -> None:
-    test_run_runtime_support.record_startup_import_failure(
-        _test_run_runtime(),
-        run_id,
-        run_dir_path,
-        retrying=retrying,
-    )
-
-
-def _run_test_cli_subprocess_with_retry(
-    *,
-    cmd: list[str],
-    cwd: Path,
-    env: dict[str, str],
-    run_id: str,
-    run_dir_path: Path,
-    spec_name: str,
-    batch_id: str | None,
-    append_workflow_log,
-    timeout_seconds: int = 3600,
-) -> int | None:
-    """Run the CLI subprocess, retrying only early Errno 35 import failures."""
-    return test_run_runtime_support.run_test_cli_subprocess_with_retry(
-        _test_run_runtime(),
-        cmd=cmd,
-        cwd=cwd,
-        env=env,
-        run_id=run_id,
-        run_dir_path=run_dir_path,
-        spec_name=spec_name,
-        batch_id=batch_id,
-        append_workflow_log=append_workflow_log,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def execute_run_task(
-    spec_path: str,
-    run_dir: str,
-    run_id: str,
-    try_code_path: str = None,
-    browser: str = "chromium",
-    hybrid: bool = False,
-    max_iterations: int = 20,
-    headless: bool = False,
-    memory_enabled: bool = True,
-    spec_name: str = "",
-    batch_id: str = None,
-    project_id: str = None,
-    model_tier: str | None = None,
-    storage_state_path: str | None = None,
-    browser_auth_context: dict[str, Any] | None = None,
-    test_data_refs: list[str] | None = None,
-):
-    """Execute the native pipeline (default) with optional hybrid healing mode.
-
-    Native pipeline is always used. The only choice is healing mode:
-    - hybrid=False: Native Healer (3 attempts using test_run + diagnostic/devtools tools)
-    - hybrid=True: Native + Ralph (3 attempts + up to 17 more)
-
-    Process groups are used to ensure all child processes can be terminated together.
-    """
-    return test_run_runtime_support.execute_run_task(
-        _test_run_runtime(),
-        spec_path,
-        run_dir,
-        run_id,
-        try_code_path,
-        browser,
-        hybrid,
-        max_iterations,
-        headless,
-        memory_enabled,
-        spec_name,
-        batch_id,
-        project_id,
-        model_tier,
-        storage_state_path,
-        browser_auth_context,
-        test_data_refs,
-    )
+_record_startup_import_failure = functools.partial(
+    test_run_runtime_support.record_startup_import_failure,
+    _test_run_runtime(),
+)
+_run_test_cli_subprocess_with_retry = functools.partial(
+    test_run_runtime_support.run_test_cli_subprocess_with_retry,
+    _test_run_runtime(),
+)
+execute_run_task = functools.partial(
+    test_run_runtime_support.execute_run_task,
+    _test_run_runtime(),
+)
 
 
 def _task_exception_handler(task: asyncio.Task):
@@ -899,168 +771,42 @@ def _task_exception_handler(task: asyncio.Task):
         pass
 
 
-async def execute_run_task_wrapper(
-    spec_path: str,
-    run_dir: str,
-    run_id: str,
-    try_code_path: str = None,
-    browser: str = "chromium",
-    hybrid: bool = False,
-    max_iterations: int = 20,
-    batch_id: str = None,
-    spec_name: str = "",
-    project_id: str = None,
-    model_tier: str | None = None,
-    storage_state_path: str | None = None,
-    browser_auth_context: dict[str, Any] | None = None,
-    test_data_refs: list[str] | None = None,
-):
-    """Async wrapper for execute_run_task with unified browser queue management.
-
-    Uses BrowserResourcePool to limit concurrent browser operations across
-    ALL operation types (test runs, explorations, agents, PRD).
-
-    Note: BROWSER_POOL is initialized at startup in startup_event().
-    """
-    return await test_run_runtime_support.execute_run_task_wrapper(
-        _test_run_runtime(),
-        spec_path,
-        run_dir,
-        run_id,
-        try_code_path,
-        browser,
-        hybrid,
-        max_iterations,
-        batch_id,
-        spec_name,
-        project_id,
-        model_tier,
-        storage_state_path,
-        browser_auth_context,
-        test_data_refs,
-    )
-
-
-def execute_mobile_run_task(
-    spec_path: str,
-    run_dir: str,
-    run_id: str,
-    platform: str = "ios",
-    appium_server_url: str | None = None,
-    capabilities_file: str | None = None,
-    spec_name: str = "",
-    batch_id: str = None,
-    project_id: str = None,
-):
-    """Execute the Appium mobile pipeline in an isolated subprocess."""
-    return test_run_runtime_support.execute_mobile_run_task(
-        _test_run_runtime(),
-        spec_path,
-        run_dir,
-        run_id,
-        platform,
-        appium_server_url,
-        capabilities_file,
-        spec_name,
-        batch_id,
-        project_id,
-    )
-
-
-async def execute_mobile_run_task_wrapper(
-    spec_path: str,
-    run_dir: str,
-    run_id: str,
-    platform: str = "ios",
-    appium_server_url: str | None = None,
-    capabilities_file: str | None = None,
-    batch_id: str = None,
-    spec_name: str = "",
-    project_id: str = None,
-):
-    """Async wrapper for Appium mobile runs."""
-    return await test_run_runtime_support.execute_mobile_run_task_wrapper(
-        _test_run_runtime(),
-        spec_path,
-        run_dir,
-        run_id,
-        platform,
-        appium_server_url,
-        capabilities_file,
-        batch_id,
-        spec_name,
-        project_id,
-    )
-
-
-async def _start_test_run_temporal_or_fail(
-    run: DBTestRun,
-    payload: dict[str, Any],
-    session: Session,
-    *,
-    task_queue: str | None = None,
-) -> None:
-    await test_run_runtime_support.start_test_run_temporal_or_fail(
-        _test_run_runtime(),
-        run,
-        payload,
-        session,
-        task_queue=task_queue,
-    )
-
-
-async def _signal_test_run_temporal(run: DBTestRun, signal_name: str, *args) -> None:
-    await test_run_runtime_support.signal_test_run_temporal(_test_run_runtime(), run, signal_name, *args)
-
-
-def _has_browser_auth_selection(
-    *,
-    browser_auth_session_id: str | None,
-    use_project_default_browser_auth: bool,
-) -> bool:
-    return test_run_runtime_support.has_browser_auth_selection(
-        _test_run_runtime(),
-        browser_auth_session_id=browser_auth_session_id,
-        use_project_default_browser_auth=use_project_default_browser_auth,
-    )
-
-
-def _validate_browser_auth_selection_for_project(
-    session: Session,
-    project_id: str | None,
-    *,
-    browser_auth_session_id: str | None,
-    use_project_default_browser_auth: bool,
-) -> None:
-    test_run_runtime_support.validate_browser_auth_selection_for_project(
-        _test_run_runtime(),
-        session,
-        project_id,
-        browser_auth_session_id=browser_auth_session_id,
-        use_project_default_browser_auth=use_project_default_browser_auth,
-    )
-
-
-def _resolve_browser_auth_storage_state_for_run(
-    session: Session,
-    project_id: str | None,
-    *,
-    run_dir: Path,
-    browser_auth_session_id: str | None,
-    use_project_default_browser_auth: bool,
-) -> tuple[str | None, dict[str, Any]]:
-    return test_run_runtime_support.resolve_browser_auth_storage_state_for_run(
-        _test_run_runtime(),
-        session,
-        project_id,
-        run_dir=run_dir,
-        browser_auth_session_id=browser_auth_session_id,
-        use_project_default_browser_auth=use_project_default_browser_auth,
-    )
-
-
-def _normalize_request_test_data_refs(refs: list[str] | None) -> list[str]:
-    return test_run_runtime_support.normalize_request_test_data_refs(_test_run_runtime(), refs)
+execute_run_task_wrapper = functools.partial(
+    test_run_runtime_support.execute_run_task_wrapper,
+    _test_run_runtime(),
+)
+execute_mobile_run_task = functools.partial(
+    test_run_runtime_support.execute_mobile_run_task,
+    _test_run_runtime(),
+)
+execute_mobile_run_task_wrapper = functools.partial(
+    test_run_runtime_support.execute_mobile_run_task_wrapper,
+    _test_run_runtime(),
+)
+_start_test_run_temporal_or_fail = functools.partial(
+    test_run_runtime_support.start_test_run_temporal_or_fail,
+    _test_run_runtime(),
+)
+_signal_test_run_temporal = functools.partial(
+    test_run_runtime_support.signal_test_run_temporal,
+    _test_run_runtime(),
+)
+_has_browser_auth_selection = functools.partial(
+    test_run_runtime_support.has_browser_auth_selection,
+    _test_run_runtime(),
+)
+_validate_browser_auth_selection_for_project = functools.partial(
+    test_run_runtime_support.validate_browser_auth_selection_for_project,
+    _test_run_runtime(),
+)
+_resolve_browser_auth_storage_state_for_run = functools.partial(
+    test_run_runtime_support.resolve_browser_auth_storage_state_for_run,
+    _test_run_runtime(),
+)
+_normalize_request_test_data_refs = functools.partial(
+    test_run_runtime_support.normalize_request_test_data_refs,
+    _test_run_runtime(),
+)
 
 
 # ========= Agents =========
