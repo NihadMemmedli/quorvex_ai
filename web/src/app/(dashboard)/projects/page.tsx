@@ -294,6 +294,7 @@ export default function ProjectsPage() {
                                     )}
                                     <button
                                         onClick={() => handleOpenEdit(project)}
+                                        aria-label={`Edit ${project.name}`}
                                         style={{
                                             padding: '0.5rem',
                                             background: 'transparent',
@@ -317,6 +318,7 @@ export default function ProjectsPage() {
                                     {project.id !== 'default' && (
                                         <button
                                             onClick={() => handleOpenDelete(project)}
+                                            aria-label={`Delete ${project.name}`}
                                             style={{
                                                 padding: '0.5rem',
                                                 background: 'transparent',

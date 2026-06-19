@@ -219,13 +219,24 @@ class MemoryDashboardPage {
   }
 }
 
+async function openAgentMemoryTab(page: Page) {
+  const agentTab = page.getByRole('tab', { name: /Agent Memory/i });
+  await expect(async () => {
+    await agentTab.click();
+    await expect(agentTab).toHaveAttribute('aria-selected', 'true');
+  }).toPass({ timeout: 10_000 });
+  await expect(page.getByRole('heading', { name: 'Agent memories' })).toBeVisible();
+}
+
 test.describe('Memory dashboard', () => {
+  test.describe.configure({ mode: 'serial' });
+
   test('renders diagnostics, effectiveness, repair results, and scored context preview', async ({ page }) => {
     const memory = new MemoryDashboardPage(page);
     await memory.mockBackend();
     await memory.open();
 
-    await expect(page.getByRole('heading', { name: 'Memory' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Memory', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Operational health' })).toBeVisible();
     await expect(page.getByText('Some injection events reference missing memories')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Effectiveness' })).toBeVisible();
@@ -234,10 +245,10 @@ test.describe('Memory dashboard', () => {
 
     await page.getByRole('button', { name: 'Mark missing refs' }).click();
     await expect(page.getByText('mark missing injection refs dry run found 1 item.')).toBeVisible();
-    await expect(page.getByText('"action": "mark_missing_injection_refs"')).toBeVisible();
+    await expect(page.locator('pre.memory-preview').filter({ hasText: 'mark_missing_injection_refs' })).toBeVisible();
 
-    await page.getByRole('tab', { name: /Agent Memory/i }).click();
-    await page.getByRole('button', { name: /Preview/i }).click();
+    await openAgentMemoryTab(page);
+    await page.locator('.memory-support-grid').getByRole('button', { name: /^Preview$/ }).click();
     await expect(page.getByText('## Memory Context')).toBeVisible();
     await expect(page.getByText('High-importance memory has not been verified.')).toBeVisible();
     await expect(page.getByText('"retrieval_reason": "project scoped"')).toBeVisible();
@@ -344,9 +355,9 @@ test.describe('Memory dashboard', () => {
     });
 
     await memory.open();
-    await page.getByRole('tab', { name: /Agent Memory/i }).click();
-    await expect(page.getByText('Project memory')).toBeVisible();
-    await expect(page.getByText('Global memory')).toBeVisible();
+    await openAgentMemoryTab(page);
+    await expect(page.getByRole('heading', { name: 'Project memory' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Global memory' })).toBeVisible();
 
     await page.locator('article.memory-card').filter({ hasText: 'Project memory' }).getByRole('button', { name: 'Approve' }).click();
     expect(lastMutation()).toMatchObject({
@@ -355,6 +366,7 @@ test.describe('Memory dashboard', () => {
       search: '?project_id=default',
     });
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Global memory' }).getByRole('button', { name: 'Approve' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -362,6 +374,7 @@ test.describe('Memory dashboard', () => {
       search: '',
     });
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Global memory' }).getByRole('button', { name: 'Verify' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -369,6 +382,7 @@ test.describe('Memory dashboard', () => {
       search: '',
     });
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Project memory' }).getByRole('button', { name: 'Verify' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -376,8 +390,9 @@ test.describe('Memory dashboard', () => {
       search: '?project_id=default',
     });
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Global memory' }).getByRole('button', { name: 'Edit' }).click();
-    await page.getByLabel('Summary').fill('Global memory updated');
+    await page.getByRole('textbox', { name: 'Summary' }).fill('Global memory updated');
     await page.getByRole('button', { name: 'Save memory' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -391,6 +406,7 @@ test.describe('Memory dashboard', () => {
       scope: 'global',
     });
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Global memory updated' }).getByRole('button', { name: 'Archive' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -399,8 +415,9 @@ test.describe('Memory dashboard', () => {
     });
     await expect(page.getByText('Global memory updated')).toHaveCount(0);
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Project memory' }).getByRole('button', { name: 'Edit' }).click();
-    await page.getByLabel('Summary').fill('Project memory updated');
+    await page.getByRole('textbox', { name: 'Summary' }).fill('Project memory updated');
     await page.getByRole('button', { name: 'Save memory' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -414,6 +431,7 @@ test.describe('Memory dashboard', () => {
       scope: 'project',
     });
 
+    await openAgentMemoryTab(page);
     await page.locator('article.memory-card').filter({ hasText: 'Project memory updated' }).getByRole('button', { name: 'Archive' }).click();
     expect(lastMutation()).toMatchObject({
       method: 'PATCH',
@@ -451,7 +469,7 @@ test.describe('Memory dashboard', () => {
     ];
 
     await page.getByRole('button', { name: 'Refresh' }).click();
-    await expect(page.getByText('Global delete memory')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Global delete memory' })).toBeVisible();
     await page.locator('article.memory-card').filter({ hasText: 'Global delete memory' }).getByRole('button', { name: 'Delete' }).click();
     await expect(page.getByText('Delete memory?')).toBeVisible();
     await page.getByRole('button', { name: 'Delete' }).last().click();
@@ -460,6 +478,6 @@ test.describe('Memory dashboard', () => {
       pathname: '/api/memory/agent/global-delete-memory',
       search: '',
     });
-    await expect(page.getByText('Global delete memory')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Global delete memory' })).toHaveCount(0);
   });
 });

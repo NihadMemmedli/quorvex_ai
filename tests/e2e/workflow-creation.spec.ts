@@ -263,7 +263,10 @@ test.describe('Workflow creation dashboard', () => {
     const requirementsStep = page.locator('article').filter({ hasText: 'Generate Requirements' }).first();
     await expect(requirementsStep.getByText('Use Start Exploration output')).toBeVisible();
     await expect(requirementsStep.getByText('Connected to Start Exploration.')).toBeVisible();
-    await expect(requirementsStep.getByDisplayValue('{{steps.exploration_1.external_id}}')).toHaveCount(0);
+    await expect.poll(async () => page.locator('input, textarea').evaluateAll(
+      (fields, value) => fields.filter(field => (field as HTMLInputElement | HTMLTextAreaElement).value === value).length,
+      '{{steps.exploration_1.external_id}}',
+    )).toBe(0);
     await expect(requirementsStep.getByText('Add Start Exploration before Generate Requirements')).toHaveCount(0);
   });
 

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "npx playwright test",
+    "test:e2e:dashboard-critical": "sh -c 'PLAYWRIGHT_START_WEB_SERVER=true BASE_URL=${BASE_URL:-http://localhost:3000} API_BASE=${API_BASE:-http://localhost:8001} PLAYWRIGHT_WORKERS=${PLAYWRIGHT_WORKERS:-2} npx playwright test tests/e2e/dashboard-route-smoke.spec.ts tests/e2e/dashboard-feature-controls.spec.ts --project=${PLAYWRIGHT_PROJECT:-chromium}'",
     "test:e2e:memory": "sh -c 'PLAYWRIGHT_START_WEB_SERVER=true BASE_URL=${BASE_URL:-http://localhost:3000} API_BASE=${API_BASE:-http://localhost:8001} npx playwright test tests/e2e/memory.spec.ts --project=${PLAYWRIGHT_PROJECT:-chromium}'"
   },
   "keywords": [

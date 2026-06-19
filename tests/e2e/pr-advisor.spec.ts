@@ -1,6 +1,7 @@
 import { expect, Page, test } from '@playwright/test';
 
-const API_BASE = 'http://localhost:8001';
+const API_BASE = (process.env.API_BASE || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001').replace(/\/$/, '');
+const API_PREFIXES = Array.from(new Set([API_BASE, '/backend-proxy', '**/backend-proxy']));
 
 const analysis = {
   id: 'pria_e2e_42',
@@ -86,14 +87,19 @@ const analysis = {
 class PrAdvisorPage {
   constructor(private readonly page: Page) {}
 
+  async routeApi(path: string, handler: Parameters<Page['route']>[1]) {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    await Promise.all(API_PREFIXES.map(prefix => this.page.route(`${prefix}${normalizedPath}`, handler)));
+  }
+
   async mockBackend() {
-    await this.page.route(`${API_BASE}/auth/refresh`, route =>
+    await this.routeApi('/auth/refresh', route =>
       route.fulfill({
         status: 200,
         json: { access_token: 'access-token', refresh_token: 'refresh-token' },
       }),
     );
-    await this.page.route(`${API_BASE}/auth/me`, route =>
+    await this.routeApi('/auth/me', route =>
       route.fulfill({
         status: 200,
         json: {
@@ -108,7 +114,7 @@ class PrAdvisorPage {
         },
       }),
     );
-    await this.page.route(`${API_BASE}/projects`, route =>
+    await this.routeApi('/projects', route =>
       route.fulfill({
         status: 200,
         json: {
@@ -126,7 +132,7 @@ class PrAdvisorPage {
         },
       }),
     );
-    await this.page.route(`${API_BASE}/github/default/config`, route =>
+    await this.routeApi('/github/default/config', route =>
       route.fulfill({
         status: 200,
         json: {
@@ -138,16 +144,16 @@ class PrAdvisorPage {
         },
       }),
     );
-    await this.page.route(`${API_BASE}/github/default/pr-advisor/analyses`, route =>
+    await this.routeApi('/github/default/pr-advisor/analyses', route =>
       route.fulfill({ status: 200, json: [] }),
     );
-    await this.page.route(`${API_BASE}/github/default/pr-advisor/analyze`, async route => {
+    await this.routeApi('/github/default/pr-advisor/analyze', async route => {
       const payload = route.request().postDataJSON() as { pr_number: number; ensure_indexed: boolean };
       expect(payload.pr_number).toBe(42);
       expect(payload.ensure_indexed).toBe(true);
       await route.fulfill({ status: 200, json: analysis });
     });
-    await this.page.route(`${API_BASE}/github/default/pr-advisor/analyses/pria_e2e_42/run`, route =>
+    await this.routeApi('/github/default/pr-advisor/analyses/pria_e2e_42/run', route =>
       route.fulfill({
         status: 200,
         json: {
@@ -169,8 +175,10 @@ class PrAdvisorPage {
   }
 
   async analyzePullRequest(prNumber: string) {
-    await this.page.getByPlaceholder('#').fill(prNumber);
-    await this.page.getByRole('button', { name: /analyze/i }).click();
+    const prInput = this.page.getByPlaceholder('#');
+    await prInput.fill(prNumber);
+    await expect(prInput).toHaveValue(prNumber);
+    await this.page.getByRole('button', { name: /^Analyze$/ }).click();
   }
 }
 
@@ -184,10 +192,10 @@ test.describe('PR Advisor dashboard', () => {
     await advisor.analyzePullRequest('42');
 
     await expect(page.getByRole('heading', { name: /PR #42: Improve checkout validation/ })).toBeVisible();
-    await expect(page.getByText('Recommended')).toBeVisible();
+    await expect(page.getByText('Recommended', { exact: true })).toBeVisible();
     await expect(page.getByText('2/7')).toBeVisible();
-    await expect(page.getByText('checkout-validation.md')).toBeVisible();
-    await expect(page.getByText('checkout-smoke.md')).toBeVisible();
+    await expect(page.getByText('checkout-validation.md', { exact: true })).toBeVisible();
+    await expect(page.getByText('checkout-smoke.md', { exact: true })).toBeVisible();
     await expect(page.getByText('Repository index: ridx_e2e_42')).toBeVisible();
     await expect(page.getByText('Changed spec file maps directly to this generated test')).toBeVisible();
     await expect(page.getByText("Route path 'checkout' matched spec name")).toBeVisible();

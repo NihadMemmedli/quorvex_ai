@@ -106,9 +106,11 @@ class OpenApiImportPage {
         },
       }),
     );
-    await this.routeApi('/api-testing/jobs?*', jobsHandler || (route => route.fulfill({ status: 200, json: [] })));
+    const jobsListHandler = jobsHandler || (route => route.fulfill({ status: 200, json: [] }));
+    await this.routeApi('/api-testing/jobs', jobsListHandler);
+    await this.routeApi('/api-testing/jobs?*', jobsListHandler);
     await this.routeApi('/api-testing/runs/latest-by-spec?*', route => route.fulfill({ status: 200, json: { specs: {} } }));
-    await this.routeApi('/api-testing/import-history?*', route =>
+    const importHistoryHandler = (route: Route) =>
       route.fulfill({
         status: 200,
         json: {
@@ -116,9 +118,10 @@ class OpenApiImportPage {
           has_more: false,
           items: historyItems || defaultHistoryItems,
         },
-      }),
-    );
-    await this.routeApi('/api-testing/import-openapi', async route => {
+      });
+    await this.routeApi('/api-testing/import-history', importHistoryHandler);
+    await this.routeApi('/api-testing/import-history?*', importHistoryHandler);
+    const importOpenApiHandler = async (route: Route) => {
       capturedBodies.push(route.request().postDataJSON());
       await route.fulfill({
         status: 200,
@@ -128,7 +131,9 @@ class OpenApiImportPage {
           message: 'OpenAPI import started',
         },
       });
-    });
+    };
+    await this.routeApi('/api-testing/import-openapi', importOpenApiHandler);
+    await this.routeApi('/api-testing/import-openapi?*', importOpenApiHandler);
     await this.routeApi('/api-testing/jobs/job-e2e', route =>
       route.fulfill({
         status: 200,
@@ -140,6 +145,9 @@ class OpenApiImportPage {
           result: {
             matched_operations: 2,
             executed_operations: 0,
+            blocked_operations: [
+              { method: 'GET', path: '/users/{id}', reason: "missing required path parameter 'id'" },
+            ],
             evidence_paths: [],
             spec_paths: ['specs/generated/api/users-operations.md'],
             test_paths: ['tests/generated/openapi-users-operations.api.spec.ts'],
@@ -162,6 +170,8 @@ class OpenApiImportPage {
 }
 
 test.describe('OpenAPI import plan and tests', () => {
+  test.describe.configure({ mode: 'serial' });
+
   test('defaults imports to plan_and_tests and keeps history compact', async ({ page }) => {
     const capturedBodies: unknown[] = [];
     const importPage = new OpenApiImportPage(page);
