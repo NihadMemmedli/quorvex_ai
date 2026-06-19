@@ -37,6 +37,10 @@ This is an open-source project, so response times may vary. The maintainer will 
 - Confirm scope and severity before public disclosure
 - Coordinate a fix, mitigation, or advisory when appropriate
 
+## Automated Security Scanning
+
+CodeQL runs on pull requests, pushes to `main`, and the scheduled weekly scan. Existing CodeQL alerts are treated as a known security backlog unless a maintainer escalates a specific alert into an active vulnerability response. Pull request scanning should remain enabled so new or changed code is analyzed while backlog triage continues separately.
+
 ## Scope
 
 Useful reports include:
