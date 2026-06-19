@@ -1,13 +1,44 @@
 version: 2
 updates:
   - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:python"
+
+  - package-ecosystem: "pip"
     directory: "/orchestrator"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "python"
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:python"
+
+  - package-ecosystem: "pip"
+    directory: "/tools/obs_mcp"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:tools"
+
+  - package-ecosystem: "pip"
+    directory: "/tools/youtube_mcp"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:tools"
 
   - package-ecosystem: "npm"
     directory: "/"
@@ -15,8 +46,9 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "npm"
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:node"
 
   - package-ecosystem: "npm"
     directory: "/web"
@@ -24,9 +56,9 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "npm"
-      - "frontend"
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:frontend"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -34,5 +66,56 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "ci"
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:ci"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:docker"
+
+  - package-ecosystem: "docker"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:frontend"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/backend-slim"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:docker"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/browser-worker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:docker"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/k6-worker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "type:maintenance"
+      - "area:dependencies"
+      - "area:docker"

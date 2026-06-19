@@ -1,0 +1,45 @@
+name: Documentation task
+description: Request a docs correction, example, or explanation
+title: "[Docs]: "
+labels:
+  - type:docs
+body:
+  - type: textarea
+    id: gap
+    attributes:
+      label: Documentation gap
+      description: What is confusing, stale, missing, or incorrect?
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Current location
+      placeholder: README.md, docs/guides/setup-options.md, docs/reference/environment-variables.md
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: Documentation type
+      options:
+        - Tutorial
+        - How-to guide
+        - Reference
+        - Explanation
+        - README/governance
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected outcome
+      description: What should readers be able to do or understand after the change?
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This request does not include real secrets or private deployment values.
+          required: true

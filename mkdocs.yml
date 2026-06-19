@@ -73,6 +73,7 @@ nav:
   - Tutorials:
       - Overview: tutorials/index.md
       - Getting Started: tutorials/getting-started.md
+      - Curated Examples: tutorials/examples.md
       - Your First API Test: tutorials/first-api-test.md
       - App Exploration & Requirements: tutorials/first-exploration.md
       - Dashboard Walkthrough: tutorials/dashboard-walkthrough.md
@@ -152,4 +153,6 @@ nav:
   - Community:
       - Roadmap: community/roadmap.md
       - Good First Issues: community/good-first-issues.md
+      - Release Process: community/release-process.md
+      - GitHub Refresh Operations: community/github-refresh-operations.md
       - Launch Kit: community/launch-kit.md

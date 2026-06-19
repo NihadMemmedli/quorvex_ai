@@ -1,0 +1,84 @@
+- name: type:bug
+  color: d73a4a
+  description: Confirmed or likely defect
+- name: type:enhancement
+  color: a2eeef
+  description: New or improved product behavior
+- name: type:docs
+  color: 0075ca
+  description: Documentation, examples, README, or governance
+- name: type:maintenance
+  color: cfd3d7
+  description: Dependencies, CI, cleanup, release, or repo hygiene
+- name: type:security
+  color: ee0701
+  description: Security hardening or vulnerability response
+- name: area:backend
+  color: 1d76db
+  description: Python backend, FastAPI, services, workers
+- name: area:frontend
+  color: 5319e7
+  description: Next.js dashboard and browser UI
+- name: area:agents
+  color: 0e8a16
+  description: Agent runtimes, AutoPilot, autonomous workflows
+- name: area:playwright
+  color: 45ba4b
+  description: Playwright generation, validation, healing, generated tests
+- name: area:docs
+  color: 0075ca
+  description: Published docs, examples, README, governance
+- name: area:ci
+  color: fbca04
+  description: GitHub Actions, CI checks, release automation
+- name: area:docker
+  color: 2496ed
+  description: Dockerfiles, Compose, container images
+- name: area:deployment
+  color: 0052cc
+  description: Production, company external-nginx, Kubernetes, operations
+- name: area:dependencies
+  color: 0366d6
+  description: Dependency updates and package hygiene
+- name: area:tools
+  color: bfdadc
+  description: MCP tools and auxiliary scripts
+- name: area:python
+  color: 3572a5
+  description: Python packaging and dependency surface
+- name: area:node
+  color: 2c974b
+  description: Root Node, Playwright, and JavaScript tooling
+- name: priority:p0
+  color: b60205
+  description: Critical production, security, or data-loss issue
+- name: priority:p1
+  color: d93f0b
+  description: Important issue for the next active iteration
+- name: priority:p2
+  color: fbca04
+  description: Useful but not urgent
+- name: priority:p3
+  color: fef2c0
+  description: Backlog candidate
+- name: effort:small
+  color: c2e0c6
+  description: Small, well-scoped change
+- name: effort:medium
+  color: fef2c0
+  description: Moderate implementation or review effort
+- name: effort:large
+  color: f9d0c4
+  description: Multi-step or cross-area work
+- name: status:needs-triage
+  color: ededed
+  description: Needs maintainer review and routing
+- name: status:ready
+  color: 0e8a16
+  description: Ready for implementation
+- name: status:blocked
+  color: b60205
+  description: Blocked by decision, dependency, or external state
+- name: status:replaced
+  color: cccccc
+  description: Superseded by a newer issue or roadmap item

@@ -1,0 +1,95 @@
+name: Bug report
+description: Report a reproducible Quorvex AI defect
+title: "[Bug]: "
+labels:
+  - type:bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include real secrets, tokens, passwords, private URLs, or customer data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, and what were you trying to do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Backend/API
+        - Frontend/dashboard
+        - Playwright generation
+        - AutoPilot/agents
+        - API/load/security/database/LLM testing
+        - Deployment/Docker
+        - Documentation
+        - CI/CD
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Setup path
+      options:
+        - Evaluator demo / Minimal Docker
+        - Contributor dev / make dev
+        - Local native dev
+        - Production/company external-nginx
+        - Kubernetes
+        - CI/CD
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include exact commands, spec names, routes, or UI steps.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. Click ...
+        4. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste logs with secrets removed.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v1.0.0, main@abcdef, or branch name
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python, Node, Docker, browser, OS, and relevant Quorvex env names without values.
+      placeholder: |
+        OS:
+        Python:
+        Node:
+        Docker:
+        Browser:
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, tokens, private URLs, and customer data from this report.
+          required: true
