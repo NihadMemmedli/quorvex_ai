@@ -18,11 +18,10 @@ from logging_config import get_logger, setup_logging
 from . import (
     agent_facade_support,
     main_app_wiring_facade_support,
-    main_lifecycle_event_facade_support,
     main_route_module_facade_support,
     main_runtime_dependency_facade_support,
     main_static_facade_support,
-    test_run_facade_support,
+    main_test_lifecycle_facade_support,
 )
 
 # Initialize logging
@@ -34,14 +33,7 @@ main_static_facade_support.configure_main_static_facade(globals())
 main_route_module_facade_support.configure_main_route_module_facade(globals())
 main_app_wiring_facade_support.configure_main_app_wiring_facade(globals())
 app = globals()["app"]
-
-
-def _test_run_runtime():
-    return sys.modules[__name__]
-
-
-test_run_facade_support.configure_test_run_facade(_test_run_runtime, globals())
-main_lifecycle_event_facade_support.configure_main_lifecycle_event_facade(app, _test_run_runtime, globals())
+main_test_lifecycle_facade_support.configure_main_test_lifecycle_facade(globals())
 
 
 def _agent_compat_runtime():
