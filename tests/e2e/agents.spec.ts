@@ -655,7 +655,8 @@ test.describe('Agents create and report spec actions', () => {
     });
 
     await page.goto('/agents?agent=custom&definitionId=trip-agent');
-    await page.getByLabel('Target URL').fill('https://pre.wetravel.to/user/itineraries');
+    const runSetupPanel = page.locator('#agents-run-setup-panel');
+    await runSetupPanel.getByLabel('Target URL').fill('https://pre.wetravel.to/user/itineraries');
     await page.getByRole('button', { name: /Context & Test Data/ }).click();
     await expect(page.getByLabel('Project Test Data Refs')).toBeVisible();
     await expect(page.getByTestId('test-data-picker-item')).toContainText('Valid user');
@@ -666,7 +667,7 @@ test.describe('Agents create and report spec actions', () => {
     const requestPromise = page.waitForRequest(request =>
       apiPath(request.url()) === '/api/agents/definitions/trip-agent/runs' && request.method() === 'POST',
     );
-    await page.locator('#agents-run-setup-panel').getByRole('button', { name: /Start Agent/ }).click();
+    await runSetupPanel.getByRole('button', { name: /Start Agent/ }).click();
 
     const request = await requestPromise;
     expect(request.postDataJSON()).toMatchObject({

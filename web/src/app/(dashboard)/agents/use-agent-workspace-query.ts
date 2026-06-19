@@ -34,7 +34,6 @@ export function useAgentWorkspaceQuery(options: {
     setDefinitionFormError: Dispatch<SetStateAction<string | null>>;
     setAgentActionIntent: Dispatch<SetStateAction<AgentActionIntent>>;
     setBuilderOpen: Dispatch<SetStateAction<boolean>>;
-    setFlowModalOpen: Dispatch<SetStateAction<boolean>>;
     setWorkspaceStatus: Dispatch<SetStateAction<string>>;
 }) {
     const {
@@ -51,7 +50,6 @@ export function useAgentWorkspaceQuery(options: {
         setDefinitionFormError,
         setAgentActionIntent,
         setBuilderOpen,
-        setFlowModalOpen,
         setWorkspaceStatus,
     } = options;
     const router = useRouter();
@@ -145,7 +143,6 @@ export function useAgentWorkspaceQuery(options: {
                 itemId: queryState.specItemId,
                 itemType: queryState.specItemType,
             });
-            setFlowModalOpen(true);
             setWorkspaceStatus(`Opening report item ${queryState.specItemId} for spec review.`);
         }
         setCustomResultTab(queryState.resultTab);
@@ -161,7 +158,6 @@ export function useAgentWorkspaceQuery(options: {
         setCustomResultTab,
         setDefinitionForm,
         setDefinitionFormError,
-        setFlowModalOpen,
         setReportSeverityFilter,
         setReportStatusFilter,
         setReturnToAfterSave,
