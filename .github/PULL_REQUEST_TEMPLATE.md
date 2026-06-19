@@ -1,25 +1,45 @@
-## Description
-Please include a summary of the change and which issue is fixed.
+## Summary
 
-## Type of change
+Describe the change and link related issues.
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
+## Risk
 
-## How Has This Been Tested?
-Please describe the tests that you ran to verify your changes.
+- [ ] Low: docs, tests, or isolated UI change
+- [ ] Medium: shared behavior, deployment, auth, generated output, or API contract change
+- [ ] High: migrations, secrets, release, CI publishing, or production runtime change
 
-- [ ] Test A
-- [ ] Test B
+## Tests Run
 
-## Checklist:
+Paste exact commands and results.
 
-- [ ] My code follows the style guidelines of this project
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
+```bash
+
+```
+
+## Docs Drift
+
+- [ ] README/docs updated, or not needed
+- [ ] Environment variable reference updated, or not needed
+- [ ] API/reference docs updated, or not needed
+- [ ] Screenshots/demo assets updated, or not needed
+
+## Deployment Impact
+
+- [ ] No deployment impact
+- [ ] Docker/Compose changed
+- [ ] Company external-nginx mode changed
+- [ ] Kubernetes or worker topology changed
+- [ ] Database migration changed
+
+## Secrets And Data
+
+- [ ] No real secrets, tokens, passwords, private URLs, or customer data are included
+- [ ] Logs, screenshots, traces, and generated tests were reviewed for sensitive values
+
+## Screenshots Or Artifacts
+
+Add screenshots, recordings, traces, or generated artifacts when UI or generated output changes.
+
+## Rollback
+
+Describe how to revert or disable the change if it causes a production issue.

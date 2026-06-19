@@ -1,33 +1,67 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Supported Versions
 
-Please do not open a public GitHub issue for security vulnerabilities.
+Security fixes are targeted at the latest released version and the current `main` branch. Older tags may receive guidance, but backports are not guaranteed unless a maintainer explicitly accepts the work.
 
-Report suspected vulnerabilities privately to the project maintainer through the contact method listed on the maintainer's GitHub profile. Include:
+| Version | Supported |
+|---------|-----------|
+| Latest release | Yes |
+| `main` | Yes |
+| Older releases | Best effort |
 
-- Affected version or commit, if known
+## Reporting A Vulnerability
+
+Do not open a public GitHub issue for security vulnerabilities.
+
+Preferred reporting path:
+
+1. Use GitHub private vulnerability reporting if it is enabled for this repository.
+2. If private reporting is not available, contact the maintainer through the security contact listed on the maintainer's GitHub profile.
+3. Before publishing this repository for wider use, replace this fallback with a dedicated security contact such as `security@example.com`.
+
+Include:
+
+- Affected version, tag, or commit
 - Clear reproduction steps
 - Expected impact
-- Logs, screenshots, or proof-of-concept details when safe to share
-- Whether the issue affects default local development, Docker production, integrations, generated tests, or deployment assets
+- Whether the issue affects local development, generated tests, Docker runtime, company external-nginx deployment, integrations, CI/CD, credentials, or artifacts
+- Logs, screenshots, or proof-of-concept details only when they are safe to share
+
+## Triage Expectations
+
+This is an open-source project, so response times may vary. The maintainer will aim to:
+
+- Acknowledge valid private reports
+- Ask for clarifying details when needed
+- Confirm scope and severity before public disclosure
+- Coordinate a fix, mitigation, or advisory when appropriate
 
 ## Scope
 
-Security reports are especially useful for:
+Useful reports include:
 
-- Authentication, authorization, RBAC, and session handling
-- Credential storage, masking, encryption, and log scrubbing
+- Authentication, authorization, RBAC, and session handling issues
+- Credential storage, masking, encryption, and log-scrubbing failures
 - Generated test code that could expose secrets
-- CI/CD integrations, webhooks, and repository write operations
-- Browser worker isolation and sandboxing
-- Backup, restore, MinIO, and artifact access controls
+- Browser worker isolation or sandbox bypasses
+- CI/CD integrations, webhooks, repository write operations, and release publishing risks
+- Backup, restore, MinIO, and artifact access-control issues
 - Dependency or container image vulnerabilities with a practical exploit path
 
-## Response Expectations
+## Secret Handling
 
-This is an open-source project, so response times may vary. The maintainer will triage valid reports, ask for clarifying details when needed, and coordinate a fix before public disclosure when appropriate.
+Never commit real secrets to tracked files. Use `.env.prod`, `.env`, `.env.local`, `.secrets/`, GitHub Actions secrets, private deployment repositories, or shell environment variables.
 
-## Deployment Responsibility
+Before production use:
 
-Quorvex AI is self-hosted. Before using it in production, change default secrets in `.env.prod`, restrict network access, configure TLS, back up `.env.prod`, and follow the deployment guidance in `docs/guides/company-deployment.md`.
+- Rotate all default credentials
+- Set strong `JWT_SECRET_KEY`, database, MinIO, and provider credentials
+- Restrict direct host ports to trusted networks
+- Terminate TLS at company nginx or another managed proxy
+- Keep `QUORVEX_PUBLIC_API_URL` and `NEXT_PUBLIC_API_URL` blank in company external-nginx mode so browser calls use same-origin routing
+- Review [docs/guides/company-deployment.md](docs/guides/company-deployment.md)
+
+## Disclosure
+
+Public disclosure should happen after a fix, mitigation, or clear non-affected determination is available. If a report cannot be fixed immediately, maintainers may publish operational mitigations first.

@@ -209,7 +209,7 @@ jobs:
         if: contains(fromJSON('["frontend-typecheck","all-safe"]'), needs.select-suite.outputs.suite)
         run: npm run typecheck
       - name: Lint frontend
-        if: needs.select-suite.outputs.suite == 'frontend-lint'
+        if: contains(fromJSON('["frontend-lint","all-safe"]'), needs.select-suite.outputs.suite)
         run: npm run lint
 
   playwright-tests:

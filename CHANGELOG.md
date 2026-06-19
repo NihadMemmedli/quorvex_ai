@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--validate-only` / `--dry-run` CLI flag: validate spec format, template includes, and target URL reachability without running the pipeline (useful for CI pre-checks). Optional `--validate-timeout SECONDS` for URL check timeout (default: 10).
 - Documentation refresh covering current features, install paths, Make targets, AutoPilot/autonomous agents, long-running missions, support policies, and GitHub-facing project positioning.
+- GitHub presentation refresh with a shorter README, curated examples index, support/security/maintainer/release docs, issue forms, label taxonomy, Dependabot expansion, security automation workflows, and a dry-run issue cleanup playbook.
 
 ## [1.0.0] - 2026-03-01
 
