@@ -29,7 +29,12 @@ function clone<T>(value: T): T {
 }
 
 async function expectDialogInViewport(page: Page, dialog: Locator) {
-  const box = await dialog.boundingBox();
+  await expect(dialog).toBeVisible();
+  let box = await dialog.boundingBox();
+  await expect.poll(async () => {
+    box = await dialog.boundingBox();
+    return box !== null;
+  }).toBe(true);
   const viewport = page.viewportSize();
   expect(box).not.toBeNull();
   expect(viewport).not.toBeNull();
