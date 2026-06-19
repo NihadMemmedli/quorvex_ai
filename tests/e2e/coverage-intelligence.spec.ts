@@ -137,9 +137,9 @@ test.describe('Coverage Intelligence', () => {
     await openCoverage(page);
 
     await expect(page.getByRole('heading', { name: 'Coverage Intelligence' })).toBeVisible();
-    await expect(page.getByText('RTM Requirement Coverage')).toBeVisible();
-    await expect(page.getByText('Discovered App Coverage')).toBeVisible();
-    await expect(page.getByText('Execution Coverage')).toBeVisible();
+    await expect(page.getByText('RTM Requirement Coverage', { exact: true })).toBeVisible();
+    await expect(page.getByText('Discovered App Coverage', { exact: true })).toBeVisible();
+    await expect(page.getByText('Execution Coverage', { exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Primary Queue' })).toBeVisible();
     await expect(page.getByText('Checkout requires confirmation')).toBeVisible();
     await expect(page.getByText('Checkout button has no test coverage')).toBeVisible();

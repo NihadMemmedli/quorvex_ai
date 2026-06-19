@@ -743,8 +743,8 @@ export default function RequirementsPage() {
         }
     };
 
-    const checkForDuplicates = async (title: string, description: string) => {
-        if (!title.trim()) return;
+    const checkForDuplicates = async (title: string, description: string): Promise<boolean> => {
+        if (!title.trim()) return false;
 
         setCheckingDuplicate(true);
 
@@ -763,8 +763,10 @@ export default function RequirementsPage() {
                 const data = await res.json();
                 if (data.has_exact_match || data.near_matches.length > 0) {
                     setDuplicateWarning(data);
+                    return true;
                 } else {
                     setDuplicateWarning(null);
+                    return false;
                 }
             }
         } catch (e) {
@@ -772,6 +774,8 @@ export default function RequirementsPage() {
         } finally {
             setCheckingDuplicate(false);
         }
+
+        return false;
     };
 
     const createRequirementWithCheck = async (forceCreate: boolean = false) => {
@@ -779,9 +783,9 @@ export default function RequirementsPage() {
 
         // If not forcing create and we haven't checked yet, check first
         if (!forceCreate && !duplicateWarning) {
-            await checkForDuplicates(newReq.title, newReq.description);
+            const duplicateFound = await checkForDuplicates(newReq.title, newReq.description);
             // If warning shows up, user will need to confirm
-            return;
+            if (duplicateFound) return;
         }
 
         // If warning exists and not forcing, don't create

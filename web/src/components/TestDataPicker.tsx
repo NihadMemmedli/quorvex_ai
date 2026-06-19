@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { Database, Edit, Plus } from 'lucide-react';
+import { type CSSProperties, useEffect, useMemo, useState } from 'react';
+import { Database, ExternalLink, Plus } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { fetchWithAuth } from '@/contexts/AuthContext';
@@ -37,7 +37,7 @@ export function TestDataPicker({
   mode = 'directive',
   variant = 'default',
   insertLabel = 'Insert',
-  editLabel = 'Edit',
+  editLabel = 'Manage Data',
   compact = false,
   onInsert,
   onInserted,
@@ -54,6 +54,7 @@ export function TestDataPicker({
   const defaultItemLabel = selectedDataset && selectedItem
     ? `${selectedDataset.key}.${selectedItem.key}`
     : itemRef || 'Item';
+  const manageActionLabel = `${editLabel} selected test data item`;
 
   useEffect(() => {
     if (!projectId) return;
@@ -138,6 +139,32 @@ export function TestDataPicker({
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     fontSize: '0.8rem',
+  };
+  const compactPickerStyle: CSSProperties = {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '0.5rem',
+    alignItems: 'center',
+    width: '100%',
+  };
+  const compactSelectStyle: CSSProperties = {
+    flex: '1 1 180px',
+    minWidth: 0,
+  };
+  const compactItemSelectStyle: CSSProperties = {
+    flex: '1.2 1 220px',
+    minWidth: 0,
+  };
+  const compactActionStyle: CSSProperties = {
+    height: '36px',
+    minWidth: '84px',
+    whiteSpace: 'nowrap',
+  };
+  const compactManageStyle: CSSProperties = {
+    height: '36px',
+    padding: '0 0.35rem',
+    color: 'var(--text-secondary)',
+    whiteSpace: 'nowrap',
   };
 
   if (isSidebar) {
@@ -260,9 +287,10 @@ export function TestDataPicker({
             disabled={!itemRef}
             data-testid="test-data-picker-edit"
             onClick={() => itemRef && router.push(`/test-data?ref=${encodeURIComponent(itemRef)}`)}
+            aria-label={manageActionLabel}
             style={actionStyle}
           >
-            <Edit size={14} /> {editLabel}
+            <ExternalLink size={14} aria-hidden="true" /> {editLabel}
           </Button>
         </div>
       </div>
@@ -272,18 +300,16 @@ export function TestDataPicker({
   return (
     <div
       className={compact ? undefined : 'flex flex-wrap items-center gap-2'}
-      style={compact ? {
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-        gap: '0.5rem',
-        alignItems: 'center',
-        width: '100%',
-      } : undefined}
+      style={compact ? compactPickerStyle : undefined}
       data-testid={`test-data-picker-${mode}`}
     >
       {!compact && <Database size={16} style={{ color: 'var(--text-secondary)' }} />}
       <Select value={datasetId} onValueChange={setDatasetId}>
-        <SelectTrigger className={compact ? 'h-9 min-w-[160px] flex-1' : 'h-9 w-[180px]'} data-testid="test-data-picker-dataset">
+        <SelectTrigger
+          className={compact ? 'h-9 min-w-0' : 'h-9 w-[180px]'}
+          data-testid="test-data-picker-dataset"
+          style={compact ? compactSelectStyle : undefined}
+        >
           {compact ? (
             <span title={defaultDatasetLabel} style={triggerTextStyle}>{defaultDatasetLabel}</span>
           ) : (
@@ -295,7 +321,11 @@ export function TestDataPicker({
         </SelectContent>
       </Select>
       <Select value={itemRef} onValueChange={setItemRef}>
-        <SelectTrigger className={compact ? 'h-9 min-w-[180px] flex-[1.2]' : 'h-9 w-[220px]'} data-testid="test-data-picker-item">
+        <SelectTrigger
+          className={compact ? 'h-9 min-w-0' : 'h-9 w-[220px]'}
+          data-testid="test-data-picker-item"
+          style={compact ? compactItemSelectStyle : undefined}
+        >
           {compact ? (
             <span title={itemRef || defaultItemLabel} style={triggerTextStyle}>{defaultItemLabel}</span>
           ) : (
@@ -313,7 +343,7 @@ export function TestDataPicker({
         disabled={!itemRef}
         data-testid="test-data-picker-insert"
         onClick={handleInsert}
-        style={compact ? { height: '36px', width: '100%', whiteSpace: 'nowrap' } : undefined}
+        style={compact ? compactActionStyle : undefined}
       >
         <Plus size={16} /> {insertLabel}
       </Button>
@@ -324,9 +354,10 @@ export function TestDataPicker({
         disabled={!itemRef}
         data-testid="test-data-picker-edit"
         onClick={() => itemRef && router.push(`/test-data?ref=${encodeURIComponent(itemRef)}`)}
-        style={compact ? { height: '36px', width: '100%', whiteSpace: 'nowrap' } : undefined}
+        aria-label={manageActionLabel}
+        style={compact ? compactManageStyle : undefined}
       >
-        <Edit size={16} /> {editLabel}
+        <ExternalLink size={14} aria-hidden="true" /> {editLabel}
       </Button>
     </div>
   );

@@ -1178,6 +1178,7 @@ export function ReportsSearchWorkspace({
     loading,
     results,
     onRefresh,
+    onOpenResult,
 }: {
     query: string;
     onQueryChange: (value: string) => void;
@@ -1188,6 +1189,7 @@ export function ReportsSearchWorkspace({
     loading: boolean;
     results: AgentReportSearchItem[];
     onRefresh: () => void;
+    onOpenResult?: (result: AgentReportSearchItem) => void;
 }) {
     return (
         <div className="card" style={{ padding: '1rem', display: 'grid', gap: '1rem' }}>
@@ -1252,9 +1254,17 @@ export function ReportsSearchWorkspace({
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.45, overflowWrap: 'anywhere' }}>{item.description || item.evidence || item.value}</div>
                             )}
                             <div>
-                                <Link href={reportSearchResultHref(result)} style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.82rem' }}>
+                                <a
+                                    href={reportSearchResultHref(result)}
+                                    onClick={(event) => {
+                                        if (!onOpenResult || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                                        event.preventDefault();
+                                        onOpenResult(result);
+                                    }}
+                                    style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.82rem' }}
+                                >
                                     Open report
-                                </Link>
+                                </a>
                             </div>
                         </div>
                     );

@@ -109,6 +109,22 @@ describe('agents workspace query state', () => {
         expect(updated.get('agent')).toBe('custom');
         expect(updated.get('create')).toBe('1');
     });
+
+    it('keeps explicit run view for run deep links', () => {
+        const updated = applyAgentWorkspaceQueryPatch(new URLSearchParams('view=reports&reportQ=address'), {
+            view: 'run',
+            runId: 'custom-run-reqs',
+            resultTab: 'findings',
+            specItemId: 'F-001',
+            specItemType: 'finding',
+        });
+
+        expect(updated.get('view')).toBe('run');
+        expect(updated.get('runId')).toBe('custom-run-reqs');
+        expect(updated.get('resultTab')).toBe('findings');
+        expect(updated.get('specItemId')).toBe('F-001');
+        expect(updated.get('specItemType')).toBe('finding');
+    });
 });
 
 describe('agents history filtering', () => {

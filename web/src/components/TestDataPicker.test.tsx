@@ -3,9 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestDataPicker } from './TestDataPicker';
 import { fetchWithAuth } from '@/contexts/AuthContext';
 
+const { routerPushMock } = vi.hoisted(() => ({
+  routerPushMock: vi.fn(),
+}));
+
 vi.mock('next/navigation', () => ({
   useRouter: () => ({
-    push: vi.fn(),
+    push: routerPushMock,
   }),
 }));
 
@@ -25,6 +29,47 @@ describe('TestDataPicker', () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it('renders compact controls with a primary add action and a quiet manage action', async () => {
+    const onInsert = vi.fn();
+    fetchWithAuthMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          datasets: [{ id: 'dataset-1', key: 'general-data', name: 'General Data' }],
+        }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          items: [{ id: 'item-1', key: 'valid-user', ref: 'general-data.valid-user', name: 'Valid user' }],
+        }),
+      } as Response);
+
+    render(
+      <TestDataPicker
+        projectId="project-1"
+        mode="ref"
+        compact
+        insertLabel="Add"
+        onInsert={onInsert}
+      />,
+    );
+
+    const picker = await screen.findByTestId('test-data-picker-ref');
+    expect(picker).toHaveStyle({ display: 'flex', flexWrap: 'wrap', width: '100%' });
+
+    const addButton = screen.getByTestId('test-data-picker-insert');
+    const manageButton = screen.getByTestId('test-data-picker-edit');
+    await waitFor(() => expect(addButton).toBeEnabled());
+    expect(addButton).toHaveTextContent('Add');
+    expect(addButton).toHaveStyle({ minWidth: '84px' });
+    expect(manageButton).toHaveTextContent('Manage Data');
+    expect(manageButton).toHaveAccessibleName('Manage Data selected test data item');
+
+    fireEvent.click(manageButton);
+    expect(routerPushMock).toHaveBeenCalledWith('/test-data?ref=general-data.valid-user');
   });
 
   it('renders the sidebar variant with compact controls and inserts the selected ref', async () => {

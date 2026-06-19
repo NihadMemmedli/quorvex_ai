@@ -48,8 +48,6 @@ import ChevronDown from 'lucide-react/dist/esm/icons/chevron-down';
 import Pencil from 'lucide-react/dist/esm/icons/pencil';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
-import { useJobPoller } from '@/hooks/useJobPoller';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { Button } from '@/components/ui/button';
@@ -81,14 +79,11 @@ import {
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { StatusBadge } from '@/components/shared/StatusBadge';
-import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
     browserAuthSessionLabel,
-    fetchProjectBrowserAuthSessions,
     isBrowserAuthSessionSelectable,
 } from '@/lib/browser-auth-sessions';
 import {
-    validateAgentRunInput,
     type AgentHistoryStatusFilter,
     type AgentHistoryTypeFilter,
     type AgentWorkspaceView,
@@ -108,70 +103,43 @@ import {
     customAgentCurrentActivity,
     customAgentExecutionStarted,
     customAgentWorkerMessage,
-    defaultDefinitionForm,
-    defaultReportSpecBrowserAuthSelection,
-    findReportSpecItem,
     formatQueueAge,
     formatToolName,
     getArtifactUrl,
     getStructuredReport,
     isAgentRunTerminal,
     itemPrompt,
-    linesToText,
-    markAgentsAction,
-    normalizeReportPatchResponse,
-    queueStateLabel,
     reportEditDialogTitle,
     reportItemReviewState,
     reportItemSeverity,
-    reportItemToFlow,
-    reportSearchResultHref,
-    reportSpecBrowserAuthBody,
+    reportSearchResultTab,
     reportStatusColor,
-    runBrowserAuthSessionId,
     severityColor,
     sortArtifactsByModifiedAt,
-    textToLines,
     type AgentActionIntent,
     type AgentArtifact,
-    type AgentDefinition,
+    type AgentReportSearchItem,
     type AgentRun,
     type AgentRunEvent,
     type AgentTool,
     type AgentTraceBundle,
-    type AuthType,
     type CustomResultTab,
-    type FlowModalData,
-    type ReportEditTarget,
-    type ReportEditableItemType,
-    type ReportFinding,
-    type ReportRequirement,
     type ReportSpecBrowserAuthMode,
-    type ReportTestIdea,
     type SpecResult,
-    type StructuredAgentReport,
     type TraceTab,
 } from './agents-model';
 import {
     agentRunTraceExportUrl,
-    controlAgentRun as controlAgentRunApi,
-    fetchExploratoryFlowDetails,
-    fetchFlowSpecAgentRun as fetchFlowSpecAgentRunApi,
-    fetchAgentRuntimeSetting,
-    generateExploratoryFlowSpec,
-    retryAgentRun as retryAgentRunApi,
-    splitSpecFile,
-    startAgentDefinitionRun,
     synthesizeExploratorySpecs,
 } from './agents-api';
-import { useAgentDefinitions } from './use-agent-definitions';
+import { useAgentCustomAgentWorkflow } from './use-agent-custom-agent-workflow';
 import { useAgentQueueStatus } from './use-agent-queue-status';
 import { useAgentReportSearch } from './use-agent-report-search';
 import { useAgentRunHistory } from './use-agent-run-history';
-import { useAgentReportActions } from './use-agent-report-actions';
+import { useAgentReportEditing } from './use-agent-report-editing';
 import { useAgentRunDetail } from './use-agent-run-detail';
 import { useAgentRunEventsStream } from './use-agent-run-events-stream';
-import { useAgentWorkspaceQuery } from './use-agent-workspace-query';
+import { useAgentSpecGeneration } from './use-agent-spec-generation';
 
 const LiveBrowserView = dynamic<any>(() => import('@/components/LiveBrowserView').then(mod => mod.LiveBrowserView), { ssr: false });
 const TestDataPicker = dynamic<any>(() => import('@/components/TestDataPicker').then(mod => mod.TestDataPicker), { ssr: false });
@@ -188,15 +156,9 @@ import {
 export default function AgentsPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
     const [workspaceView, setWorkspaceView] = useState<AgentWorkspaceView>('run');
-    // Basic config
-    const [url, setUrl] = useState('');
-    const [instructions, setInstructions] = useState('');
 
     // Enhanced exploratory config
     const [timeLimitMinutes] = useState(15);
-    const [authType, setAuthType] = useState<AuthType>('none');
-    const [sessionId, setSessionId] = useState('');
-    const [testDataRefs, setTestDataRefs] = useState('');
 
     // History & results
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -209,66 +171,83 @@ export default function AgentsPage() {
     const [specResult, setSpecResult] = useState<SpecResult | null>(null);
 
     // UI state
-    const [isStarting, setIsStarting] = useState(false);
-    const [runControlPending, setRunControlPending] = useState<'pause' | 'resume' | 'cancel' | 'retry' | null>(null);
     const [isSynthesizing, setIsSynthesizing] = useState(false);
-    const [sessions, setSessions] = useState<BrowserAuthSession[]>([]);
-    const [flowModalOpen, setFlowModalOpen] = useState(false);
-    const [selectedFlow, setSelectedFlow] = useState<FlowModalData | null>(null);
     const [agentActionIntent, setAgentActionIntent] = useState<AgentActionIntent>({ type: 'none' });
-    const [loadingFlowDetails, setLoadingFlowDetails] = useState(false);
-    const [generatingSpec, setGeneratingSpec] = useState(false);
-    const [flowSpecAgentRunId, setFlowSpecAgentRunId] = useState<string | null>(null);
-    const [flowSpecAgentRun, setFlowSpecAgentRun] = useState<AgentRun | null>(null);
-    const [flowSpecAgentEvents, setFlowSpecAgentEvents] = useState<AgentRunEvent[]>([]);
-    const [flowSpecError, setFlowSpecError] = useState<string | null>(null);
-    const [reportSpecAuthMode, setReportSpecAuthMode] = useState<ReportSpecBrowserAuthMode>('none');
-    const [reportSpecAuthSessionId, setReportSpecAuthSessionId] = useState('');
-    const [generatedSpec, setGeneratedSpec] = useState<any | null>(null);
-    const [specModalOpen, setSpecModalOpen] = useState(false);
-    const [splittingSpec, setSplittingSpec] = useState(false);
-    const [splitResult, setSplitResult] = useState<{ count: number; files: string[]; output_dir: string } | null>(null);
-    const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([]);
-    const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([]);
-    const [selectedDefinitionId, setSelectedDefinitionId] = useState<string>('');
     const [customResultTab, setCustomResultTab] = useState<CustomResultTab>('overview');
     const [traceTab, setTraceTab] = useState<TraceTab>('timeline');
     const [reportStatusFilter, setReportStatusFilter] = useState<ReportReviewFilter>('all');
     const [reportSeverityFilter, setReportSeverityFilter] = useState('all');
-    const [runFormError, setRunFormError] = useState<string | null>(null);
-    const [definitionFormError, setDefinitionFormError] = useState<string | null>(null);
     const [workspaceStatus, setWorkspaceStatus] = useState('');
     const [setupOpen, setSetupOpen] = useState(true);
     const [contextDataOpen, setContextDataOpen] = useState(false);
     const [runPlanDetailsOpen, setRunPlanDetailsOpen] = useState(false);
-    const [openDefinitionMenuId, setOpenDefinitionMenuId] = useState<string | null>(null);
-    const [archiveCandidate, setArchiveCandidate] = useState<AgentDefinition | null>(null);
-    const [cancelRunDialogOpen, setCancelRunDialogOpen] = useState(false);
-    const [returnToAfterSave, setReturnToAfterSave] = useState('');
-    const [importingRequirementIds, setImportingRequirementIds] = useState<string[]>([]);
-    const [reportImportError, setReportImportError] = useState<string | null>(null);
-    const [reportEditTarget, setReportEditTarget] = useState<ReportEditTarget | null>(null);
-    const [reportEditForm, setReportEditForm] = useState<Record<string, string>>({});
-    const [reportEditError, setReportEditError] = useState<string | null>(null);
-    const [savingReportEdit, setSavingReportEdit] = useState(false);
-    const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
-    const [builderOpen, setBuilderOpen] = useState(false);
-    const [savingDefinition, setSavingDefinition] = useState(false);
-    const [definitionRuntimeOpen, setDefinitionRuntimeOpen] = useState(false);
-    const [runSetupReady, setRunSetupReady] = useState(false);
-    const [definitionForm, setDefinitionForm] = useState(() => defaultDefinitionForm('claude_sdk'));
-    const targetUrlRef = useRef('');
     const agentEventsRef = useRef<AgentRunEvent[]>([]);
-    const activeBrowserAuthSessions = useMemo(
-        () => sessions.filter(isBrowserAuthSessionSelectable),
-        [sessions]
-    );
-    const projectDefaultBrowserAuthSession = useMemo(
-        () => activeBrowserAuthSessions.find(item => item.is_default),
-        [activeBrowserAuthSessions]
-    );
+    const fetchHistoryRef = useRef<() => Promise<unknown>>(async () => undefined);
 
     const {
+        queueStatus,
+        queueLoading,
+        queueCleanupLoading,
+        queueError,
+        fetchQueueStatus,
+        cleanStaleQueueTasks,
+    } = useAgentQueueStatus({
+        projectLoading,
+        workspaceView,
+    });
+
+    const {
+        url,
+        setUrl,
+        instructions,
+        setInstructions,
+        authType,
+        setAuthType,
+        sessionId,
+        setSessionId,
+        testDataRefs,
+        setTestDataRefs,
+        isStarting,
+        runControlPending,
+        sessions,
+        activeBrowserAuthSessions,
+        projectDefaultBrowserAuthSession,
+        agentDefinitions,
+        toolCatalog,
+        selectedDefinitionId,
+        selectedDefinition,
+        runFormError,
+        definitionFormError,
+        openDefinitionMenuId,
+        setOpenDefinitionMenuId,
+        archiveCandidate,
+        setArchiveCandidate,
+        cancelRunDialogOpen,
+        setCancelRunDialogOpen,
+        returnToAfterSave,
+        builderOpen,
+        setBuilderOpen,
+        savingDefinition,
+        definitionRuntimeOpen,
+        setDefinitionRuntimeOpen,
+        runSetupReady,
+        definitionForm,
+        setDefinitionForm,
+        targetUrlRef,
+        toolsByCategory,
+        testDataRefsSummary,
+        runPlanRows,
+        openCreateAgentBuilder,
+        closeCustomAgentBuilder,
+        editDefinitionFromMenu,
+        archiveDefinitionFromMenu,
+        toggleDefinitionTool,
+        toggleCategoryTools,
+        saveDefinition,
+        archiveDefinition,
+        handleRun,
+        controlAgentRun,
+        retryAgentRun,
         updateWorkspaceQuery,
         selectRun,
         selectHistoryRun,
@@ -279,24 +258,23 @@ export default function AgentsPage() {
         selectTraceTab,
         updateReportStatusFilter,
         updateReportSeverityFilter,
-        setCreateQueryOpen,
         queryState,
-    } = useAgentWorkspaceQuery({
-        agentRuntime,
+    } = useAgentCustomAgentWorkflow({
+        projectId: currentProject?.id,
+        projectLoading,
+        workspaceView,
         setWorkspaceView,
+        activeRun,
+        setActiveRun,
         setSelectedRunId,
-        setSelectedDefinitionId,
         setCustomResultTab,
         setTraceTab,
         setReportStatusFilter,
         setReportSeverityFilter,
-        setReturnToAfterSave,
-        setDefinitionForm,
-        setDefinitionFormError,
         setAgentActionIntent,
-        setBuilderOpen,
-        setFlowModalOpen,
         setWorkspaceStatus,
+        fetchHistoryRef,
+        queueStatus,
     });
 
     const {
@@ -341,112 +319,75 @@ export default function AgentsPage() {
     });
 
     const {
-        queueStatus,
-        queueLoading,
-        queueCleanupLoading,
-        queueError,
-        fetchQueueStatus,
-        cleanStaleQueueTasks,
-    } = useAgentQueueStatus({
-        projectLoading,
-        workspaceView,
-    });
-
-    const fetchRuntimeSettings = async () => {
-        try {
-            const runtime = await fetchAgentRuntimeSetting();
-            if (!runtime) return;
-            setAgentRuntime(runtime);
-            setDefinitionForm(prev => prev.id ? prev : { ...prev, runtime });
-        } catch (e) {
-            console.error('Failed to fetch runtime settings', e);
-        }
-    };
-
-    const fetchSessions = async () => {
-        if (!currentProject?.id) {
-            setSessions([]);
-            setSessionId('');
-            return;
-        }
-        try {
-            setSessions(await fetchProjectBrowserAuthSessions(currentProject.id));
-        } catch (e) { console.error("Failed to fetch browser login sessions", e); }
-    };
-
-    const {
-        resetAgentLibraryLoadedProjects,
-        loadAgentDefinitionsFresh: fetchAgentDefinitionsFresh,
-        ensureAgentLibraryData,
-        saveDefinitionRecord,
-        archiveDefinitionRecord,
-    } = useAgentDefinitions({
+        importingRequirementIds,
+        reportImportError,
+        reportEditTarget,
+        reportEditForm,
+        reportEditError,
+        savingReportEdit,
+        openReportOverviewEdit,
+        openReportItemEdit,
+        closeReportEditDialog,
+        updateReportEditField,
+        saveReportEdit,
+        importReportRequirements,
+    } = useAgentReportEditing({
+        activeRun,
         projectId: currentProject?.id,
-        projectLoading,
-        agentDefinitionsLength: agentDefinitions.length,
-        toolCatalogLength: toolCatalog.length,
-        selectedDefinitionId,
-        setAgentDefinitions,
-        setToolCatalog,
-        setSelectedDefinitionId,
+        setActiveRun,
+        setHistory,
+        setWorkspaceStatus,
     });
 
     const {
-        saveReportPatch,
-        importRequirements,
-        generateItemSpec,
-    } = useAgentReportActions(currentProject?.id);
+        setFlowModalOpen,
+        loadingFlowDetails,
+        generatingSpec,
+        flowSpecAgentRunId,
+        flowSpecAgentRun,
+        flowSpecAgentEvents,
+        flowSpecError,
+        setFlowSpecError,
+        reportSpecAuthMode,
+        setReportSpecAuthMode,
+        reportSpecAuthSessionId,
+        setReportSpecAuthSessionId,
+        generatedSpec,
+        specModalOpen,
+        setSpecModalOpen,
+        splittingSpec,
+        splitResult,
+        flowSpecPoller,
+        fetchFlowDetails,
+        generateFlowSpec,
+        openSpecFromReportItem,
+        closeFlowModal,
+        createSpecFromReportItem,
+        downloadSpec,
+        splitSpec,
+        reportSpecReview,
+        activeFlow,
+        flowModalVisible,
+        missingReportSpecItemMessage,
+        flowSpecLatestImage,
+        inheritedBrowserAuthUnavailable,
+        flowSpecBrowserAuthFailure,
+    } = useAgentSpecGeneration({
+        activeRun,
+        projectId: currentProject?.id,
+        sessions,
+        sessionId,
+        activeBrowserAuthSessions,
+        projectDefaultBrowserAuthSession,
+        agentActionIntent,
+        setAgentActionIntent,
+        setWorkspaceStatus,
+        updateWorkspaceQuery,
+    });
 
     useEffect(() => {
-        if (projectLoading) return;
-        resetAgentLibraryLoadedProjects();
-        setToolCatalog([]);
-        setAgentDefinitions([]);
-        setSelectedDefinitionId('');
-        setSessions([]);
-        setSessionId('');
-    }, [currentProject?.id, projectLoading, resetAgentLibraryLoadedProjects]);
-
-    useEffect(() => {
-        if (projectLoading) return;
-        void fetchRuntimeSettings();
-    }, [currentProject?.id, projectLoading]);
-
-    useEffect(() => {
-        if (projectLoading) return;
-        if (!['run', 'library'].includes(workspaceView) && !builderOpen) return;
-        void ensureAgentLibraryData();
-    }, [builderOpen, ensureAgentLibraryData, projectLoading, workspaceView]);
-
-    useEffect(() => {
-        if (projectLoading) return;
-        const needsSessions =
-            workspaceView === 'run' ||
-            flowModalOpen ||
-            builderOpen;
-        if (!needsSessions) return;
-        void fetchSessions();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [builderOpen, currentProject?.id, flowModalOpen, projectLoading, workspaceView]);
-
-    useEffect(() => {
-        setRunSetupReady(true);
-    }, []);
-
-    useEffect(() => {
-        const rememberTargetUrl = (event: Event) => {
-            const target = event.target as HTMLInputElement | null;
-            if (target?.name === 'targetUrl' || target?.id === 'agents-target-url') {
-                targetUrlRef.current = target.value;
-            }
-        };
-        document.addEventListener('input', rememberTargetUrl, true);
-        document.addEventListener('change', rememberTargetUrl, true);
-        return () => {
-            document.removeEventListener('input', rememberTargetUrl, true);
-            document.removeEventListener('change', rememberTargetUrl, true);
-        };
-    }, []);
+        fetchHistoryRef.current = fetchHistory;
+    }, [fetchHistory]);
 
     useEffect(() => {
         if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('resultTab')) return;
@@ -529,334 +470,6 @@ export default function AgentsPage() {
         mergeProgressFromAgentEvent,
     });
 
-    const fetchFlowSpecAgentRun = async (id: string) => {
-        try {
-            const data = await fetchFlowSpecAgentRunApi(id);
-            setFlowSpecAgentRun(data.run);
-            setFlowSpecAgentEvents(data.events);
-        } catch (e) {
-            console.error("Failed to fetch spec generation run", e);
-        }
-    };
-
-    useEffect(() => {
-        if (!flowSpecAgentRunId || !flowModalOpen) return;
-        fetchFlowSpecAgentRun(flowSpecAgentRunId);
-        const interval = window.setInterval(() => fetchFlowSpecAgentRun(flowSpecAgentRunId), 3000);
-        return () => window.clearInterval(interval);
-    }, [flowSpecAgentRunId, flowModalOpen]);
-
-    // Fetch flow details from the API
-    const fetchFlowDetails = async (flowId: string) => {
-        if (!activeRun?.id) return;
-
-        setLoadingFlowDetails(true);
-        flowSpecPoller.clear();
-        setFlowSpecAgentRunId(null);
-        setFlowSpecAgentRun(null);
-        setFlowSpecAgentEvents([]);
-        setFlowSpecError(null);
-        try {
-            const data = await fetchExploratoryFlowDetails(activeRun.id, flowId);
-            setSelectedFlow(data.flow);
-            setAgentActionIntent({ type: 'none' });
-            updateWorkspaceQuery({ specItemId: '', specItemType: '' });
-            setFlowModalOpen(true);
-        } catch (e) {
-            console.error("Failed to fetch flow details", e);
-            const message = e instanceof Error ? e.message : 'Please try again.';
-            toast.error(`Failed to load flow details: ${message}`);
-        } finally {
-            setLoadingFlowDetails(false);
-        }
-    };
-
-    // Flow spec generation with async job polling
-    const flowSpecPoller = useJobPoller({
-        apiBase: API_BASE,
-        urlPattern: '/api/agents/exploratory/flow-spec-jobs/{jobId}',
-        interval: 3000,
-        onComplete: (result, status) => {
-            setFlowSpecError(null);
-            if (result) {
-                setGeneratedSpec({
-                    spec_content: result.spec_content as string,
-                    spec_file: result.spec_file as string,
-                    filename: result.spec_file ? (result.spec_file as string).split('/').pop() : 'spec.md',
-                    flow_title: result.flow_title as string,
-                    summary: 'Generated with Intelligent Pipeline',
-                    cached: false,
-                    validated: result.validated as boolean || false,
-                    test_code: result.test_code as string,
-                    test_file: result.test_file as string,
-                    pipeline: result.pipeline as string,
-                    requires_auth: result.requires_auth as boolean,
-                });
-                setSpecModalOpen(true);
-                setWorkspaceStatus('Test spec generated.');
-            }
-            const agentRunId = status.agent_run_id || flowSpecAgentRunId;
-            if (agentRunId) {
-                setFlowSpecAgentRunId(agentRunId);
-                fetchFlowSpecAgentRun(agentRunId);
-            }
-            setGeneratingSpec(false);
-        },
-        onFailed: (message, status) => {
-            setGeneratingSpec(false);
-            setFlowSpecError(message || 'Unknown error');
-            setWorkspaceStatus(`Spec generation failed: ${message || 'Unknown error'}`);
-            const agentRunId = status.agent_run_id || flowSpecAgentRunId;
-            if (agentRunId) {
-                setFlowSpecAgentRunId(agentRunId);
-                fetchFlowSpecAgentRun(agentRunId);
-            }
-        },
-    });
-
-    useEffect(() => {
-        const agentRunId = flowSpecPoller.status?.agent_run_id;
-        if (agentRunId && agentRunId !== flowSpecAgentRunId) {
-            setFlowSpecAgentRunId(agentRunId);
-        }
-        const agentRun = flowSpecPoller.status?.agent_run as AgentRun | undefined;
-        if (agentRun?.id) {
-            setFlowSpecAgentRun(agentRun);
-        }
-    }, [flowSpecPoller.status, flowSpecAgentRunId]);
-
-    // Generate spec for a single flow using Intelligent Pipeline
-    const generateFlowSpec = async (flowId: string, forceRegenerate: boolean = false) => {
-        if (!activeRun?.id) return;
-
-        setGeneratingSpec(true);
-        setSplitResult(null);
-        flowSpecPoller.clear();
-        setFlowSpecAgentRunId(null);
-        setFlowSpecAgentRun(null);
-        setFlowSpecAgentEvents([]);
-        setFlowSpecError(null);
-        try {
-            const data = await generateExploratoryFlowSpec(activeRun.id, flowId, forceRegenerate);
-
-            // Cached result → show immediately
-            if (data.cached || data.status === 'success') {
-                setGeneratedSpec({
-                    spec_content: data.spec_content,
-                    spec_file: data.spec_file,
-                    filename: data.spec_file ? data.spec_file.split('/').pop() : 'spec.md',
-                    flow_title: data.flow_title,
-                    summary: data.status === 'success' ? 'Generated with Intelligent Pipeline' : data.status,
-                    cached: data.cached || false,
-                    validated: data.validated || false,
-                    test_code: data.test_code,
-                    test_file: data.test_file,
-                    pipeline: data.pipeline,
-                    requires_auth: data.requires_auth
-                });
-                setSpecModalOpen(true);
-                setGeneratingSpec(false);
-                return;
-            }
-
-            // Async job → start polling
-            if (data.job_id) {
-                if (data.agent_run_id) {
-                    setFlowSpecAgentRunId(data.agent_run_id);
-                    fetchFlowSpecAgentRun(data.agent_run_id);
-                }
-                flowSpecPoller.startPolling(data.job_id);
-                return; // generatingSpec stays true until poll resolves
-            }
-
-            throw new Error('Unexpected response from server');
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : 'Please try again.';
-            setFlowSpecError(message);
-            setGeneratingSpec(false);
-        }
-    };
-
-    const openSpecFromReportItem = (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
-        markAgentsAction({ action: 'reviewReportSpec', runId: activeRun?.id, itemId: item?.id, itemType: kind, phase: 'click' });
-        if (!activeRun?.id) {
-            const message = 'Select a completed custom agent run before creating a spec.';
-            setWorkspaceStatus(message);
-            setFlowSpecError(message);
-            setAgentActionIntent({ type: 'none' });
-            toast.error(message);
-            markAgentsAction({ action: 'reviewReportSpec', runId: null, itemId: item?.id, itemType: kind, phase: 'missing-run' });
-            return;
-        }
-        if (!item?.id) {
-            const message = 'This report item is missing an id and cannot be used to create a spec.';
-            setWorkspaceStatus(message);
-            setFlowSpecError(message);
-            setAgentActionIntent({ type: 'none' });
-            toast.error(message);
-            markAgentsAction({ action: 'reviewReportSpec', runId: activeRun.id, itemId: null, itemType: kind, phase: 'missing-item-id' });
-            return;
-        }
-        const defaultSelection = defaultReportSpecBrowserAuthSelection(sessions, sessionId);
-        setReportSpecAuthMode(defaultSelection.mode);
-        setReportSpecAuthSessionId(defaultSelection.sessionId);
-        setSelectedFlow(null);
-        setAgentActionIntent({ type: 'reviewReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind });
-        setFlowModalOpen(true);
-        setWorkspaceStatus(`Reviewing ${kind === 'finding' ? 'finding' : 'test idea'} ${item.id} for spec generation.`);
-        updateWorkspaceQuery({ runId: activeRun.id, specItemId: item.id, specItemType: kind });
-        setGeneratingSpec(false);
-        setSplitResult(null);
-        flowSpecPoller.clear();
-        setFlowSpecAgentRunId(null);
-        setFlowSpecAgentRun(null);
-        setFlowSpecAgentEvents([]);
-        setFlowSpecError(null);
-        markAgentsAction({ action: 'reviewReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind, phase: 'modal-open' });
-    };
-
-    const closeFlowModal = () => {
-        setFlowModalOpen(false);
-        setGeneratingSpec(false);
-        setFlowSpecError(null);
-        setSelectedFlow(null);
-        if (agentActionIntent.type === 'reviewReportSpec') {
-            setAgentActionIntent({ type: 'none' });
-            updateWorkspaceQuery({ specItemId: '', specItemType: '' });
-        }
-        flowSpecPoller.clear();
-        setFlowSpecAgentRunId(null);
-        setFlowSpecAgentRun(null);
-        setFlowSpecAgentEvents([]);
-        markAgentsAction({ action: 'flowModal', phase: 'closed' });
-    };
-
-    const createSpecFromReportItem = async (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
-        markAgentsAction({ action: 'generateReportSpec', runId: activeRun?.id, itemId: item?.id, itemType: kind, phase: 'click' });
-        if (!activeRun?.id) {
-            const message = 'Select a completed custom agent run before generating a spec.';
-            setWorkspaceStatus(message);
-            setFlowSpecError(message);
-            toast.error(message);
-            return;
-        }
-        if (!item?.id) {
-            const message = 'This report item is missing an id and cannot be used to generate a spec.';
-            setWorkspaceStatus(message);
-            setFlowSpecError(message);
-            toast.error(message);
-            return;
-        }
-        if (reportSpecAuthMode === 'session') {
-            const selected = activeBrowserAuthSessions.find(session => session.id === reportSpecAuthSessionId);
-            if (!selected) {
-                setFlowSpecError('Select an active browser login session or choose No auth.');
-                return;
-            }
-        }
-        if (reportSpecAuthMode === 'project_default' && !projectDefaultBrowserAuthSession) {
-            setFlowSpecError('Set an active project default browser login session or choose No auth.');
-            return;
-        }
-        setGeneratingSpec(true);
-        setSplitResult(null);
-        flowSpecPoller.clear();
-        setFlowSpecAgentRunId(null);
-        setFlowSpecAgentRun(null);
-        setFlowSpecAgentEvents([]);
-        setFlowSpecError(null);
-        setWorkspaceStatus(`Generating test spec from ${kind === 'finding' ? 'finding' : 'test idea'} ${item.id}.`);
-        try {
-            const data = await generateItemSpec({
-                runId: activeRun.id,
-                itemId: item.id,
-                itemType: kind,
-                body: reportSpecBrowserAuthBody(reportSpecAuthMode, reportSpecAuthSessionId),
-            });
-            if (data.agent_run_id) {
-                setFlowSpecAgentRunId(data.agent_run_id);
-                fetchFlowSpecAgentRun(data.agent_run_id);
-            }
-            if (data.job_id) {
-                flowSpecPoller.startPolling(data.job_id);
-                markAgentsAction({ action: 'generateReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind, phase: 'polling-started', jobId: data.job_id });
-                return;
-            }
-            throw new Error('Unexpected response from server');
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : 'Please try again.';
-            setFlowSpecError(message);
-            setWorkspaceStatus(`Spec generation failed: ${message}`);
-            setGeneratingSpec(false);
-            markAgentsAction({ action: 'generateReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind, phase: 'failed', message });
-        }
-    };
-
-    const updateRunFromReportPatch = (updatedRun: AgentRun) => {
-        setActiveRun(updatedRun);
-        setHistory(prev => prev.map(run => run.id === updatedRun.id ? updatedRun : run));
-    };
-
-    const openReportOverviewEdit = (report: StructuredAgentReport) => {
-        if (!activeRun?.id) return;
-        setReportEditTarget({ type: 'overview', runId: activeRun.id });
-        setReportEditForm({
-            summary: report.summary || '',
-            scope: report.scope || '',
-        });
-        setReportEditError(null);
-    };
-
-    const openReportItemEdit = (item: ReportFinding | ReportTestIdea | ReportRequirement, kind: ReportEditableItemType) => {
-        if (!activeRun?.id) return;
-        setReportEditTarget({ type: kind, runId: activeRun.id, itemId: item.id });
-        if (kind === 'finding') {
-            const finding = item as ReportFinding;
-            setReportEditForm({
-                title: finding.title || '',
-                severity: finding.severity || '',
-                page: finding.page || '',
-                description: finding.description || '',
-                evidence: finding.evidence || '',
-                suggested_action: finding.suggested_action || '',
-            });
-        } else if (kind === 'test_idea') {
-            const idea = item as ReportTestIdea;
-            setReportEditForm({
-                title: idea.title || '',
-                priority: idea.priority || '',
-                page: idea.page || '',
-                steps: linesToText(idea.steps),
-                expected: idea.expected || '',
-                source_finding_id: idea.source_finding_id || '',
-            });
-        } else {
-            const requirement = item as ReportRequirement;
-            setReportEditForm({
-                title: requirement.title || '',
-                description: requirement.description || '',
-                category: requirement.category || '',
-                priority: requirement.priority || '',
-                acceptance_criteria: linesToText(requirement.acceptance_criteria),
-                page: requirement.page || '',
-                evidence: requirement.evidence || '',
-                confidence: requirement.confidence === undefined || requirement.confidence === null ? '' : String(requirement.confidence),
-            });
-        }
-        setReportEditError(null);
-    };
-
-    const closeReportEditDialog = () => {
-        if (savingReportEdit) return;
-        setReportEditTarget(null);
-        setReportEditForm({});
-        setReportEditError(null);
-    };
-
-    const updateReportEditField = (field: string, value: string) => {
-        setReportEditForm(prev => ({ ...prev, [field]: value }));
-    };
-
     const reportEditFieldId = (field: string) => `agents-report-edit-${reportEditTarget?.type || 'report'}-${field}`;
 
     const reportEditKicker = () => {
@@ -936,365 +549,6 @@ export default function AgentsPage() {
         );
     };
 
-    const reportEditPayload = () => {
-        if (!reportEditTarget) return {};
-        if (reportEditTarget.type === 'overview') {
-            return {
-                summary: reportEditForm.summary || '',
-                scope: reportEditForm.scope || '',
-            };
-        }
-        if (reportEditTarget.type === 'finding') {
-            return {
-                title: reportEditForm.title || '',
-                severity: reportEditForm.severity || '',
-                page: reportEditForm.page || '',
-                description: reportEditForm.description || '',
-                evidence: reportEditForm.evidence || '',
-                suggested_action: reportEditForm.suggested_action || '',
-            };
-        }
-        if (reportEditTarget.type === 'test_idea') {
-            return {
-                title: reportEditForm.title || '',
-                priority: reportEditForm.priority || '',
-                page: reportEditForm.page || '',
-                steps: textToLines(reportEditForm.steps),
-                expected: reportEditForm.expected || '',
-                source_finding_id: reportEditForm.source_finding_id || '',
-            };
-        }
-        return {
-            title: reportEditForm.title || '',
-            description: reportEditForm.description || '',
-            category: reportEditForm.category || '',
-            priority: reportEditForm.priority || '',
-            acceptance_criteria: textToLines(reportEditForm.acceptance_criteria),
-            page: reportEditForm.page || '',
-            evidence: reportEditForm.evidence || '',
-            confidence: reportEditForm.confidence || '',
-        };
-    };
-
-    const saveReportEdit = async () => {
-        if (!reportEditTarget || !activeRun?.id) return;
-        setSavingReportEdit(true);
-        setReportEditError(null);
-        try {
-            const data = await saveReportPatch(reportEditTarget, reportEditPayload());
-            const updatedRun = normalizeReportPatchResponse(data);
-            if (!updatedRun) throw new Error('The server did not return the updated run.');
-            updateRunFromReportPatch(updatedRun);
-            setReportEditTarget(null);
-            setReportEditForm({});
-            setWorkspaceStatus('Report content saved.');
-        } catch (e: unknown) {
-            const message = e instanceof Error ? e.message : 'Failed to save report content.';
-            setReportEditError(message);
-            setWorkspaceStatus(`Report edit failed: ${message}`);
-        } finally {
-            setSavingReportEdit(false);
-        }
-    };
-
-    const importReportRequirements = async (itemIds?: string[]) => {
-        if (!activeRun?.id) return;
-        const selectedIds = (itemIds || []).filter(Boolean);
-        const markers = selectedIds.length > 0 ? selectedIds : ['__all__'];
-        setImportingRequirementIds(prev => Array.from(new Set([...prev, ...markers])));
-        setReportImportError(null);
-        try {
-            const data = await importRequirements(activeRun.id, selectedIds);
-            if (data.run) {
-                setActiveRun(data.run);
-                setHistory(prev => prev.map(run => run.id === data.run.id ? data.run : run));
-            }
-        } catch (e: unknown) {
-            setReportImportError(e instanceof Error ? e.message : 'Failed to import requirements.');
-        } finally {
-            setImportingRequirementIds(prev => prev.filter(id => !markers.includes(id)));
-        }
-    };
-
-    // Download generated spec as file
-    const downloadSpec = (content?: string, filename?: string) => {
-        // If no arguments provided, use state (for new flow spec generation)
-        const specContent = content || generatedSpec?.spec_content;
-        const specFilename = filename || generatedSpec?.filename || 'spec.md';
-
-        if (!specContent) return;
-
-        const blob = new Blob([specContent], { type: 'text/markdown' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = specFilename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-    };
-
-    // Split spec into individual tests
-    const splitSpec = async () => {
-        if (!generatedSpec?.spec_file) return;
-
-        setSplittingSpec(true);
-        setSplitResult(null);
-        try {
-            const data = await splitSpecFile(generatedSpec.spec_file);
-            setSplitResult(data);
-            setWorkspaceStatus(`Split spec into ${data.count} files.`);
-            toast.success('Spec split into individual tests');
-        } catch (e) {
-            console.error("Failed to split spec", e);
-            const message = e instanceof Error ? e.message : 'Please try again.';
-            toast.error(`Failed to split spec: ${message}`);
-        } finally {
-            setSplittingSpec(false);
-        }
-    };
-
-    const definitionById = useMemo(() => new Map(agentDefinitions.map(definition => [definition.id, definition])), [agentDefinitions]);
-    const selectedDefinition = useMemo(() => definitionById.get(selectedDefinitionId), [definitionById, selectedDefinitionId]);
-    const toolsByCategory = useMemo(() => toolCatalog.reduce<Record<string, AgentTool[]>>((acc, tool) => {
-        acc[tool.category] = acc[tool.category] || [];
-        acc[tool.category].push(tool);
-        return acc;
-    }, {}), [toolCatalog]);
-    const toolById = useMemo(() => new Map(toolCatalog.map(tool => [tool.id, tool])), [toolCatalog]);
-
-    const resetDefinitionForm = () => {
-        setDefinitionForm(defaultDefinitionForm(agentRuntime));
-        setDefinitionFormError(null);
-        setDefinitionRuntimeOpen(false);
-    };
-
-    const openCreateAgentBuilder = () => {
-        resetDefinitionForm();
-        selectAgentMode('custom');
-        setAgentActionIntent({ type: 'createAgent' });
-        setCreateQueryOpen(true);
-        setBuilderOpen(true);
-        setWorkspaceStatus('Opening custom agent builder.');
-        updateWorkspaceQuery({ agent: 'custom', create: true });
-        markAgentsAction({ action: 'createAgent', phase: 'modal-open' });
-    };
-
-    const editDefinition = (definition: AgentDefinition) => {
-        setDefinitionForm({
-            id: definition.id,
-            name: definition.name,
-            description: definition.description || '',
-            system_prompt: definition.system_prompt,
-            runtime: definition.runtime || 'claude_sdk',
-            timeout_seconds: definition.timeout_seconds || 1800,
-            tool_ids: definition.tool_ids || [],
-            test_data_refs: (definition.test_data_refs || []).join(', '),
-        });
-        setDefinitionFormError(null);
-        setBuilderOpen(true);
-    };
-
-    const closeCustomAgentBuilder = () => {
-        setBuilderOpen(false);
-        setDefinitionRuntimeOpen(false);
-        setDefinitionFormError(null);
-        if (agentActionIntent.type === 'createAgent') {
-            setAgentActionIntent({ type: 'none' });
-        }
-        setCreateQueryOpen(false);
-        updateWorkspaceQuery({ create: false });
-        markAgentsAction({ action: 'createAgent', phase: 'closed' });
-    };
-
-    const editDefinitionFromMenu = (definition: AgentDefinition, event?: Event) => {
-        event?.preventDefault();
-        event?.stopPropagation();
-        setOpenDefinitionMenuId(null);
-        editDefinition(definition);
-    };
-
-    const archiveDefinitionFromMenu = (definition: AgentDefinition, event?: Event) => {
-        event?.preventDefault();
-        event?.stopPropagation();
-        setOpenDefinitionMenuId(null);
-        setArchiveCandidate(definition);
-    };
-
-    const toggleDefinitionTool = (toolId: string) => {
-        setDefinitionForm(prev => ({
-            ...prev,
-            tool_ids: prev.tool_ids.includes(toolId)
-                ? prev.tool_ids.filter(id => id !== toolId)
-                : [...prev.tool_ids, toolId],
-        }));
-    };
-
-    const toggleCategoryTools = (tools: AgentTool[]) => {
-        const ids = tools.map(tool => tool.id);
-        const allSelected = ids.every(id => definitionForm.tool_ids.includes(id));
-        setDefinitionForm(prev => ({
-            ...prev,
-            tool_ids: allSelected
-                ? prev.tool_ids.filter(id => !ids.includes(id))
-                : Array.from(new Set([...prev.tool_ids, ...ids])),
-        }));
-    };
-
-    const saveDefinition = async () => {
-        setDefinitionFormError(null);
-        if (!definitionForm.name.trim()) {
-            setDefinitionFormError('Agent name is required.');
-            return;
-        }
-        if (!definitionForm.system_prompt.trim()) {
-            setDefinitionFormError('System prompt is required.');
-            return;
-        }
-        if (definitionForm.tool_ids.length === 0) {
-            setDefinitionFormError('Select at least one tool.');
-            return;
-        }
-
-        setSavingDefinition(true);
-        try {
-            const isEdit = Boolean(definitionForm.id);
-            const saved = await saveDefinitionRecord(definitionForm.id || null, {
-                name: definitionForm.name,
-                description: definitionForm.description,
-                system_prompt: definitionForm.system_prompt,
-                runtime: definitionForm.runtime,
-                timeout_seconds: definitionForm.timeout_seconds,
-                tool_ids: definitionForm.tool_ids,
-                test_data_refs: definitionForm.test_data_refs.split(',').map(s => s.trim()).filter(Boolean),
-                project_id: currentProject?.id,
-            });
-            await fetchAgentDefinitionsFresh();
-            selectDefinition(saved.id);
-            selectAgentMode('custom');
-            const nextView = isEdit && workspaceView === 'library' ? 'library' : 'run';
-            setWorkspaceView(nextView);
-            updateWorkspaceQuery({ create: false, view: nextView });
-            setBuilderOpen(false);
-            setWorkspaceStatus(`Saved ${saved.name || 'custom agent'}.`);
-            toast.success('Custom agent saved');
-        } catch (e: any) {
-            const message = e.message || 'Failed to save agent';
-            setDefinitionFormError(message);
-            toast.error(message);
-        } finally {
-            setSavingDefinition(false);
-        }
-    };
-
-    const archiveDefinition = async (definition: AgentDefinition) => {
-        try {
-            await archiveDefinitionRecord(definition.id);
-            await fetchAgentDefinitionsFresh();
-            if (selectedDefinitionId === definition.id) selectDefinition('');
-            setWorkspaceStatus(`Archived ${definition.name}.`);
-            toast.success('Custom agent archived');
-        } catch (e: any) {
-            const message = e.message || 'Failed to archive agent';
-            toast.error(message);
-        }
-    };
-
-    const handleRun = async (submittedTargetUrl?: string) => {
-        const validationError = validateAgentRunInput({
-            selectedAgent: 'custom',
-            selectedDefinitionId,
-            url,
-            authType,
-            sessionId,
-            testData: '',
-        });
-        setRunFormError(validationError);
-        if (validationError) {
-            return;
-        }
-
-        setIsStarting(true);
-        setWorkspaceStatus('Starting agent run...');
-        try {
-            const selectedBrowserAuthSessionId = authType === 'session' ? sessionId.trim() : '';
-            const selectedBrowserAuthSession = selectedBrowserAuthSessionId
-                ? sessions.find(session => session.id === selectedBrowserAuthSessionId)
-                : undefined;
-            if (selectedBrowserAuthSessionId && (!selectedBrowserAuthSession || !isBrowserAuthSessionSelectable(selectedBrowserAuthSession))) {
-                setRunFormError('Select an active browser login session.');
-                setIsStarting(false);
-                return;
-            }
-
-            const targetUrl = (submittedTargetUrl || '').trim() || url.trim() || targetUrlRef.current.trim() || (typeof document !== 'undefined'
-                ? ((document.getElementById('agents-target-url') as HTMLInputElement | null)?.value || '').trim()
-                : '');
-            const testDataRefsList = testDataRefs ? testDataRefs.split(',').map(s => s.trim()).filter(Boolean) : [];
-
-            const selectedRuntime = selectedDefinition?.runtime || agentRuntime;
-            const body = {
-                prompt: instructions || `Inspect ${targetUrl || 'the current application context'} and report useful QA findings.`,
-                url: targetUrl || undefined,
-                runtime: selectedRuntime,
-                test_data_refs: testDataRefsList,
-                config: {
-                    browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
-                    test_data_refs: testDataRefsList.length > 0 ? testDataRefsList : undefined,
-                },
-                project_id: currentProject?.id,
-            };
-
-            const data = await startAgentDefinitionRun(selectedDefinitionId, body);
-            // Refresh history but select the new run
-            await fetchHistory();
-            selectRun(data.run_id);
-            setWorkspaceStatus('Agent run started.');
-            toast.success('Agent run started');
-
-        } catch (e: any) {
-            const message = e.message || 'Failed to start agent run.';
-            setRunFormError(message);
-            toast.error(message);
-        } finally {
-            setIsStarting(false);
-        }
-    };
-
-    const controlAgentRun = async (action: 'pause' | 'resume' | 'cancel') => {
-        if (!activeRun) return;
-        setRunControlPending(action);
-        try {
-            const data = await controlAgentRunApi(activeRun.id, action, currentProject?.id);
-            setActiveRun(data);
-            await fetchHistory();
-            setWorkspaceStatus(`Run ${action} request sent.`);
-            toast.success(`Run ${action} request sent`);
-        } catch (e: any) {
-            toast.error(e.message || `Failed to ${action} agent run`);
-        } finally {
-            setRunControlPending(null);
-        }
-    };
-
-    const retryAgentRun = async () => {
-        if (!activeRun || !isAgentRunTerminal(activeRun.status)) return;
-        setRunControlPending('retry');
-        try {
-            const data = await retryAgentRunApi(activeRun.id, currentProject?.id);
-            setActiveRun(data);
-            await fetchHistory();
-            selectRun(activeRun.id);
-            setWorkspaceStatus('Retrying in same run using saved browser auth/session artifacts.');
-            toast.success('Retrying in same run');
-        } catch (e: any) {
-            toast.error(e.message || 'Failed to retry agent run');
-        } finally {
-            setRunControlPending(null);
-        }
-    };
-
     const exportAgentTrace = () => {
         if (!activeRun) return;
         window.open(agentRunTraceExportUrl(activeRun.id, currentProject?.id), '_blank', 'noopener,noreferrer');
@@ -1342,51 +596,8 @@ export default function AgentsPage() {
         return dateFormatter.format(new Date(iso));
     };
 
-    const reportSpecReview = useMemo(() => {
-        if (agentActionIntent.type !== 'reviewReportSpec') return null;
-        if (activeRun?.id !== agentActionIntent.runId) return null;
-        return findReportSpecItem(activeRun, agentActionIntent.itemId, agentActionIntent.itemType);
-    }, [activeRun, agentActionIntent]);
-    const activeFlow = agentActionIntent.type === 'reviewReportSpec'
-        ? reportSpecReview?.flow || null
-        : selectedFlow;
-    const flowModalVisible = flowModalOpen && (Boolean(activeFlow) || agentActionIntent.type === 'reviewReportSpec');
-    const missingReportSpecItemMessage = agentActionIntent.type === 'reviewReportSpec' && activeRun?.id === agentActionIntent.runId && activeRun.result && !reportSpecReview
-        ? `Report item ${agentActionIntent.itemId} was not found in the refreshed agent report.`
-        : '';
-
-    useEffect(() => {
-        if (!missingReportSpecItemMessage) return;
-        setWorkspaceStatus(missingReportSpecItemMessage);
-        setFlowSpecError(missingReportSpecItemMessage);
-        markAgentsAction({
-            action: 'reviewReportSpec',
-            runId: agentActionIntent.type === 'reviewReportSpec' ? agentActionIntent.runId : null,
-            itemId: agentActionIntent.type === 'reviewReportSpec' ? agentActionIntent.itemId : null,
-            itemType: agentActionIntent.type === 'reviewReportSpec' ? agentActionIntent.itemType : null,
-            phase: 'item-not-found',
-        });
-    }, [missingReportSpecItemMessage, agentActionIntent]);
-
-    useEffect(() => {
-        if (agentActionIntent.type !== 'reviewReportSpec' || !reportSpecReview?.item) return;
-        const kind = agentActionIntent.itemType === 'finding' ? 'finding' : 'test idea';
-        setWorkspaceStatus(`Reviewing ${kind} ${reportSpecReview.item.id} for spec generation.`);
-    }, [agentActionIntent, reportSpecReview]);
-
-    const flowSpecLatestImage = sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
     const flowSpecRunLive = Boolean(flowSpecAgentRun && LIVE_AGENT_STATUSES.has(flowSpecAgentRun.status));
     const flowSpecShowBrowser = Boolean(flowSpecAgentRunId && (generatingSpec || flowSpecRunLive || flowSpecLatestImage));
-    const sourceRunBrowserAuthSessionId = runBrowserAuthSessionId(activeRun?.config);
-    const inheritedBrowserAuthUnavailable = Boolean(
-        activeFlow?.source_type === 'custom_report' &&
-        sourceRunBrowserAuthSessionId &&
-        !activeBrowserAuthSessions.some(item => item.id === sourceRunBrowserAuthSessionId)
-    );
-    const flowSpecBrowserAuthFailure = Boolean(
-        flowSpecAgentRun?.progress?.browser_auth_failure ||
-        flowSpecAgentRun?.result?.browser_auth_failure
-    );
     const explorerResult = activeRun?.agent_type === 'exploratory' ? activeRun.result || {} : {};
     const explorerDiagnostics = explorerResult?.diagnostics || {};
     const explorerFinalizerDiagnostics = explorerDiagnostics?.finalizer || {};
@@ -1438,35 +649,34 @@ export default function AgentsPage() {
             degraded: stale > 0 || orphaned > 0 || noWorkers,
         };
     }, [queueStatus]);
-    const selectedDefinitionToolLabels = useMemo(() => {
-        if (!selectedDefinition) return [];
-        return selectedDefinition.tool_ids.map(toolId => toolById.get(toolId)?.label || toolId);
-    }, [selectedDefinition, toolById]);
-    const visibleTestDataRefs = useMemo(() => {
-        const explicitRefs = testDataRefs.split(',').map(ref => ref.trim()).filter(Boolean);
-        if (explicitRefs.length > 0) return explicitRefs;
-        return selectedDefinition?.test_data_refs || [];
-    }, [selectedDefinition?.test_data_refs, testDataRefs]);
-    const testDataRefsSummary = visibleTestDataRefs.length === 0
-        ? 'No refs selected'
-        : `${visibleTestDataRefs.length} ref${visibleTestDataRefs.length === 1 ? '' : 's'} selected`;
-    const runPlanRows = useMemo(() => {
-        const authMode = authType === 'session'
-            ? (sessions.find(session => session.id === sessionId)?.name || sessionId || 'Session required')
-            : 'No auth';
-        const runtime = selectedDefinition?.runtime || agentRuntime;
-        const timeout = `${Math.ceil((selectedDefinition?.timeout_seconds || 1800) / 60)} minutes`;
-        return [
-            ['Agent', selectedDefinition?.name || 'Custom agent required'],
-            ['Runtime', 'Claude SDK'],
-            ['Target', url.trim() || 'Optional'],
-            ['Auth', authMode],
-            ['Timeout', timeout],
-            ['Tools', selectedDefinitionToolLabels.slice(0, 4).join(', ') || 'Select a saved agent'],
-            ['Test data refs', testDataRefs.trim() || selectedDefinition?.test_data_refs?.join(', ') || 'None'],
-            ['Queue', queueStatus ? `${queueStatus.active ?? 0} active, ${queueStatus.queued ?? 0} queued · ${queueStateLabel(queueStatus)}` : 'Not loaded'],
-        ];
-    }, [agentRuntime, authType, queueStatus, selectedDefinition, selectedDefinitionToolLabels, sessionId, sessions, testDataRefs, url]);
+    const openReportSearchResult = (result: AgentReportSearchItem) => {
+        const resultTab = reportSearchResultTab(result.type);
+        const itemId = result.item?.id != null ? String(result.item.id) : '';
+        const opensSpecReview = (result.type === 'finding' || result.type === 'test_idea') && Boolean(itemId);
+
+        setSelectedRunId(result.run_id);
+        setWorkspaceView('run');
+        setCustomResultTab(resultTab);
+        if (opensSpecReview) {
+            setAgentActionIntent({
+                type: 'reviewReportSpec',
+                runId: result.run_id,
+                itemId,
+                itemType: result.type as 'finding' | 'test_idea',
+            });
+            setWorkspaceStatus(`Opening report item ${itemId} for spec review.`);
+        } else if (agentActionIntent.type === 'reviewReportSpec') {
+            setAgentActionIntent({ type: 'none' });
+        }
+        updateWorkspaceQuery({
+            view: 'run',
+            runId: result.run_id,
+            resultTab,
+            specItemId: opensSpecReview ? itemId : null,
+            specItemType: opensSpecReview ? result.type : null,
+        });
+    };
+
     const workspaceTabs: Array<{ key: AgentWorkspaceView; label: string; count?: number }> = [
         { key: 'run', label: 'Run' },
         { key: 'history', label: 'History', count: historyTotal || undefined },
@@ -4545,6 +3755,7 @@ export default function AgentsPage() {
                     loading={reportSearchLoading}
                     results={reportSearchResults}
                     onRefresh={fetchReportSearch}
+                    onOpenResult={openReportSearchResult}
                 />
             )}
 

@@ -3218,7 +3218,7 @@ export default function AutoPilotPage() {
                                 mode="ref"
                                 compact
                                 insertLabel="Add"
-                                editLabel="Edit"
+                                editLabel="Manage Data"
                                 onInsert={addTestDataRef}
                             />
                         </div>

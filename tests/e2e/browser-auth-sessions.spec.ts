@@ -223,7 +223,7 @@ test.describe('Browser login sessions', () => {
 
     try {
       await loginThroughUi(page, '/settings', project.id);
-      await expect(page.getByText('Browser Login Sessions')).toBeVisible();
+      await expect(page.getByText('Browser Login Sessions', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: 'Enter credentials' }).click();
       await page.getByPlaceholder('Staging login').fill('Local test login');
@@ -263,7 +263,7 @@ test.describe('Browser login sessions', () => {
 
     try {
       await loginThroughUi(page, '/settings', project.id);
-      await expect(page.getByText('Browser Login Sessions')).toBeVisible();
+      await expect(page.getByText('Browser Login Sessions', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: 'Enter credentials' }).click();
       await page.getByPlaceholder('Staging login').fill('Email-first login');
