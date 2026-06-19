@@ -62,6 +62,7 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "refactor/staged-foundation"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
