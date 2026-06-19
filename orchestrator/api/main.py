@@ -13,13 +13,11 @@ orchestrator_dir = Path(__file__).resolve().parent.parent
 if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
-from fastapi import FastAPI
-
 from logging_config import get_logger, setup_logging
 
 from . import (
     agent_facade_support,
-    app_wiring_support,
+    main_app_wiring_facade_support,
     main_lifecycle_event_facade_support,
     main_route_module_facade_support,
     main_runtime_dependency_facade_support,
@@ -34,14 +32,8 @@ logger = get_logger(__name__)
 main_runtime_dependency_facade_support.configure_main_runtime_dependency_facade(globals())
 main_static_facade_support.configure_main_static_facade(globals())
 main_route_module_facade_support.configure_main_route_module_facade(globals())
-
-
-def _main_runtime():
-    return sys.modules[__name__]
-
-
-app = FastAPI(title="Quorvex AI API")
-app_wiring_support.configure_app(_main_runtime(), app)
+main_app_wiring_facade_support.configure_main_app_wiring_facade(globals())
+app = globals()["app"]
 
 
 def _test_run_runtime():
@@ -50,7 +42,6 @@ def _test_run_runtime():
 
 test_run_facade_support.configure_test_run_facade(_test_run_runtime, globals())
 main_lifecycle_event_facade_support.configure_main_lifecycle_event_facade(app, _test_run_runtime, globals())
-
 
 
 def _agent_compat_runtime():
