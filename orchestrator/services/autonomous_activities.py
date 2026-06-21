@@ -33,19 +33,14 @@ from orchestrator.api.models_db import (
     AutonomousMissionRun,
     AutonomousTestProposal,
     CoverageGap,
-    ExecutionSettings,
     ExplorationSession,
     Project,
     Requirement,
     RtmEntry,
-    RtmSnapshot,
 )
 from orchestrator.services.autonomous_events import (
-    create_autonomous_agent_event,
     emit_mission_event,
-    emit_work_item_status_event,
 )
-from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 from orchestrator.utils.json_utils import extract_json_from_markdown
 from orchestrator.utils.string_utils import slugify
 
@@ -637,17 +632,16 @@ def _artifact_source_metadata(
     return metadata
 
 
-def _is_revision_work_item(item: AutonomousAgentWorkItem) -> bool:
-    metadata = _work_item_revision_metadata(item)
-    return bool(metadata.get("revision_of_work_item_id"))
+def _is_revision_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _is_revision_work_item as _impl
+
+    return _impl(*args, **kwargs)
 
 
-def _queued_work_item_sort_key(item: AutonomousAgentWorkItem) -> tuple[int, int, datetime]:
-    return (
-        0 if _is_revision_work_item(item) else 1,
-        item.priority,
-        item.created_at,
-    )
+def _queued_work_item_sort_key(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _queued_work_item_sort_key as _impl
+
+    return _impl(*args, **kwargs)
 
 
 def _mission_snapshot(mission: AutonomousMission) -> dict[str, Any]:
@@ -1403,2625 +1397,364 @@ def _element_change_description(kind: str) -> str:
     return "Browser memory detected changed element attributes. Review whether coverage or selectors should be updated."
 
 
-def _whole_app_team_enabled(mission: AutonomousMission) -> bool:
-    config = mission.config or {}
-    return bool(
-        config.get("whole_app_team")
-        or config.get("team_mode") == "whole_app"
-        or config.get("mission_template") == "whole_app_team"
-    )
-
-
-def _team_roles(mission: AutonomousMission) -> list[str]:
-    config = mission.config or {}
-    roles = config.get("roles")
-    if isinstance(roles, list):
-        selected = [str(role).strip() for role in roles if str(role).strip()]
-        if selected:
-            return selected[:12]
-    return list(WHOLE_APP_TEAM_ROLES)
-
-
-def _max_parallel_agents(mission: AutonomousMission) -> int:
-    configured = _config_int(mission.config, "max_parallel_agents", DEFAULT_MAX_PARALLEL_AGENTS)
-    global_limit = DEFAULT_MAX_PARALLEL_AGENTS
-    try:
-        with Session(engine) as session:
-            settings = session.get(ExecutionSettings, 1)
-            if settings:
-                global_limit = settings.parallelism
-    except Exception as exc:
-        logger.debug("Failed to read execution settings for autonomous parallelism: %s", exc)
-    return max(1, min(configured, global_limit, 12))
-
-
-def _run_parallel_team_supervisor(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-) -> dict[str, Any]:
-    summary = {
-        "roles": _team_roles(mission),
-        "max_parallel_agents": _max_parallel_agents(mission),
-        "work_items_created": 0,
-        "work_items_enqueued": 0,
-        "work_items_completed": 0,
-        "work_items_blocked": 0,
-        "stale_recovered_count": 0,
-        "findings_created": 0,
-        "planner_created": 0,
-        "active_count": 0,
-        "completed_count": 0,
-        "blocked_count": 0,
-    }
-    summary["work_items_completed"] = _sync_agent_work_items(session, mission)
-    summary["stale_recovered_count"] = _recover_stale_work_items(session, mission, run)
-    summary["work_items_created"] += summary["stale_recovered_count"]
-    if summary["work_items_completed"]:
-        summary["findings_created"] = _create_findings_from_completed_work_items(session, mission, run)
-    summary["planner_created"] = _plan_whole_app_work_items(session, mission, run)
-    summary["work_items_created"] += summary["planner_created"]
-
-    existing = session.exec(
-        select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission.id)
-    ).all()
-    if not existing:
-        for index, role in enumerate(summary["roles"]):
-            item = AutonomousAgentWorkItem(
-                id=f"amwork-{uuid.uuid4().hex[:12]}",
-                mission_id=mission.id,
-                run_id=run.id,
-                project_id=mission.project_id,
-                role=role,
-                objective=_role_objective(role, mission),
-                assigned_surface_json=json.dumps(_role_surface(role, mission)),
-                status="queued",
-                priority=10 + index,
-                planner_key=f"bootstrap:{role}",
-            )
-            item.progress = {
-                "phase": "created",
-                "message": "Waiting for an available agent worker.",
-                "planner_key": item.planner_key,
-            }
-            session.add(item)
-            summary["work_items_created"] += 1
-        session.commit()
-
-    running_count = _count_work_items(session, mission.id, {"running"})
-    available_slots = max(0, summary["max_parallel_agents"] - running_count)
-    if available_slots:
-        queued_candidates = session.exec(
-            select(AutonomousAgentWorkItem)
-            .where(
-                AutonomousAgentWorkItem.mission_id == mission.id,
-                AutonomousAgentWorkItem.status == "queued",
-                AutonomousAgentWorkItem.agent_task_id == None,  # noqa: E711
-            )
-            .order_by(col(AutonomousAgentWorkItem.priority).asc(), col(AutonomousAgentWorkItem.created_at).asc())
-        ).all()
-        pending = sorted(queued_candidates, key=_queued_work_item_sort_key)[
-            : min(DEFAULT_WORK_ITEM_BATCH_SIZE, available_slots)
-        ]
-        for item in pending:
-            if _enqueue_agent_work_item(session, mission, item):
-                summary["work_items_enqueued"] += 1
-            else:
-                summary["work_items_blocked"] += 1
-
-    summary["active_count"] = _count_work_items(session, mission.id, WORK_ITEM_ACTIVE_STATUSES)
-    summary["running_count"] = _count_work_items(session, mission.id, {"running"})
-    summary["completed_count"] = _count_work_items(session, mission.id, {"completed"})
-    summary["blocked_count"] = _count_work_items(session, mission.id, {"blocked", "failed"})
-    _update_mission_team_progress(session, mission)
-    return summary
-
-
-def _recover_stale_work_items(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-) -> int:
-    now = _utcnow()
-    stale_after = now - timedelta(
-        minutes=max(5, _config_int(mission.config, "work_item_stale_minutes", DEFAULT_WORK_ITEM_STALE_MINUTES))
-    )
-    running_items = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission.id,
-            AutonomousAgentWorkItem.status == "running",
-        )
-    ).all()
-    created = 0
-    for item in running_items:
-        if not _work_item_is_stale(item, now=now, stale_after=stale_after):
-            continue
-        task_state = _agent_task_recovery_state(str(item.agent_task_id or ""))
-        if task_state in {"running", "paused"}:
-            item.lease_until = now + timedelta(minutes=30)
-            item.last_heartbeat_at = now
-            item.updated_at = now
-            session.add(item)
-            continue
-        if _active_recovery_work_item_exists(session, mission.id, item.id):
-            continue
-        reason = (
-            task_state if task_state != "unknown" else _stale_work_item_reason(item, now=now, stale_after=stale_after)
-        )
-        replacement = _create_recovery_work_item(session, mission, run, item, reason=reason)
-        if not replacement:
-            continue
-        item.status = "failed"
-        item.error_message = f"Recovered stale autonomous work item: {reason}"
-        item.completed_at = now
-        item.updated_at = now
-        item.recovery_reason = reason
-        item.progress = {
-            **item.progress,
-            "phase": "recovered",
-            "message": item.error_message,
-            "recovery_reason": reason,
-            "recovery_work_item_id": replacement.id,
-        }
-        item.result = {
-            **item.result,
-            "recovery_reason": reason,
-            "recovery_work_item_id": replacement.id,
-            "recovered_at": now.isoformat(),
-        }
-        session.add(item)
-        emit_work_item_status_event(item, item.error_message, event_type="error")
-        created += 1
-    if created:
-        session.commit()
-    return created
-
-
-def _work_item_is_stale(item: AutonomousAgentWorkItem, *, now: datetime, stale_after: datetime) -> bool:
-    if item.lease_until and item.lease_until <= now:
-        return True
-    if item.last_heartbeat_at and item.last_heartbeat_at <= stale_after:
-        return True
-    if not item.last_heartbeat_at and item.updated_at <= stale_after:
-        return True
-    return False
-
-
-def _stale_work_item_reason(item: AutonomousAgentWorkItem, *, now: datetime, stale_after: datetime) -> str:
-    if item.lease_until and item.lease_until <= now:
-        return "lease_expired"
-    if item.last_heartbeat_at and item.last_heartbeat_at <= stale_after:
-        return "heartbeat_stale"
-    return "updated_at_stale"
-
-
-def _agent_task_recovery_state(task_id: str) -> str:
-    if not task_id:
-        return "missing_agent_task"
-    try:
-        from orchestrator.services.agent_queue import AgentTaskStatus, get_agent_queue
-
-        async def _load() -> str:
-            queue = get_agent_queue()
-            await queue.connect()
-            try:
-                task = await queue.get_task(task_id)
-            finally:
-                await queue.disconnect()
-            if not task:
-                return "missing_agent_task"
-            if task.status == AgentTaskStatus.COMPLETED:
-                return "completed_out_of_band"
-            if task.status == AgentTaskStatus.FAILED:
-                return "agent_task_failed"
-            if task.status == AgentTaskStatus.TIMEOUT:
-                return "agent_task_timeout"
-            if task.status == AgentTaskStatus.CANCELLED:
-                return "agent_task_cancelled"
-            if task.status == AgentTaskStatus.PAUSED:
-                return "paused"
-            return "running"
-
-        return asyncio.run(_load())
-    except Exception:
-        logger.debug("Unable to inspect agent task %s during recovery.", task_id, exc_info=True)
-        return "unknown"
-
-
-def _active_recovery_work_item_exists(session: Session, mission_id: str, stale_item_id: str) -> bool:
-    items = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission_id,
-            col(AutonomousAgentWorkItem.status).in_(("queued", "running")),
-        )
-    ).all()
-    return any((item.progress or {}).get("recovered_from_work_item_id") == stale_item_id for item in items)
-
-
-def _create_recovery_work_item(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-    stale_item: AutonomousAgentWorkItem,
-    *,
-    reason: str,
-) -> AutonomousAgentWorkItem | None:
-    progress = stale_item.progress or {}
-    recovery_count = int(stale_item.recovery_count or progress.get("recovery_count") or 0) + 1
-    replacement = AutonomousAgentWorkItem(
-        id=f"amwork-{uuid.uuid4().hex[:12]}",
-        mission_id=mission.id,
-        run_id=run.id,
-        project_id=mission.project_id,
-        role=stale_item.role,
-        planner_key=stale_item.planner_key or progress.get("planner_key"),
-        objective=stale_item.objective,
-        assigned_surface_json=stale_item.assigned_surface_json,
-        status="queued",
-        priority=max(1, int(stale_item.priority or 50) - 1),
-        recovery_count=recovery_count,
-        recovery_reason=reason,
-    )
-    replacement.progress = {
-        **progress,
-        "phase": "created",
-        "message": "Recovered from a stale autonomous work item.",
-        "planner_key": replacement.planner_key,
-        "recovered_from_work_item_id": stale_item.id,
-        "recovery_reason": reason,
-        "recovery_count": recovery_count,
-    }
-    session.add(replacement)
-    return replacement
-
-
-def _plan_whole_app_work_items(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-) -> int:
-    """Create bounded, idempotent work items from canonical app state."""
-    config = mission.config or {}
-    limit = max(1, min(_config_int(config, "planner_batch_size", DEFAULT_WORK_ITEM_BATCH_SIZE), 20))
-    created = 0
-
-    requirements = session.exec(
-        select(Requirement)
-        .where(Requirement.project_id == mission.project_id)
-        .order_by(col(Requirement.updated_at).desc())
-        .limit(100)
-    ).all()
-    for requirement in requirements:
-        if created >= limit:
-            break
-        if requirement.id is None or _requirement_truth_state(requirement) == "rejected_requirement":
-            continue
-        mappings = session.exec(
-            select(RtmEntry).where(
-                RtmEntry.project_id == mission.project_id,
-                RtmEntry.requirement_id == requirement.id,
-            )
-        ).all()
-        if any(entry.mapping_type == "full" for entry in mappings):
-            continue
-        planner_key = f"rtm_gap:{requirement.id}:{requirement.canonical_key or requirement.req_code}"
-        if _planner_work_item_exists(session, mission.id, planner_key):
-            continue
-        objective = (
-            f"Close RTM coverage for {requirement.req_code}: {requirement.title}. "
-            "Inspect existing specs and propose missing automated coverage without writing files."
-        )
-        if _create_planned_work_item(
-            session,
-            mission,
-            run,
-            planner_key=planner_key,
-            role="spec_writer",
-            objective=objective,
-            priority=18,
-            surfaces=[],
-            metadata={"requirement_id": requirement.id, "requirement_code": requirement.req_code},
-        ):
-            created += 1
-
-    findings = session.exec(
-        select(AutonomousFinding)
-        .where(
-            AutonomousFinding.project_id == mission.project_id,
-            col(AutonomousFinding.status).in_(("open", "awaiting_approval", "approved")),
-        )
-        .order_by(col(AutonomousFinding.updated_at).desc())
-        .limit(50)
-    ).all()
-    for finding in findings:
-        if created >= limit:
-            break
-        planner_key = f"finding_followup:{finding.id}:{finding.dedupe_key}"
-        if _planner_work_item_exists(session, mission.id, planner_key):
-            continue
-        evidence = finding.evidence
-        objective = (
-            f"Review finding '{finding.title}' and map it to affected routes, requirements, and a regression proposal. "
-            "Do not duplicate existing proposals."
-        )
-        if _create_planned_work_item(
-            session,
-            mission,
-            run,
-            planner_key=planner_key,
-            role="regression_scout",
-            objective=objective,
-            priority=24 if finding.severity in {"critical", "high"} else 34,
-            surfaces=[str(evidence.get("target_url") or evidence.get("url") or "")],
-            metadata={"finding_id": finding.id, "finding_type": finding.finding_type},
-        ):
-            created += 1
-
-    for frontier in _frontier_planner_items(session, mission, limit=max(0, limit - created)):
-        if created >= limit:
-            break
-        frontier_id = str(frontier.get("id") or "")
-        if not frontier_id:
-            continue
-        planner_key = f"frontier:{frontier_id}"
-        if _planner_work_item_exists(session, mission.id, planner_key):
-            continue
-        url = str(frontier.get("url") or frontier.get("state_url") or frontier.get("url_template") or "")
-        action = str(frontier.get("action_type") or frontier.get("action") or "explore")
-        objective = (
-            f"Explore browser-memory frontier item {frontier_id}: {action}. "
-            "Record app map updates, requirements, bugs, and test proposals as structured JSON."
-        )
-        if _create_planned_work_item(
-            session,
-            mission,
-            run,
-            planner_key=planner_key,
-            role="explorer",
-            objective=objective,
-            priority=28,
-            surfaces=[url] if url else mission.target_urls,
-            metadata={"frontier_item": frontier},
-        ):
-            created += 1
-
-    if created:
-        session.commit()
-    return created
-
-
-def _planner_work_item_exists(session: Session, mission_id: str, planner_key: str) -> bool:
-    if not planner_key:
-        return False
-    direct = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission_id,
-            AutonomousAgentWorkItem.planner_key == planner_key,
-        )
-    ).first()
-    if direct:
-        return True
-    candidates = session.exec(
-        select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)
-    ).all()
-    return any((candidate.progress or {}).get("planner_key") == planner_key for candidate in candidates)
-
-
-def _create_planned_work_item(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-    *,
-    planner_key: str,
-    role: str,
-    objective: str,
-    priority: int,
-    surfaces: list[str],
-    metadata: dict[str, Any],
-) -> AutonomousAgentWorkItem | None:
-    item = AutonomousAgentWorkItem(
-        id=f"amwork-{uuid.uuid4().hex[:12]}",
-        mission_id=mission.id,
-        run_id=run.id,
-        project_id=mission.project_id,
-        role=role,
-        planner_key=planner_key,
-        objective=objective,
-        assigned_surface_json=json.dumps([surface for surface in surfaces if surface]),
-        status="queued",
-        priority=priority,
-    )
-    item.progress = {
-        "phase": "created",
-        "message": "Planner created this work item from canonical app state.",
-        "planner_key": planner_key,
-        **metadata,
-    }
-    session.add(item)
-    return item
-
-
-def _frontier_planner_items(session: Session, mission: AutonomousMission, *, limit: int) -> list[dict[str, Any]]:
-    if limit <= 0 or not mission.project_id:
-        return []
-    try:
-        from orchestrator.memory.browser_memory import get_exploration_memory_service
-
-        service = get_exploration_memory_service(session=session, project_id=mission.project_id)
-        return service.get_frontier_work(
-            query=" ".join(mission.target_urls or []),
-            limit=limit,
-            risk_max=str((mission.config or {}).get("frontier_risk_max") or "medium"),
-            db=session,
-        )
-    except Exception:
-        logger.debug("Unable to load browser frontier work for autonomous planner.", exc_info=True)
-        return []
-
-
-def _count_work_items(session: Session, mission_id: str, statuses: set[str]) -> int:
-    if not statuses:
-        return 0
-    return len(
-        session.exec(
-            select(AutonomousAgentWorkItem).where(
-                AutonomousAgentWorkItem.mission_id == mission_id,
-                col(AutonomousAgentWorkItem.status).in_(tuple(statuses)),
-            )
-        ).all()
-    )
-
-
-def _role_surface(role: str, mission: AutonomousMission) -> list[str]:
-    target_urls = mission.target_urls or ["http://localhost:3000"]
-    if role in {"requirements_analyst", "rtm_mapper", "spec_writer", "flake_triager"}:
-        return []
-    return target_urls
-
-
-def _role_objective(role: str, mission: AutonomousMission) -> str:
-    target_text = ", ".join(mission.target_urls or ["the configured application"])
-    objectives = {
-        "surface_mapper": f"Map the reachable web application surface for {target_text}: routes, menus, forms, auth boundaries, and major flows.",
-        "explorer": f"Explore high-value user journeys in {target_text}, looking for broken flows, missing states, and untested paths.",
-        "requirements_analyst": "Write or refine functional requirements from exploration evidence, grouped by feature and priority.",
-        "rtm_mapper": "Map requirements to existing specs/tests and identify critical RTM gaps that need proposals.",
-        "spec_writer": "Draft approval-gated test specs for the highest-value uncovered requirements without writing repository files.",
-        "regression_scout": "Review recent runs and important app paths to propose recurring regression coverage.",
-        "flake_triager": "Review unstable or timing-sensitive tests and propose flake triage findings.",
-    }
-    return objectives.get(role, f"Perform autonomous QA work for role {role} on {target_text}.")
-
-
-def _autonomous_test_data_execution_context(mission: AutonomousMission) -> dict[str, Any]:
-    config = mission.config or {}
-    refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
-    markdown = "\n".join(
-        [
-            mission.name or "",
-            json.dumps(config, default=str),
-            "\n".join(mission.target_urls or []),
-        ]
-    )
-    try:
-        from orchestrator.services.test_data_resolver import resolve_test_data_execution_context
-
-        with Session(engine) as session:
-            return resolve_test_data_execution_context(
-                session,
-                project_id=mission.project_id or "default",
-                refs=[str(ref) for ref in refs],
-                markdown=markdown,
-            )
-    except Exception:
-        logger.debug("Unable to resolve autonomous mission test data.", exc_info=True)
-        return {}
-
-
-def _agent_prompt_for_work_item(
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    test_data_context: dict[str, Any] | None = None,
-    browser_handoff: dict[str, Any] | None = None,
-    child_browser_handoffs: list[dict[str, Any]] | None = None,
-) -> str:
-    surfaces = item.assigned_surface or mission.target_urls
-    revision_context = item.progress or {}
-    context_bundle = _work_item_context_bundle(mission, item, omit_browser_memory=bool(browser_handoff))
-    test_data_context = test_data_context or _autonomous_test_data_execution_context(mission)
-    context_note = ""
-    if context_bundle:
-        context_note = f"""
-Canonical context bundle:
-{_compact_json(context_bundle, max_chars=7000)}
-"""
-    browser_note = ""
-    if browser_handoff:
-        child_contracts = child_browser_handoffs or []
-        first_action = "None required."
-        if browser_handoff.get("handoff_mode") != "sequential_handoff":
-            first_action = (
-                f"Call browser_navigate to {browser_handoff.get('start_url')}, "
-                "then call browser_snapshot before interacting."
-            )
-        browser_note = f"""
-Current Browser Contract:
-{_compact_json(browser_handoff, max_chars=4500)}
-
-Known Browser Memory:
-- state ids: {", ".join(browser_handoff.get("browser_memory_state_ids") or []) or "none"}
-- frontier item ids: {", ".join(browser_handoff.get("frontier_item_ids") or []) or "none"}
-- omitted: {_compact_json(browser_handoff.get("omitted_browser_memory") or {{}}, max_chars=600)}
-
-Required First Browser Action:
-{first_action}
-
-State Validation Rules:
-- Call browser_snapshot before the first browser interaction.
-- After navigation, dialog handling, form submission, or any state-changing click, call browser_snapshot again.
-- If browser memory conflicts with the live snapshot, treat browser memory as stale and prefer the live snapshot.
-- Close the browser when done if browser_close is available.
-- Do not delegate browser work unless the child receives one of the BrowserContextHandoff packets below.
-- Parallel browser subagents must use isolated mode with their own run_dir and mcp_config_path.
-
-BrowserContextHandoff packets available for isolated child agents:
-{_compact_json(child_contracts, max_chars=5000) if child_contracts else "[]"}
-"""
-    test_data_note = ""
-    if test_data_context.get("prompt_markdown"):
-        test_data_note = f"""
-{test_data_context["prompt_markdown"]}
-
-When delegating to subagents, copy the relevant test-data ref names and plaintext values needed for execution into each delegated prompt. Subagents do not automatically inherit this full parent context.
-"""
-    revision_note = ""
-    if revision_context.get("revision_of_work_item_id"):
-        revision_note = f"""
-Revision request:
-- revise work item: {revision_context.get("revision_of_work_item_id")}
-- reviewer work item: {revision_context.get("reviewer_work_item_id") or "human/manual review"}
-- reviewer reason: {revision_context.get("review_reason") or "No reason provided"}
-- revision attempt: {revision_context.get("revision_attempt") or 1}
-Address the reviewer feedback directly and explain what changed from the prior output.
-"""
-    return f"""You are the {item.role} agent in a Quorvex autonomous QA team.
-
-Mission: {mission.name}
-Objective: {item.objective}
-Target surfaces: {", ".join(surfaces or ["project data and known app artifacts"])}
-{context_note}
-{browser_note}
-{test_data_note}
-{revision_note}
-
-Work only by inspecting the app/project through available tools. Do not write repository files.
-Return JSON only, preferably in a ```json fenced block, with this exact top-level shape:
-{{
-  "summary": "short factual summary",
-  "requirements": [
-    {{
-      "title": "requirement title",
-      "description": "what the product should do",
-      "category": "authentication|navigation|crud|validation|checkout|other",
-      "priority": "low|medium|high|critical",
-      "acceptance_criteria": ["observable criterion"],
-      "evidence": {{"url": "observed URL if any", "selector": "observed selector/text if any", "source": "browser_snapshot|test_run|memory|file"}},
-      "evidence_refs": ["artifact, snapshot, URL, selector, or source IDs"],
-      "truth_state": "candidate_requirement",
-      "confidence": 0.0,
-      "uncertainty_reason": "why this is candidate/uncertain"
-    }}
-  ],
-  "rtm_candidates": [
-    {{
-      "requirement_id": 0,
-      "requirement_code": "REQ-001",
-      "test_spec_name": "existing-or-proposed spec name",
-      "test_spec_path": "path if known",
-      "mapping_type": "full|partial|suggested",
-      "confidence": 0.0,
-      "coverage_notes": "covered behavior",
-      "gap_notes": "remaining gap",
-      "allow_candidate": false
-    }}
-  ],
-  "test_proposals": [
-    {{
-      "title": "test proposal title",
-      "rationale": "why this test matters",
-      "target_url": "absolute URL if known",
-      "route": "/route if known",
-      "test_type": "e2e|api|regression|security|accessibility|unit",
-      "risk_level": "low|medium|high|critical",
-      "requirement_ids": [],
-      "evidence": {{"url": "observed URL if any", "selector": "observed selector/text if any", "source": "browser_snapshot|test_run|memory|file"}}
-    }}
-  ],
-  "bugs": [
-    {{
-      "title": "bug title",
-      "description": "observed problem",
-      "severity": "low|medium|high|critical",
-      "target_url": "absolute URL if known",
-      "route": "/route if known",
-      "action": "user action",
-      "observed_failure": "what happened",
-      "expected_behavior": "what should happen",
-      "evidence": {{}}
-    }}
-  ],
-  "app_map_updates": [
-    {{
-      "url": "absolute URL",
-      "page_title": "page title",
-      "linked_urls": [],
-      "elements": {{}},
-      "forms": [],
-      "api_endpoints": []
-    }}
-  ],
-  "blockers": []
-}}
-
-Every proposed file or repository change must be a proposal only. The human approval flow will materialize files later.
-"""
-
-
-def _work_item_context_bundle(
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    *,
-    omit_browser_memory: bool = False,
-) -> dict[str, Any]:
-    bundle: dict[str, Any] = {}
-    try:
-        from orchestrator.memory.unified import get_unified_memory_service
-
-        memory_bundle = get_unified_memory_service().build_bundle(
-            query=item.objective,
-            project_id=mission.project_id,
-            agent_type=item.role,
-            limit=8,
-            include_review_required=True,
-            include_usage=False,
-        )
-        if omit_browser_memory and isinstance(memory_bundle, dict):
-            memory_bundle["browser_memory"] = {
-                "states": [],
-                "elements": [],
-                "frontier": [],
-                "omitted_reason": "current_browser_handoff_present",
-            }
-            diagnostics = memory_bundle.setdefault("diagnostics", {})
-            if isinstance(diagnostics, dict):
-                diagnostics.setdefault("warnings", []).append(
-                    "Durable browser memory omitted because this work item has a current browser handoff."
-                )
-        bundle["memory"] = memory_bundle
-    except Exception:
-        logger.debug("Unable to build autonomous work item memory context.", exc_info=True)
-
-    try:
-        requirements = []
-        with Session(engine) as context_session:
-            for requirement in context_session.exec(
-                select(Requirement)
-                .where(Requirement.project_id == mission.project_id)
-                .order_by(col(Requirement.updated_at).desc())
-                .limit(12)
-            ).all():
-                requirements.append(
-                    {
-                        "id": requirement.id,
-                        "req_code": requirement.req_code,
-                        "title": requirement.title,
-                        "truth_state": _requirement_truth_state(requirement),
-                        "priority": requirement.priority,
-                    }
-                )
-            open_proposals = context_session.exec(
-                select(AutonomousTestProposal)
-                .where(
-                    AutonomousTestProposal.project_id == mission.project_id,
-                    col(AutonomousTestProposal.approval_status).in_(("pending", "approved", "materialized")),
-                )
-                .order_by(col(AutonomousTestProposal.updated_at).desc())
-                .limit(12)
-            ).all()
-            bundle["canonical"] = {
-                "requirements": requirements,
-                "active_test_proposals": [
-                    {
-                        "id": proposal.id,
-                        "title": proposal.title,
-                        "status": proposal.approval_status,
-                        "validation_status": proposal.validation_status,
-                        "path": proposal.materialized_file_path or proposal.suggested_file_path,
-                    }
-                    for proposal in open_proposals
-                ],
-            }
-    except Exception:
-        logger.debug("Unable to build autonomous canonical context.", exc_info=True)
-    return bundle
-
-
-def _compact_json(value: Any, *, max_chars: int) -> str:
-    text = json.dumps(value, default=str, sort_keys=True)
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 3] + "..."
-
-
-def _safe_model_attr(model: Any, attr: str, default: Any = None) -> Any:
-    data = getattr(model, "__dict__", {}) or {}
-    if attr in data:
-        return data[attr]
-    try:
-        return getattr(model, attr)
-    except Exception:
-        pass
-    try:
-        from sqlalchemy import inspect as sqlalchemy_inspect
-
-        inspected = sqlalchemy_inspect(model)
-        key_names = [column.key for column in inspected.mapper.primary_key]
-        if attr in key_names and inspected.identity:
-            return inspected.identity[key_names.index(attr)]
-    except Exception:
-        return default
-    return default
-
-
-def _browser_owner_metadata(
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    *,
-    handoff_id: str | None = None,
-    child_agent_id: str | None = None,
-) -> dict[str, Any]:
-    item_id = _safe_model_attr(item, "id")
-    return {
-        "mission_id": _safe_model_attr(mission, "id"),
-        "run_id": _safe_model_attr(item, "run_id"),
-        "work_item_id": item_id,
-        "child_agent_id": child_agent_id,
-        "handoff_id": handoff_id or item_id,
-        "role": _safe_model_attr(item, "role"),
-        "recorded_at": _utcnow().isoformat(),
-    }
-
-
-def _tool_call_browser_action(tool_call: Any) -> dict[str, Any] | None:
-    name = _short_tool_name(getattr(tool_call, "name", None))
-    if not name.startswith("browser_"):
-        return None
-    raw_input = getattr(tool_call, "input", None)
-    tool_input = raw_input if isinstance(raw_input, dict) else {}
-    action_type = name.removeprefix("browser_")
-    target = (
-        tool_input.get("url")
-        or tool_input.get("target")
-        or tool_input.get("element")
-        or tool_input.get("text")
-        or tool_input.get("key")
-        or tool_input.get("function")
-    )
-    action = {
-        "action": "navigate" if name == "browser_navigate" else action_type,
-        "target": str(target or name),
-        "outcome": "ok" if getattr(tool_call, "success", True) else "failed",
-    }
-    if getattr(tool_call, "duration_ms", None) is not None:
-        action["duration_ms"] = tool_call.duration_ms
-    return action
-
-
-def _snapshot_lines_from_app_map(update: dict[str, Any]) -> str:
-    lines: list[str] = []
-    elements = update.get("elements") or {}
-    if isinstance(elements, dict):
-        for role, values in elements.items():
-            for value in _as_list(values)[:20]:
-                if isinstance(value, dict):
-                    name = value.get("name") or value.get("text") or value.get("label") or role
-                else:
-                    name = value
-                if str(name or "").strip():
-                    lines.append(f'- {str(role).lower()} "{str(name).strip()[:120]}"')
-    forms = update.get("forms") or []
-    for form in _as_list(forms)[:10]:
-        if isinstance(form, dict):
-            name = form.get("name") or form.get("action") or form.get("label") or "form"
-            lines.append(f'- form "{str(name).strip()[:120]}"')
-    return "\n".join(lines)
-
-
-def _attach_browser_owner_metadata(
-    *,
-    project_id: str | None,
-    session_id: str,
-    owner_metadata: dict[str, Any],
-) -> None:
-    if not project_id:
-        return
-    try:
-        from orchestrator.api.models_db import BrowserElement, BrowserPageState
-
-        with Session(engine) as db:
-            states = db.exec(
-                select(BrowserPageState).where(
-                    BrowserPageState.project_id == project_id,
-                    BrowserPageState.session_id == session_id,
-                )
-            ).all()
-            for state in states:
-                canonical = dict(state.canonical_json or {})
-                canonical["owner_metadata"] = owner_metadata
-                state.canonical_json = canonical
-                db.add(state)
-                elements = db.exec(
-                    select(BrowserElement).where(
-                        BrowserElement.project_id == project_id,
-                        BrowserElement.state_id == state.id,
-                    )
-                ).all()
-                for element in elements:
-                    attrs = dict(element.attributes_json or {})
-                    attrs["owner_metadata"] = owner_metadata
-                    element.attributes_json = attrs
-                    db.add(element)
-            if states:
-                db.commit()
-    except Exception:
-        logger.debug("Unable to attach browser owner metadata.", exc_info=True)
-
-
-def _record_browser_observations_for_work_item(
-    *,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    result: Any,
-    browser_handoff: dict[str, Any] | None,
-) -> dict[str, Any]:
-    project_id = _safe_model_attr(mission, "project_id") or _safe_model_attr(item, "project_id")
-    mission_id = _safe_model_attr(mission, "id") or _safe_model_attr(item, "mission_id")
-    item_id = _safe_model_attr(item, "id")
-    if not project_id and mission_id:
-        try:
-            with Session(engine) as db:
-                db_mission = db.get(AutonomousMission, mission_id)
-                project_id = db_mission.project_id if db_mission else None
-        except Exception:
-            logger.debug("Unable to rehydrate autonomous mission project.", exc_info=True)
-    if not project_id:
-        return {"states": 0, "transitions": 0, "app_map_states": 0}
-    session_id = f"autonomous:{mission_id}:{item_id}"
-    owner_metadata = _browser_owner_metadata(
-        mission,
-        item,
-        handoff_id=(browser_handoff or {}).get("mcp_config_path") or item_id,
-    )
-    summary = {"states": 0, "transitions": 0, "app_map_states": 0, "session_id": session_id}
-    try:
-        from orchestrator.memory.browser_memory import get_exploration_memory_service
-
-        memory = get_exploration_memory_service(project_id=project_id)
-        action_trace = [
-            action
-            for action in (
-                _tool_call_browser_action(tool_call) for tool_call in (getattr(result, "tool_calls", []) or [])
-            )
-            if action
-        ]
-        if action_trace:
-            try:
-                seeded = memory.seed_from_action_trace(
-                    session_id=session_id,
-                    entry_url=str((browser_handoff or {}).get("start_url") or _default_target_url(mission)),
-                    action_trace=action_trace,
-                )
-                summary["states"] += int(seeded.get("states", 0) or 0)
-                summary["transitions"] += int(seeded.get("transitions", 0) or 0)
-            except Exception:
-                logger.debug("Unable to seed autonomous browser action trace.", exc_info=True)
-
-        structured = _extract_structured_agent_output(getattr(result, "output", "") or "") or {}
-        for update in structured.get("app_map_updates") or []:
-            if not isinstance(update, dict) or not update.get("url"):
-                continue
-            memory.upsert_page_state(
-                session_id=session_id,
-                url=str(update.get("url")),
-                title=str(update.get("page_title") or update.get("url")),
-                snapshot_text=_snapshot_lines_from_app_map(update),
-                snapshot_ref=f"autonomous:{item.id}",
-                source_fidelity="autonomous_agent_observation",
-            )
-            summary["states"] += 1
-            summary["app_map_states"] += 1
-
-        if summary["states"] or summary["app_map_states"]:
-            _attach_browser_owner_metadata(
-                project_id=project_id,
-                session_id=session_id,
-                owner_metadata=owner_metadata,
-            )
-    except Exception:
-        logger.debug("Unable to record autonomous browser observations.", exc_info=True)
-    return summary
-
-
-def _allowed_tools_for_work_item(
-    item: AutonomousAgentWorkItem,
-    *,
-    mcp_config_dir: Path | str | None = None,
-) -> list[str]:
-    try:
-        from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
-
-        allowed = get_agent_allowed_tools(item.role, mcp_config_dir=mcp_config_dir)
-        if allowed:
-            return allowed
-    except Exception:
-        logger.debug("Could not resolve autonomous role tool profile for %s", item.role, exc_info=True)
-    return ["Glob", "Grep", "Read", "LS"]
-
-
-def _short_tool_name(tool_name: str | None) -> str:
-    if not tool_name:
-        return "tool"
-    text = str(tool_name)
-    if "__" in text:
-        return text.split("__")[-1]
-    return text
-
-
-def _is_browser_tool(tool_name: str | None) -> bool:
-    short_name = _short_tool_name(tool_name)
-    text = str(tool_name or "")
-    return short_name.startswith("browser_") or "__browser_" in text
-
-
-def _browser_action_names(allowed_tools: list[str]) -> list[str]:
-    actions: list[str] = []
-    for tool in allowed_tools:
-        short_name = _short_tool_name(tool)
-        if short_name.startswith("browser_") and short_name not in actions:
-            actions.append(short_name)
-    return actions or list(DEFAULT_BROWSER_ACTIONS)
-
-
-def _state_hash_from_browser_contract(contract: dict[str, Any] | None) -> str | None:
-    if not contract:
-        return None
-    basis = {
-        "url": contract.get("last_known_url") or contract.get("start_url"),
-        "title": contract.get("last_known_title"),
-        "snapshot_summary": contract.get("snapshot_summary"),
-        "browser_memory_state_ids": contract.get("browser_memory_state_ids") or [],
-        "frontier_item_ids": contract.get("frontier_item_ids") or [],
-    }
-    if not any(basis.values()):
-        return None
-    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
-
-
-def _browser_lease_for_handoff(
-    *,
-    owner_id: str,
-    mode: str,
-    timeout_seconds: int,
-    contract: dict[str, Any],
-    owner_type: str = "autonomous_work_item",
-) -> dict[str, Any]:
-    safe_mode = mode if mode in BROWSER_LEASE_MODES else "isolated"
-    now = _utcnow()
-    last_snapshot_at = contract.get("last_snapshot_at") or contract.get("live_snapshot_at")
-    return {
-        "owner_type": owner_type,
-        "owner_id": owner_id,
-        "mode": safe_mode,
-        "lease_timeout_seconds": max(30, int(timeout_seconds or 0)),
-        "lease_until": (now + timedelta(seconds=max(30, int(timeout_seconds or 0)))).isoformat(),
-        "heartbeat_at": now.isoformat(),
-        "current_url": contract.get("last_known_url") or contract.get("start_url"),
-        "page_state_hash": _state_hash_from_browser_contract(contract),
-        "last_snapshot_at": last_snapshot_at,
-    }
-
-
-def _browser_contract_memory_context(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> dict[str, Any]:
-    context: dict[str, Any] = {
-        "states": [],
-        "frontier": [],
-        "snapshot_summary": None,
-        "last_known_url": None,
-        "last_known_title": None,
-        "omitted": {"states": 0, "frontier": 0},
-    }
-    if not mission.project_id:
-        return context
-    try:
-        from orchestrator.memory.browser_memory import get_exploration_memory_service
-
-        service = get_exploration_memory_service(project_id=mission.project_id)
-        bundle = service.get_memory_bundle(query=item.objective, limit=5)
-        states = bundle.get("states") or []
-        frontier = bundle.get("frontier") or []
-        context["states"] = states[:3]
-        context["frontier"] = frontier[:5]
-        context["omitted"] = {
-            "states": max(0, len(states) - len(context["states"])),
-            "frontier": max(0, len(frontier) - len(context["frontier"])),
-        }
-        if context["states"]:
-            latest = context["states"][0]
-            context["last_known_url"] = latest.get("url")
-            context["last_known_title"] = latest.get("title")
-            context["snapshot_summary"] = (
-                f"Latest durable browser memory state {latest.get('id')} at "
-                f"{latest.get('url') or 'unknown URL'} last seen {latest.get('last_seen_at') or 'unknown time'}."
-            )
-    except Exception:
-        logger.debug("Unable to build browser handoff memory context.", exc_info=True)
-    return context
-
-
-def _browser_context_handoff(
-    *,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    run_dir: Path,
-    runtime: dict[str, Any],
-    allowed_tools: list[str],
-    mode: str = "isolated",
-    storage_state_path: Path | str | None = None,
-    auth_session_id: str | None = None,
-    auth_session_name: str | None = None,
-) -> dict[str, Any]:
-    memory_context = _browser_contract_memory_context(mission, item)
-    start_url = (item.assigned_surface or mission.target_urls or [_default_target_url(mission)])[0]
-    expected_url_pattern = str((mission.config or {}).get("expected_url_pattern") or start_url or ".*")
-    contract = {
-        "contract_type": "BrowserContextHandoff",
-        "run_dir": str(run_dir),
-        "mcp_config_path": str(runtime.get("mcp_config_path") or run_dir / ".mcp.json"),
-        "storage_state_attached": bool(storage_state_path),
-        "auth_session_id": auth_session_id,
-        "auth_session_name": auth_session_name,
-        "start_url": start_url,
-        "expected_url_pattern": expected_url_pattern,
-        "last_known_url": memory_context.get("last_known_url") or start_url,
-        "last_known_title": memory_context.get("last_known_title"),
-        "snapshot_summary": memory_context.get("snapshot_summary")
-        or "No live snapshot has been captured for this handoff yet.",
-        "browser_memory_state_ids": [
-            str(state.get("id")) for state in (memory_context.get("states") or []) if state.get("id")
-        ],
-        "frontier_item_ids": [
-            str(frontier.get("id")) for frontier in (memory_context.get("frontier") or []) if frontier.get("id")
-        ],
-        "risk_level": str((mission.config or {}).get("browser_risk_level") or "medium"),
-        "allowed_browser_actions": _browser_action_names(allowed_tools),
-        "handoff_mode": mode if mode in BROWSER_LEASE_MODES else "isolated",
-        "omitted_browser_memory": memory_context.get("omitted") or {"states": 0, "frontier": 0},
-    }
-    contract["browser_lease"] = _browser_lease_for_handoff(
-        owner_id=item.id,
-        mode=contract["handoff_mode"],
-        timeout_seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)),
-        contract=contract,
-    )
-    return contract
-
-
-def _assert_browser_lease_available(
-    session: Session,
-    *,
-    mission_id: str,
-    requested_owner_id: str,
-    mode: str,
-) -> None:
-    if mode == "isolated":
-        return
-    now = _utcnow()
-    running_items = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission_id,
-            AutonomousAgentWorkItem.status == "running",
-        )
-    ).all()
-    for running in running_items:
-        if running.id == requested_owner_id:
-            continue
-        lease = (running.progress or {}).get("browser_context_handoff", {}).get("browser_lease", {})
-        if not isinstance(lease, dict) or lease.get("mode") in {None, "isolated", "read_only_snapshot"}:
-            continue
-        try:
-            lease_until = datetime.fromisoformat(str(lease.get("lease_until")))
-        except (TypeError, ValueError):
-            lease_until = running.lease_until
-        if lease_until and lease_until > now:
-            raise RuntimeError(
-                f"Browser lease conflict: work item {running.id} already owns a {lease.get('mode')} browser lease."
-            )
-
-
-def _validate_browser_handoff_mode(
-    item: AutonomousAgentWorkItem,
-    *,
-    mode: str,
-    max_snapshot_age_seconds: int = 300,
-) -> None:
-    if mode != "sequential_handoff":
-        return
-    existing = (item.progress or {}).get("browser_context_handoff", {})
-    if not isinstance(existing, dict):
-        existing = {}
-    lease = existing.get("browser_lease") if isinstance(existing.get("browser_lease"), dict) else {}
-    snapshot_at = lease.get("last_snapshot_at") or existing.get("last_snapshot_at")
-    if not snapshot_at:
-        raise RuntimeError("Sequential browser handoff requires a recent browser_snapshot in work-item progress.")
-    try:
-        snapshot_dt = datetime.fromisoformat(str(snapshot_at))
-    except ValueError as exc:
-        raise RuntimeError("Sequential browser handoff has an invalid browser_snapshot timestamp.") from exc
-    if _utcnow() - snapshot_dt.replace(tzinfo=None) > timedelta(seconds=max_snapshot_age_seconds):
-        raise RuntimeError("Sequential browser handoff requires a browser_snapshot captured within the last 5 minutes.")
-
-
-def _child_browser_run_dir(mission: AutonomousMission, item: AutonomousAgentWorkItem, child_id: str) -> Path:
-    return _autonomous_work_item_run_dir(mission, item) / "children" / child_id
-
-
-def _prepare_child_browser_handoffs(
-    *,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    allowed_tools: list[str],
-    parent_auth_session_id: str | None,
-    parent_auth_session_name: str | None,
-    max_children: int,
-) -> list[dict[str, Any]]:
-    if max_children <= 0:
-        return []
-    handoffs: list[dict[str, Any]] = []
-    try:
-        from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
-    except Exception:
-        logger.debug("Could not import Playwright MCP helper for child browser handoffs.", exc_info=True)
-        return handoffs
-
-    for index in range(max_children):
-        child_id = f"child-{index + 1}"
-        child_run_dir = _child_browser_run_dir(mission, item, child_id)
-        child_run_dir.mkdir(parents=True, exist_ok=True)
-        storage_state_path = None
-        if parent_auth_session_id or (mission.config or {}).get("use_project_default_browser_auth"):
-            try:
-                with Session(engine) as db_session:
-                    resolved = resolve_browser_auth_for_run(
-                        db_session,
-                        mission.project_id,
-                        run_dir=child_run_dir,
-                        browser_auth_session_id=parent_auth_session_id,
-                        use_default=bool((mission.config or {}).get("use_project_default_browser_auth")),
-                    )
-                storage_state_path = resolved.storage_state_path if resolved else None
-            except BrowserAuthSessionError:
-                logger.debug("Could not attach browser auth storage state for child handoff.", exc_info=True)
-        runtime = write_playwright_mcp_config(
-            run_dir=child_run_dir,
-            server_name="playwright",
-            project_root=REPOSITORY_ROOT,
-            storage_state_path=storage_state_path,
-        )
-        child_allowed_tools = _allowed_tools_for_work_item(item, mcp_config_dir=child_run_dir)
-        contract = _browser_context_handoff(
-            mission=mission,
-            item=item,
-            run_dir=child_run_dir,
-            runtime=runtime,
-            allowed_tools=child_allowed_tools,
-            mode="isolated",
-            storage_state_path=storage_state_path,
-            auth_session_id=parent_auth_session_id,
-            auth_session_name=parent_auth_session_name,
-        )
-        contract.update(
-            {
-                "child_agent_id": child_id,
-                "parent_work_item_id": item.id,
-                "allowed_tools": child_allowed_tools,
-                "strict_mcp_config": True,
-                "required_first_browser_action": (
-                    f"Call browser_navigate to {contract['start_url']}, then call browser_snapshot before interaction."
-                ),
-            }
-        )
-        _validate_child_browser_handoff_contract(contract)
-        handoffs.append(contract)
-    return handoffs
-
-
-def _validate_child_browser_handoff_contract(contract: dict[str, Any]) -> None:
-    if contract.get("handoff_mode") != "isolated":
-        raise RuntimeError("Child browser handoff must use isolated mode.")
-    mcp_config_path = Path(str(contract.get("mcp_config_path") or ""))
-    if not mcp_config_path.exists():
-        raise RuntimeError("Child browser handoff requires an isolated MCP config.")
-    allowed = {_short_tool_name(tool) for tool in _as_text_list(contract.get("allowed_tools"))}
-    missing = sorted({"browser_navigate", "browser_snapshot"} - allowed)
-    if missing:
-        raise RuntimeError(f"Child browser handoff missing required browser tools: {', '.join(missing)}")
-    first_action = str(contract.get("required_first_browser_action") or "")
-    if "browser_navigate" not in first_action or "browser_snapshot" not in first_action:
-        raise RuntimeError("Child browser handoff must require navigate and snapshot evidence first.")
-
-
-def _autonomous_work_item_run_dir(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> Path:
-    return RUNS_DIR / "autonomous" / mission.id / item.id
-
-
-def _prepare_autonomous_work_item_runtime(
-    mission: AutonomousMission, item: AutonomousAgentWorkItem
-) -> tuple[Path, dict[str, Any]]:
-    run_dir = _autonomous_work_item_run_dir(mission, item)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    runtime: dict[str, Any] = {}
-    try:
-        from orchestrator.utils.playwright_mcp import browser_runtime_status, write_playwright_mcp_config
-
-        mission_config = mission.config
-        storage_state_path = None
-        auth_session_id = None
-        auth_session_name = None
-        if mission_config.get("browser_auth_session_id") or mission_config.get("use_project_default_browser_auth"):
-            try:
-                with Session(engine) as db_session:
-                    resolved = resolve_browser_auth_for_run(
-                        db_session,
-                        mission.project_id,
-                        run_dir=run_dir,
-                        browser_auth_session_id=mission_config.get("browser_auth_session_id"),
-                        use_default=bool(mission_config.get("use_project_default_browser_auth")),
-                    )
-                storage_state_path = resolved.storage_state_path if resolved else None
-                auth_session_id = resolved.session_id if resolved else None
-                auth_session_name = resolved.session_name if resolved else None
-            except BrowserAuthSessionError as exc:
-                raise RuntimeError(f"{exc}. Refresh browser auth session.") from exc
-        runtime = write_playwright_mcp_config(
-            run_dir=run_dir,
-            server_name="playwright",
-            project_root=REPOSITORY_ROOT,
-            storage_state_path=storage_state_path,
-        )
-        runtime = {
-            **runtime,
-            **browser_runtime_status(),
-            "storage_state_attached": bool(storage_state_path),
-            "storage_state_path": str(storage_state_path) if storage_state_path else None,
-            "auth_session_id": auth_session_id,
-            "auth_session_name": auth_session_name,
-        }
-    except RuntimeError:
-        raise
-    except Exception:
-        logger.debug("Could not prepare autonomous work item browser runtime", exc_info=True)
-    return run_dir, runtime
-
-
-def _enqueue_agent_work_item(
-    session: Session,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-) -> bool:
-    return _execute_agent_work_item_direct(session, mission, item)
-
-
-def _execute_agent_work_item_direct(
-    session: Session,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-) -> bool:
-    """Execute one autonomous work item inside the Temporal activity worker."""
-    now = _utcnow()
-    current_item = session.get(AutonomousAgentWorkItem, item.id)
-    current_mission = session.get(AutonomousMission, mission.id)
-    if (
-        not current_item
-        or current_item.status == "cancelled"
-        or (current_mission and current_mission.status == "cancelled")
-    ):
-        return False
-    timeout_seconds = max(300, min(mission.max_runtime_minutes * 60, 7200))
-    run_dir, browser_runtime = _prepare_autonomous_work_item_runtime(mission, item)
-    allowed_tools = _allowed_tools_for_work_item(item, mcp_config_dir=run_dir)
-    has_browser_tools = any(_is_browser_tool(tool) for tool in allowed_tools)
-    browser_handoff: dict[str, Any] | None = None
-    child_browser_handoffs: list[dict[str, Any]] = []
-    browser_handoff_mode = str((mission.config or {}).get("browser_handoff_mode") or "isolated")
-    if has_browser_tools:
-        _validate_browser_handoff_mode(item, mode=browser_handoff_mode)
-        _assert_browser_lease_available(
-            session,
-            mission_id=mission.id,
-            requested_owner_id=item.id,
-            mode=browser_handoff_mode,
-        )
-        browser_handoff = _browser_context_handoff(
-            mission=mission,
-            item=item,
-            run_dir=run_dir,
-            runtime=browser_runtime,
-            allowed_tools=allowed_tools,
-            mode=browser_handoff_mode,
-            storage_state_path=browser_runtime.get("storage_state_path"),
-            auth_session_id=browser_runtime.get("auth_session_id"),
-            auth_session_name=browser_runtime.get("auth_session_name"),
-        )
-    item.agent_task_id = None
-    item.status = "running"
-    item.attempt_count += 1
-    item.started_at = item.started_at or now
-    item.lease_until = now + timedelta(seconds=timeout_seconds)
-    item.last_heartbeat_at = now
-    item.updated_at = now
-    item.progress = {
-        **item.progress,
-        "phase": "running",
-        "message": "Agent work item is running in a Temporal activity.",
-        "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
-        "has_browser_tools": has_browser_tools,
-        "browser_context_handoff": browser_handoff,
-        "browser_child_handoffs": child_browser_handoffs,
-        **browser_runtime,
-    }
-    session.add(item)
-    session.commit()
-    emit_work_item_status_event(
-        item,
-        "Agent work item started in Temporal activity.",
-        event_type="lifecycle",
-    )
-
-    try:
-        from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime, normalize_agent_runtime
-
-        runtime_name = normalize_agent_runtime((mission.config or {}).get("runtime"))
-        last_progress_signature: tuple[str, str, str] | None = None
-        last_assistant_message: str | None = None
-
-        def _emit_event(
-            event_type: str, message: str, *, level: str = "info", payload: dict[str, Any] | None = None
-        ) -> None:
-            try:
-                create_autonomous_agent_event(
-                    project_id=item.project_id,
-                    mission_id=item.mission_id,
-                    run_id=item.run_id,
-                    work_item_id=item.id,
-                    agent_task_id=item.agent_task_id,
-                    event_type=event_type,
-                    level=level,
-                    message=message,
-                    payload=payload,
-                )
-            except Exception:
-                logger.debug("Failed to persist autonomous work item event", exc_info=True)
-
-        def _on_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
-            short_name = _short_tool_name(tool_name)
-            payload = {
-                "status": "started",
-                "tool_name": tool_name,
-                "short_name": short_name,
-                "tool_input": tool_input,
-                "runtime": runtime_name,
-            }
-            _emit_event("tool_call", f"Tool started: {short_name}", payload=payload)
-            if _is_browser_tool(tool_name):
-                _emit_event("browser_action", f"Browser action: {short_name}", payload=payload)
-
-        def _on_progress(progress: dict[str, Any]) -> None:
-            nonlocal last_progress_signature, last_assistant_message
-            try:
-                current = session.get(AutonomousAgentWorkItem, item.id)
-                if not current or current.status != "running":
-                    return
-                heartbeat_at = _utcnow()
-                last_tool = progress.get("last_tool")
-                progress_payload = {
-                    **progress,
-                    "runtime": runtime_name,
-                    "has_browser_tools": has_browser_tools,
-                    "browser_context_handoff": browser_handoff,
-                    "browser_child_handoffs": child_browser_handoffs,
-                    **browser_runtime,
-                }
-                current.progress = {
-                    **(current.progress or {}),
-                    **{key: value for key, value in progress_payload.items() if value is not None},
-                    "runtime": runtime_name,
-                    "phase": progress.get("phase") or "running",
-                    "message": progress.get("message") or "Agent is running.",
-                    "last_event_at": heartbeat_at.isoformat(),
-                }
-                current.last_heartbeat_at = heartbeat_at
-                current.lease_until = heartbeat_at + timedelta(seconds=timeout_seconds)
-                current.updated_at = heartbeat_at
-                session.add(current)
-                session.commit()
-                phase = str(progress.get("phase") or "running")
-                message = str(progress.get("message") or "Agent is running.")
-                signature = (phase, message, str(last_tool or ""))
-                if signature != last_progress_signature:
-                    last_progress_signature = signature
-                    _emit_event(
-                        "progress",
-                        message,
-                        payload={
-                            **progress_payload,
-                            "phase": phase,
-                            "status": current.status,
-                            "work_item_progress": current.progress,
-                        },
-                    )
-                if phase == "tool_result" and last_tool:
-                    short_name = _short_tool_name(str(last_tool))
-                    payload = {
-                        **progress_payload,
-                        "status": "completed",
-                        "tool_name": str(last_tool),
-                        "short_name": short_name,
-                    }
-                    _emit_event("tool_call", f"Tool completed: {short_name}", payload=payload)
-                    if _is_browser_tool(str(last_tool)):
-                        _emit_event("browser_action", f"Browser action completed: {short_name}", payload=payload)
-                elif (
-                    message
-                    and message != last_assistant_message
-                    and phase not in {"tool_use", "tool_result"}
-                    and message not in {"Agent is running.", "Agent work item is running in a Temporal activity."}
-                ):
-                    last_assistant_message = message
-                    _emit_event(
-                        "assistant_output",
-                        message,
-                        payload={"preview": message, "phase": phase, "runtime": runtime_name},
-                    )
-            except Exception:
-                logger.debug("Failed to persist autonomous work item progress", exc_info=True)
-
-        def _on_task_enqueued(task_id: str) -> None:
-            try:
-                current = session.get(AutonomousAgentWorkItem, item.id)
-                if not current:
-                    return
-                current.agent_task_id = task_id
-                current.progress = {
-                    **(current.progress or {}),
-                    "runtime": runtime_name,
-                    "agent_task_id": task_id,
-                    "phase": "running",
-                    "message": "Agent task started.",
-                    "has_browser_tools": has_browser_tools,
-                    "browser_context_handoff": browser_handoff,
-                    "browser_child_handoffs": child_browser_handoffs,
-                    **browser_runtime,
-                }
-                current.updated_at = _utcnow()
-                session.add(current)
-                session.commit()
-                _emit_event(
-                    "lifecycle",
-                    current.progress["message"],
-                    payload={"agent_task_id": task_id, "runtime": runtime_name, **browser_runtime},
-                )
-            except Exception:
-                logger.debug("Failed to persist autonomous task id", exc_info=True)
-
-        def _is_cancelled() -> bool:
-            with Session(engine) as check_session:
-                current = check_session.get(AutonomousAgentWorkItem, item.id)
-                current_mission = check_session.get(AutonomousMission, mission.id)
-                return (
-                    not current
-                    or current.status == "cancelled"
-                    or bool(current_mission and current_mission.status == "cancelled")
-                )
-
-        test_data_context = _autonomous_test_data_execution_context(mission)
-        test_data_env_vars = {}
-        native_output_format_supported = False
-        if runtime_name == "claude_sdk":
-            try:
-                from orchestrator.utils.agent_runner import AgentRunner
-
-                native_output_format_supported = AgentRunner._claude_options_accepts("output_format")
-            except Exception:
-                native_output_format_supported = False
-
-        async def _run_agent():
-            runtime = get_agent_runtime(runtime_name)
-            structured_output_format = structured_agent_contract_output_format() if runtime_name == "claude_sdk" else None
-            configured_max_turns = _config_int(mission.config, "structured_guardrail_max_turns", 0)
-            return await runtime.run(
-                _agent_prompt_for_work_item(
-                    mission,
-                    item,
-                    test_data_context,
-                    browser_handoff=browser_handoff,
-                    child_browser_handoffs=child_browser_handoffs,
-                ),
-                AgentRuntimeContext(
-                    timeout_seconds=timeout_seconds,
-                    allowed_tools=allowed_tools,
-                    tools=list(allowed_tools),
-                    max_budget_usd=mission.max_llm_budget_usd,
-                    output_format=structured_output_format,
-                    max_turns=configured_max_turns if configured_max_turns > 0 else None,
-                    on_task_enqueued=_on_task_enqueued,
-                    on_tool_use=_on_tool_use,
-                    on_progress=_on_progress,
-                    session_dir=run_dir,
-                    cwd=run_dir,
-                    owner_type="autonomous_work_item",
-                    owner_id=item.id,
-                    owner_label=f"{mission.name}: {item.role}",
-                    memory_project_id=mission.project_id,
-                    memory_agent_type=item.role,
-                    memory_source_type="autonomous_work_item",
-                    memory_source_id=item.id,
-                    memory_stage="autonomous_mission",
-                    model=(mission.config or {}).get("model"),
-                    model_tier=(mission.config or {}).get("model_tier") or "tool_deep",
-                    agent_name=item.role,
-                    metadata={
-                        "mission_id": mission.id,
-                        "mission_run_id": item.run_id,
-                        "role": item.role,
-                        "planner_key": item.planner_key,
-                        "browser_context_handoff": browser_handoff,
-                        "browser_child_handoffs": child_browser_handoffs,
-                    },
-                    env_vars=test_data_env_vars or None,
-                    is_cancelled=_is_cancelled,
-                ),
-            )
-
-        result = asyncio.run(_run_agent())
-    except Exception as exc:
-        now = _utcnow()
-        session.expire_all()
-        item = session.get(AutonomousAgentWorkItem, item.id) or item
-        current_mission = session.get(AutonomousMission, mission.id)
-        if item.status == "cancelled" or (current_mission and current_mission.status == "cancelled"):
-            item.status = "cancelled"
-            item.error_message = item.error_message or "Mission cancelled"
-            item.completed_at = item.completed_at or now
-            item.updated_at = now
-            item.last_heartbeat_at = now
-            item.progress = {
-                **(item.progress or {}),
-                "phase": "cancelled",
-                "message": item.error_message,
-                "browser_context_handoff": browser_handoff,
-                "browser_child_handoffs": child_browser_handoffs,
-                **browser_runtime,
-            }
-            session.add(item)
-            session.commit()
-            emit_work_item_status_event(item, item.error_message, event_type="lifecycle")
-            return False
-        item.status = "failed"
-        item.error_message = str(exc)
-        item.completed_at = now
-        item.updated_at = now
-        item.last_heartbeat_at = now
-        item.progress = {
-            "phase": "failed",
-            "message": item.error_message,
-            "browser_context_handoff": browser_handoff,
-            "browser_child_handoffs": child_browser_handoffs,
-            **browser_runtime,
-        }
-        session.add(item)
-        session.commit()
-        emit_work_item_status_event(item, item.error_message, event_type="error")
-        logger.warning("Failed to execute autonomous work item %s: %s", item.id, exc)
-        return False
-
-    now = _utcnow()
-    session.expire_all()
-    item = session.get(AutonomousAgentWorkItem, item.id) or item
-    current_mission = session.get(AutonomousMission, mission.id) or mission
-    if item.status == "cancelled" or current_mission.status == "cancelled" or getattr(result, "cancelled", False):
-        browser_observation_summary = (
-            _record_browser_observations_for_work_item(
-                mission=mission,
-                item=item,
-                result=result,
-                browser_handoff=browser_handoff,
-            )
-            if has_browser_tools
-            else {"states": 0, "transitions": 0, "app_map_states": 0}
-        )
-        item.status = "cancelled"
-        item.error_message = item.error_message or "Agent work item cancelled"
-        item.completed_at = item.completed_at or now
-        item.updated_at = now
-        item.last_heartbeat_at = now
-        item.result = {
-            **(item.result or {}),
-            "output": getattr(result, "output", "") or "",
-            "telemetry": {
-                "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
-                "tool_calls": len(getattr(result, "tool_calls", []) or []),
-                "messages_received": getattr(result, "messages_received", 0),
-                "text_blocks_received": getattr(result, "text_blocks_received", 0),
-                "duration_seconds": getattr(result, "duration_seconds", 0.0),
-                "cancelled": True,
-                "browser_observations": browser_observation_summary,
-            },
-        }
-        item.progress = {
-            **(item.progress or {}),
-            "phase": "cancelled",
-            "message": item.error_message,
-            "browser_context_handoff": browser_handoff,
-            "browser_child_handoffs": child_browser_handoffs,
-            **browser_runtime,
-        }
-        session.add(item)
-        session.commit()
-        emit_work_item_status_event(item, item.error_message, event_type="lifecycle")
-        return False
-    browser_observation_summary = (
-        _record_browser_observations_for_work_item(
-            mission=mission,
-            item=item,
-            result=result,
-            browser_handoff=browser_handoff,
-        )
-        if has_browser_tools
-        else {"states": 0, "transitions": 0, "app_map_states": 0}
-    )
-    telemetry = {
-        "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
-        "tool_calls": len(result.tool_calls),
-        "messages_received": result.messages_received,
-        "text_blocks_received": result.text_blocks_received,
-        "duration_seconds": result.duration_seconds,
-        "timed_out": result.timed_out,
-        "total_cost_usd": result.total_cost_usd,
-        "stop_reason": result.stop_reason,
-        "session_id": result.session_id,
-        "guardrail_used_native_output_format": native_output_format_supported,
-        "browser_observations": browser_observation_summary,
-    }
-    if result.success:
-        item.status = "completed"
-        item.completed_at = now
-        item.result = {
-            "output": result.output or "",
-            "telemetry": telemetry,
-        }
-        item.artifacts = [
-            {
-                "type": "agent_report",
-                "label": f"{item.role} report",
-                "content": result.output or "",
-            }
-        ]
-        item.progress = {
-            "phase": "completed",
-            "message": "Agent completed this assignment.",
-            "browser_context_handoff": browser_handoff,
-            "browser_child_handoffs": child_browser_handoffs,
-            **browser_runtime,
-        }
-        item.budget_used_usd = float(result.total_cost_usd or 0.0)
-        item.updated_at = now
-        item.last_heartbeat_at = now
-        mission.budget_used_usd += item.budget_used_usd
-        mission.updated_at = now
-        session.add(item)
-        session.add(mission)
-        session.commit()
-        if result.output:
-            create_autonomous_agent_event(
-                project_id=item.project_id,
-                mission_id=item.mission_id,
-                run_id=item.run_id,
-                work_item_id=item.id,
-                agent_task_id=item.agent_task_id,
-                event_type="assistant_output",
-                message=result.output,
-                payload={"preview": result.output[:1000], "runtime": runtime_name},
-            )
-        emit_work_item_status_event(item, "Agent completed this assignment.", event_type="complete")
-        return True
-
-    item.status = "failed"
-    item.error_message = result.error or "Agent work item failed"
-    item.completed_at = now
-    item.result = {"output": result.output or "", "telemetry": telemetry, "error": item.error_message}
-    item.progress = {
-        "phase": "failed",
-        "message": item.error_message,
-        "browser_context_handoff": browser_handoff,
-        "browser_child_handoffs": child_browser_handoffs,
-        **browser_runtime,
-    }
-    item.updated_at = now
-    item.last_heartbeat_at = now
-    item.budget_used_usd = float(result.total_cost_usd or 0.0)
-    session.add(item)
-    session.commit()
-    if result.output:
-        create_autonomous_agent_event(
-            project_id=item.project_id,
-            mission_id=item.mission_id,
-            run_id=item.run_id,
-            work_item_id=item.id,
-            agent_task_id=item.agent_task_id,
-            event_type="assistant_output",
-            message=result.output,
-            level="warning",
-            payload={"preview": result.output[:1000], "runtime": telemetry["runtime"]},
-        )
-    emit_work_item_status_event(item, item.error_message, event_type="error")
-    return False
-
-
-def _enqueue_agent_work_item_legacy(
-    session: Session,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-) -> bool:
-    try:
-        from orchestrator.services.agent_queue import get_agent_queue
-
-        async def _enqueue() -> str:
-            queue = get_agent_queue()
-            await queue.connect()
-            try:
-                test_data_context = _autonomous_test_data_execution_context(mission)
-                return await queue.enqueue_task(
-                    prompt=_agent_prompt_for_work_item(mission, item, test_data_context),
-                    timeout_seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)),
-                    agent_type=item.role,
-                    operation_type="autonomous_mission",
-                    env_vars=None,
-                    allowed_tools=_allowed_tools_for_work_item(item),
-                    max_budget_usd=mission.max_llm_budget_usd,
-                    owner_type="autonomous_work_item",
-                    owner_id=item.id,
-                    owner_label=f"{mission.name}: {item.role}",
-                )
-            finally:
-                await queue.disconnect()
-
-        task_id = asyncio.run(_enqueue())
-    except Exception as exc:
-        now = _utcnow()
-        item.status = "blocked"
-        item.error_message = f"Unable to enqueue agent task: {exc}"
-        item.completed_at = now
-        item.updated_at = now
-        item.progress = {"phase": "blocked", "message": item.error_message}
-        session.add(item)
-        session.commit()
-        logger.warning("Failed to enqueue autonomous work item %s: %s", item.id, exc)
-        return False
-
-    now = _utcnow()
-    item.agent_task_id = task_id
-    item.status = "running"
-    item.attempt_count += 1
-    item.started_at = item.started_at or now
-    item.lease_until = now + timedelta(seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)))
-    item.last_heartbeat_at = now
-    item.updated_at = now
-    item.progress = {
-        **item.progress,
-        "phase": "queued",
-        "message": "Agent task has been queued.",
-        "agent_task_id": task_id,
-    }
-    session.add(item)
-    session.commit()
-    emit_work_item_status_event(item, "Agent task queued for autonomous work item.", event_type="lifecycle")
-    return True
-
-
-def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
-    running_items = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission.id,
-            AutonomousAgentWorkItem.status == "running",
-            AutonomousAgentWorkItem.agent_task_id != None,  # noqa: E711
-        )
-    ).all()
-    if not running_items:
-        return 0
-    try:
-        from orchestrator.services.agent_queue import AgentTaskStatus, get_agent_queue
-
-        async def _load_tasks(task_ids: list[str]):
-            queue = get_agent_queue()
-            await queue.connect()
-            try:
-                tasks = [await queue.get_task(task_id) for task_id in task_ids]
-                progress = {task_id: await queue.get_task_progress(task_id) for task_id in task_ids}
-                return tasks, progress
-            finally:
-                await queue.disconnect()
-
-        tasks, progress_by_id = asyncio.run(
-            _load_tasks([str(item.agent_task_id) for item in running_items if item.agent_task_id])
-        )
-        task_by_id = {task.id: task for task in tasks if task}
-    except Exception as exc:
-        logger.debug("Unable to sync autonomous agent work items: %s", exc)
-        return 0
-
-    completed_count = 0
-    now = _utcnow()
-    for item in running_items:
-        task = task_by_id.get(str(item.agent_task_id))
-        if not task:
-            continue
-        live_progress = progress_by_id.get(str(item.agent_task_id)) or {}
-        telemetry = task.telemetry or {}
-        if task.status == AgentTaskStatus.PAUSED:
-            item.progress = {
-                **item.progress,
-                "phase": "paused",
-                "message": "Agent is paused.",
-                **{key: value for key, value in live_progress.items() if value is not None},
-                "last_event_at": now.isoformat(),
-            }
-            item.updated_at = now
-            item.last_heartbeat_at = now
-            session.add(item)
-            continue
-        if task.status.value == "running":
-            item.progress = {
-                **item.progress,
-                "phase": "running",
-                "message": "Agent is running.",
-                "tool_calls": telemetry.get("tool_calls"),
-                "last_tool": telemetry.get("last_tool"),
-                **{key: value for key, value in live_progress.items() if value is not None},
-                "last_event_at": now.isoformat(),
-            }
-            item.updated_at = now
-            item.last_heartbeat_at = now
-            item.lease_until = now + timedelta(minutes=30)
-            session.add(item)
-            continue
-        if task.status == AgentTaskStatus.COMPLETED:
-            item.status = "completed"
-            item.completed_at = task.completed_at or now
-            item.result = {
-                "output": task.result or "",
-                "telemetry": telemetry,
-            }
-            item.artifacts = [{"type": "agent_report", "label": f"{item.role} report", "content": task.result or ""}]
-            item.progress = {"phase": "completed", "message": "Agent completed this assignment."}
-            item.budget_used_usd = float(telemetry.get("total_cost_usd") or 0.0)
-            item.updated_at = now
-            item.last_heartbeat_at = now
-            completed_count += 1
-            session.add(item)
-            emit_work_item_status_event(item, "Agent completed this assignment.", event_type="complete")
-        elif task.status in {AgentTaskStatus.FAILED, AgentTaskStatus.TIMEOUT, AgentTaskStatus.CANCELLED}:
-            item.status = "cancelled" if task.status == AgentTaskStatus.CANCELLED else "failed"
-            item.error_message = task.error or f"Agent task {task.status.value}"
-            item.completed_at = task.completed_at or now
-            item.progress = {"phase": item.status, "message": item.error_message}
-            item.updated_at = now
-            item.last_heartbeat_at = now
-            session.add(item)
-            emit_work_item_status_event(item, item.error_message, event_type="error")
-    if completed_count:
-        mission.budget_used_usd += sum(item.budget_used_usd for item in running_items if item.status == "completed")
-        mission.updated_at = now
-        session.add(mission)
-    session.commit()
-    return completed_count
-
-
-def _create_findings_from_completed_work_items(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-) -> int:
-    created = 0
-    items = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission.id,
-            AutonomousAgentWorkItem.status == "completed",
-        )
-    ).all()
-    for item in items:
-        if _work_item_review_decision(item) in {"rejected", "needs_revision"}:
-            continue
-        result = item.result or {}
-        output = str(result.get("output") or "").strip()
-        if not output:
-            continue
-        structured, validation_errors, saw_structured_output = _extract_structured_agent_contract(output)
-        if saw_structured_output and validation_errors:
-            (
-                repaired_structured,
-                repair_errors,
-                repair_attempts,
-                repair_session_id,
-                used_native_output_format,
-            ) = _repair_structured_work_item_contract(
-                session,
-                mission,
-                item,
-                invalid_output=output,
-                validation_errors=validation_errors,
-            )
-            if repaired_structured:
-                structured = repaired_structured
-                validation_errors = []
-                output = str((item.result or {}).get("output") or output).strip()
-            else:
-                _persist_structured_guardrail_telemetry(
-                    session,
-                    item,
-                    attempts=repair_attempts,
-                    validation_errors=repair_errors,
-                    used_native_output_format=used_native_output_format,
-                    repair_session_id=repair_session_id,
-                    fallback_revision_created=True,
-                )
-                validation_errors = repair_errors
-                _create_contract_revision_work_item(session, mission, run, item, validation_errors)
-                continue
-        if structured:
-            merge_summary = _merge_structured_work_item_artifacts(session, mission, run, item, structured)
-            item.result = {**item.result, "structured_merge": merge_summary}
-            session.add(item)
-            session.commit()
-            created += int(merge_summary.get("findings_created", 0) or 0)
-            if any(
-                int(merge_summary.get(key, 0) or 0)
-                for key in (
-                    "requirements_created",
-                    "requirements_reused",
-                    "rtm_entries_created",
-                    "rtm_entries_reused",
-                    "test_proposals_created",
-                    "findings_reused",
-                    "app_map_updates",
-                )
-            ):
-                continue
-        dedupe_key = hashlib.sha256(f"{mission.project_id}|work_item|{item.id}|finding".encode()).hexdigest()[:32]
-        existing = session.exec(
-            select(AutonomousFinding).where(
-                AutonomousFinding.project_id == mission.project_id,
-                AutonomousFinding.dedupe_key == dedupe_key,
-            )
-        ).first()
-        if existing:
-            continue
-        title = f"{_title_case(item.role)} agent report"
-        evidence = {
-            "work_item_id": item.id,
-            "role": item.role,
-            "assigned_surface": item.assigned_surface,
-            **_work_item_revision_metadata(item),
-        }
-        finding = AutonomousFinding(
-            id=f"amfind-{uuid.uuid4().hex[:12]}",
-            mission_id=mission.id,
-            run_id=run.id,
-            project_id=mission.project_id,
-            finding_type="exploration" if item.role in {"surface_mapper", "explorer"} else "coverage_gap",
-            severity="medium",
-            title=title,
-            description=output[:8000],
-            status="open",
-            confidence=0.75,
-            dedupe_key=dedupe_key,
-            source_type="autonomous_work_item",
-            source_id=item.id,
-            approval_required=True,
-        )
-        finding.evidence = evidence
-        session.add(finding)
-        created += 1
-    if created:
-        mission.total_findings += created
-        session.add(mission)
-        session.commit()
-    return created
-
-
-def _create_contract_revision_work_item(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-    item: AutonomousAgentWorkItem,
-    validation_errors: list[str],
-) -> AutonomousAgentWorkItem | None:
-    existing = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission.id,
-            col(AutonomousAgentWorkItem.status).in_(("queued", "running", "completed")),
-        )
-    ).all()
-    for candidate in existing:
-        progress = candidate.progress
-        if (
-            progress.get("revision_of_work_item_id") == item.id
-            and progress.get("review_reason") == "structured_contract_validation"
-        ):
-            item.result = {
-                **item.result,
-                "review_decision": "needs_revision",
-                "revision_work_item_id": candidate.id,
-                "validation_errors": validation_errors,
-            }
-            session.add(item)
-            session.commit()
-            return candidate
-
-    attempt = int((item.progress or {}).get("revision_attempt") or 0) + 1
-    revision = AutonomousAgentWorkItem(
-        id=f"amwork-{uuid.uuid4().hex[:12]}",
-        mission_id=mission.id,
-        run_id=run.id,
-        project_id=mission.project_id,
-        role=item.role,
-        objective=(
-            f"Revise the structured JSON output for work item {item.id}. "
-            "Return only contract-valid JSON and preserve any valid discoveries."
-        ),
-        assigned_surface_json=item.assigned_surface_json,
-        status="queued",
-        priority=max(1, int(item.priority or 50) - 5),
-    )
-    revision.progress = {
-        "phase": "created",
-        "message": "Queued because the previous agent output did not match the structured contract.",
-        "revision_of_work_item_id": item.id,
-        "reviewer_work_item_id": item.id,
-        "review_reason": "structured_contract_validation",
-        "validation_errors": validation_errors[:20],
-        "revision_attempt": attempt,
-    }
-    item.result = {
-        **item.result,
-        "review_decision": "needs_revision",
-        "revision_work_item_id": revision.id,
-        "validation_errors": validation_errors,
-    }
-    session.add(item)
-    session.add(revision)
-    session.commit()
-    return revision
-
-
-def _merge_structured_work_item_artifacts(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-    item: AutonomousAgentWorkItem,
-    contract: dict[str, Any],
-) -> dict[str, int]:
-    summary = {
-        "requirements_created": 0,
-        "requirements_reused": 0,
-        "rtm_entries_created": 0,
-        "rtm_entries_reused": 0,
-        "test_proposals_created": 0,
-        "findings_created": 0,
-        "findings_reused": 0,
-        "app_map_updates": 0,
-        "rtm_snapshots_created": 0,
-    }
-
-    for row in _dict_rows(contract.get("app_map_updates")):
-        if _merge_app_map_update(session, mission, row):
-            summary["app_map_updates"] += 1
-
-    requirement_id_by_fingerprint: dict[str, int] = {}
-    for row in _dict_rows(contract.get("requirements")):
-        if not _row_has_required_evidence("requirement", row):
-            logger.info("Quarantined low-evidence autonomous requirement from work item %s: %s", item.id, row.get("title"))
-            continue
-        requirement, created, fingerprint = _merge_requirement_artifact(session, mission, item, row)
-        if not requirement or requirement.id is None:
-            continue
-        requirement_id_by_fingerprint[fingerprint] = requirement.id
-        if created:
-            summary["requirements_created"] += 1
-        else:
-            summary["requirements_reused"] += 1
-
-    for row in _dict_rows(contract.get("rtm_candidates")):
-        if not _resolve_requirement_ids(session, mission.project_id, row) and len(requirement_id_by_fingerprint) == 1:
-            row = {**row, "requirement_id": next(iter(requirement_id_by_fingerprint.values()))}
-        created = _merge_rtm_candidate(session, mission, row)
-        if created is True:
-            summary["rtm_entries_created"] += 1
-        elif created is False:
-            summary["rtm_entries_reused"] += 1
-
-    for row in _dict_rows(contract.get("test_proposals")):
-        requirement_ids = _resolve_requirement_ids(session, mission.project_id, row)
-        if not requirement_ids and row.get("requirement_fingerprint"):
-            req_id = requirement_id_by_fingerprint.get(str(row["requirement_fingerprint"]))
-            if req_id:
-                requirement_ids = [req_id]
-        if not requirement_ids and len(requirement_id_by_fingerprint) == 1:
-            requirement_ids = [next(iter(requirement_id_by_fingerprint.values()))]
-        proposal = _merge_test_proposal_artifact(session, mission, run, item, row, requirement_ids=requirement_ids)
-        if proposal:
-            summary["test_proposals_created"] += 1
-
-    for row in _dict_rows(contract.get("bugs")) + _dict_rows(contract.get("findings")):
-        finding, created = _merge_bug_or_finding_artifact(session, mission, run, item, row)
-        if not finding:
-            continue
-        if created:
-            summary["findings_created"] += 1
-        else:
-            summary["findings_reused"] += 1
-
-    if summary["rtm_entries_created"]:
-        _create_rtm_snapshot(session, mission, source_work_item_id=item.id)
-        summary["rtm_snapshots_created"] = 1
-
-    session.commit()
-    return summary
-
-
-def _dict_rows(value: Any) -> list[dict[str, Any]]:
-    return [row for row in _as_list(value) if isinstance(row, dict)]
-
-
-def _autonomous_require_evidence() -> bool:
-    return os.environ.get("AUTONOMOUS_REQUIRE_EVIDENCE", "1").lower() not in {"0", "false", "no"}
-
-
-def _row_has_required_evidence(kind: str, row: dict[str, Any]) -> bool:
-    if not _autonomous_require_evidence():
-        return True
-    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
-    evidence_refs = _as_text_list(row.get("evidence_refs") or row.get("evidenceRefs"))
-    direct_fields = [
-        row.get("target_url"),
-        row.get("url"),
-        row.get("route"),
-        row.get("selector"),
-        row.get("source"),
-        row.get("snapshot_ref"),
-        row.get("screenshot"),
-        row.get("observed_failure"),
-        row.get("action"),
-    ]
-    nested_fields = []
-    if evidence:
-        nested_fields = [
-            evidence.get("url"),
-            evidence.get("target_url"),
-            evidence.get("route"),
-            evidence.get("selector"),
-            evidence.get("text"),
-            evidence.get("source"),
-            evidence.get("snapshot_ref"),
-            evidence.get("screenshot"),
-            evidence.get("artifact"),
-        ]
-    has_observation = any(str(value or "").strip() for value in [*direct_fields, *nested_fields]) or bool(evidence_refs)
-    if kind == "bug":
-        return has_observation and bool(str(row.get("observed_failure") or row.get("description") or "").strip())
-    if kind == "test_proposal":
-        return has_observation or bool(_as_list(row.get("requirement_ids") or row.get("requirements")))
-    if kind == "requirement":
-        return has_observation or _as_float(row.get("confidence"), 0.0) >= 0.9
-    return has_observation
-
-
-def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dict[str, Any]) -> bool:
-    url = str(row.get("url") or row.get("target_url") or "").strip()
-    if not url:
-        return False
-    surface_key = _stable_dedupe_hash("surface", mission.project_id or "default", _route_from_url(url) or url)
-    existing = session.exec(
-        select(ApplicationMap).where(
-            ApplicationMap.project_id == mission.project_id,
-            ApplicationMap.app_surface_key == surface_key,
-        )
-    ).first()
-    if not existing:
-        existing = session.exec(
-            select(ApplicationMap).where(
-                ApplicationMap.project_id == mission.project_id,
-                ApplicationMap.url == url,
-            )
-        ).first()
-    now = _utcnow()
-    if existing:
-        existing.project_id = existing.project_id or mission.project_id
-        existing.app_surface_key = existing.app_surface_key or surface_key
-        existing.page_title = str(row.get("page_title") or row.get("title") or existing.page_title or "") or None
-        existing.linked_urls = _as_text_list(row.get("linked_urls")) or existing.linked_urls
-        if isinstance(row.get("elements"), dict):
-            existing.elements = row["elements"]
-        forms = row.get("forms")
-        if isinstance(forms, list):
-            existing.forms = [form for form in forms if isinstance(form, dict)]
-        endpoints = row.get("api_endpoints")
-        if isinstance(endpoints, list):
-            existing.api_endpoints = [endpoint for endpoint in endpoints if isinstance(endpoint, dict)]
-        existing.last_crawled = now
-        session.add(existing)
-        return True
-    app_map = ApplicationMap(
-        project_id=mission.project_id,
-        app_surface_key=surface_key,
-        url=url,
-        page_title=str(row.get("page_title") or row.get("title") or "") or None,
-        linked_urls=_as_text_list(row.get("linked_urls")) or None,
-        elements=row.get("elements") if isinstance(row.get("elements"), dict) else None,
-        forms=[form for form in _as_list(row.get("forms")) if isinstance(form, dict)] or None,
-        api_endpoints=[endpoint for endpoint in _as_list(row.get("api_endpoints")) if isinstance(endpoint, dict)]
-        or None,
-        last_crawled=now,
-    )
-    session.add(app_map)
-    return True
-
-
-def _merge_requirement_artifact(
-    session: Session,
-    mission: AutonomousMission,
-    item: AutonomousAgentWorkItem,
-    row: dict[str, Any],
-) -> tuple[Requirement | None, bool, str]:
-    title = str(row.get("title") or "").strip()
-    if not title:
-        return None, False, ""
-    category = str(row.get("category") or "other").strip() or "other"
-    criteria = _as_text_list(row.get("acceptance_criteria") or row.get("criteria"))
-    fingerprint = _requirement_fingerprint({"title": title, "category": category, "acceptance_criteria": criteria})
-    existing_by_key = session.exec(
-        select(Requirement).where(
-            Requirement.project_id == mission.project_id, Requirement.canonical_key == fingerprint
-        )
-    ).first()
-    candidates = (
-        [existing_by_key]
-        if existing_by_key
-        else session.exec(select(Requirement).where(Requirement.project_id == mission.project_id)).all()
-    )
-    for requirement in candidates:
-        if not requirement:
-            continue
-        existing_fingerprint = _requirement_fingerprint(
-            {
-                "title": requirement.title,
-                "category": requirement.category,
-                "acceptance_criteria": requirement.acceptance_criteria,
-            }
-        )
-        if existing_fingerprint != fingerprint:
-            continue
-        existing_criteria = requirement.acceptance_criteria
-        merged_criteria = sorted({*existing_criteria, *criteria})
-        if merged_criteria != existing_criteria:
-            requirement.acceptance_criteria = merged_criteria
-        if row.get("description") and not requirement.description:
-            requirement.description = str(row.get("description"))
-        requirement.canonical_key = requirement.canonical_key or fingerprint
-        requirement.confidence = max(float(requirement.confidence or 0), _as_float(row.get("confidence"), 0.7))
-        requirement.updated_at = _utcnow()
-        session.add(requirement)
-        return requirement, False, fingerprint
-
-    truth_state = str(row.get("truth_state") or "candidate_requirement")
-    if truth_state not in {"candidate_requirement", "confirmed_requirement", "manual_requirement", "observed_behavior"}:
-        truth_state = "candidate_requirement"
-    now = _utcnow()
-    requirement = Requirement(
-        project_id=mission.project_id,
-        req_code=_next_requirement_code(session, mission.project_id),
-        title=title,
-        description=str(row.get("description") or "") or None,
-        category=category,
-        priority=_normalize_risk(str(row.get("priority") or "medium")),
-        status="confirmed" if truth_state == "confirmed_requirement" else "draft",
-        canonical_key=fingerprint,
-        truth_state=truth_state,
-        source_type="autonomous_agent",
-        confidence=_as_float(row.get("confidence"), 0.7),
-        uncertainty_reason=str(
-            row.get("uncertainty_reason") or "Generated from autonomous agent evidence and awaiting human review."
-        ),
-        acceptance_criteria_json=json.dumps(criteria),
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(requirement)
-    session.flush()
-    return requirement, True, fingerprint
-
-
-def _merge_rtm_candidate(
-    session: Session,
-    mission: AutonomousMission,
-    row: dict[str, Any],
-) -> bool | None:
-    requirement_ids = _resolve_requirement_ids(session, mission.project_id, row)
-    if not requirement_ids:
-        return None
-    test_spec_name = str(
-        row.get("test_spec_name") or row.get("spec_name") or row.get("suggested_file_path") or ""
-    ).strip()
-    if not test_spec_name:
-        return None
-    created_any = False
-    reused_any = False
-    for requirement_id in requirement_ids:
-        requirement = session.get(Requirement, requirement_id)
-        if not requirement or requirement.project_id != mission.project_id:
-            continue
-        allow_candidate = bool(row.get("allow_candidate") or row.get("accepted_candidate"))
-        if _requirement_truth_state(requirement) != "confirmed_requirement" and not allow_candidate:
-            continue
-        dedupe_key = _stable_dedupe_hash(
-            mission.project_id or "default",
-            "rtm",
-            requirement_id,
-            test_spec_name,
-            row.get("test_spec_path") or row.get("spec_path"),
-        )
-        existing = session.exec(
-            select(RtmEntry).where(
-                RtmEntry.project_id == mission.project_id,
-                RtmEntry.dedupe_key == dedupe_key,
-            )
-        ).first()
-        if not existing:
-            existing = session.exec(
-                select(RtmEntry).where(
-                    RtmEntry.project_id == mission.project_id,
-                    RtmEntry.requirement_id == requirement_id,
-                    RtmEntry.test_spec_name == test_spec_name,
-                )
-            ).first()
-        now = _utcnow()
-        if existing:
-            existing.dedupe_key = existing.dedupe_key or dedupe_key
-            existing.mapping_type = str(row.get("mapping_type") or existing.mapping_type or "suggested")
-            existing.test_spec_path = (
-                str(row.get("test_spec_path") or row.get("spec_path") or existing.test_spec_path or "") or None
-            )
-            existing.confidence = max(float(existing.confidence or 0), _as_float(row.get("confidence"), 0.7))
-            existing.coverage_notes = str(row.get("coverage_notes") or existing.coverage_notes or "") or None
-            existing.gap_notes = str(row.get("gap_notes") or existing.gap_notes or "") or None
-            existing.updated_at = now
-            session.add(existing)
-            reused_any = True
-            continue
-        entry = RtmEntry(
-            project_id=mission.project_id,
-            requirement_id=requirement_id,
-            test_spec_name=test_spec_name,
-            test_spec_path=str(row.get("test_spec_path") or row.get("spec_path") or "") or None,
-            mapping_type=str(row.get("mapping_type") or "suggested"),
-            dedupe_key=dedupe_key,
-            confidence=_as_float(row.get("confidence"), 0.7),
-            coverage_notes=str(row.get("coverage_notes") or "") or None,
-            gap_notes=str(row.get("gap_notes") or "") or None,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(entry)
-        created_any = True
-    if created_any:
-        return True
-    if reused_any:
-        return False
-    return None
-
-
-def _merge_test_proposal_artifact(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-    item: AutonomousAgentWorkItem,
-    row: dict[str, Any],
-    *,
-    requirement_ids: list[int],
-) -> AutonomousTestProposal | None:
-    title = str(row.get("title") or row.get("scenario") or "").strip()
-    rationale = str(row.get("rationale") or row.get("description") or title).strip()
-    if not title or not rationale:
-        return None
-    quarantined = not _row_has_required_evidence("test_proposal", row)
-    target_url = str(row.get("target_url") or row.get("url") or "").strip() or _default_target_url(mission)
-    if row.get("route") and not row.get("target_url"):
-        target_url = _url_for_route(_default_target_url(mission), str(row["route"]))
-    fingerprint = _spec_fingerprint(row, requirement_ids=requirement_ids)
-    metadata = _artifact_source_metadata(
-        item,
-        artifact_type="test_proposal",
-        fingerprint=fingerprint,
-        extra={
-            "requirement_ids": requirement_ids,
-            "route": row.get("route") or _route_from_url(target_url),
-            "agent_rationale": rationale,
-            "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
-        },
-    )
-    if quarantined:
-        metadata["quarantined"] = True
-        metadata["quarantine_reason"] = "autonomous_output_missing_required_evidence"
-    if requirement_ids:
-        metadata["requirement_id"] = requirement_ids[0]
-    return _create_test_proposal(
-        session,
-        mission,
-        run,
-        source_type="autonomous_structured_spec",
-        source_id=fingerprint,
-        title=title,
-        rationale=rationale,
-        target_url=target_url,
-        risk_level=str(row.get("risk_level") or row.get("severity") or "medium"),
-        source_metadata=metadata,
-        approval_status="rejected" if quarantined else "pending",
-    )
-
-
-def _merge_bug_or_finding_artifact(
-    session: Session,
-    mission: AutonomousMission,
-    run: AutonomousMissionRun,
-    item: AutonomousAgentWorkItem,
-    row: dict[str, Any],
-) -> tuple[AutonomousFinding | None, bool]:
-    title = str(row.get("title") or "").strip()
-    description = str(row.get("description") or row.get("observed_failure") or "").strip()
-    if not title or not description:
-        return None, False
-    quarantined = not _row_has_required_evidence("bug", row)
-    kind = (
-        "bug"
-        if row.get("observed_failure") or row.get("expected_behavior")
-        else str(row.get("finding_type") or "coverage_gap")
-    )
-    fingerprint = (
-        _bug_fingerprint(row)
-        if kind == "bug"
-        else _stable_dedupe_hash(
-            "finding",
-            kind,
-            row.get("route") or row.get("target_url") or row.get("url"),
-            title,
-            description,
-        )
-    )
-    dedupe_key = _stable_dedupe_hash(mission.project_id or "default", kind, fingerprint)
-    existing = session.exec(
-        select(AutonomousFinding).where(
-            AutonomousFinding.project_id == mission.project_id,
-            AutonomousFinding.dedupe_key == dedupe_key,
-        )
-    ).first()
-    if existing:
-        return existing, False
-    now = _utcnow()
-    evidence = _artifact_source_metadata(
-        item,
-        artifact_type=kind,
-        fingerprint=fingerprint,
-        extra={
-            "target_url": row.get("target_url") or row.get("url"),
-            "route": row.get("route") or _route_from_url(row.get("target_url") or row.get("url")),
-            "action": row.get("action"),
-            "observed_failure": row.get("observed_failure"),
-            "expected_behavior": row.get("expected_behavior"),
-            "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
-        },
-    )
-    finding = AutonomousFinding(
-        id=f"amfind-{uuid.uuid4().hex[:12]}",
-        mission_id=mission.id,
-        run_id=run.id,
-        project_id=mission.project_id,
-        finding_type=kind,
-        severity=_normalize_risk(str(row.get("severity") or row.get("risk_level") or "medium")),
-        title=title,
-        description=description,
-        status="rejected" if quarantined else "awaiting_approval" if kind == "bug" else "open",
-        confidence=_as_float(row.get("confidence"), 0.75),
-        dedupe_key=dedupe_key,
-        evidence_json=json.dumps(evidence),
-        source_type="autonomous_work_item",
-        source_id=item.id,
-        approval_required=True,
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(finding)
-    return finding, True
-
-
-def _create_rtm_snapshot(session: Session, mission: AutonomousMission, *, source_work_item_id: str) -> None:
-    requirements = session.exec(select(Requirement).where(Requirement.project_id == mission.project_id)).all()
-    entries = session.exec(select(RtmEntry).where(RtmEntry.project_id == mission.project_id)).all()
-    entries_by_requirement: dict[int, list[RtmEntry]] = {}
-    for entry in entries:
-        entries_by_requirement.setdefault(entry.requirement_id, []).append(entry)
-    covered = 0
-    partial = 0
-    uncovered = 0
-    rows = []
-    for requirement in requirements:
-        req_entries = entries_by_requirement.get(requirement.id or -1, [])
-        if any(entry.mapping_type == "full" for entry in req_entries):
-            covered += 1
-            status = "covered"
-        elif req_entries:
-            partial += 1
-            status = "partial"
-        else:
-            uncovered += 1
-            status = "uncovered"
-        rows.append(
-            {
-                "requirement_id": requirement.id,
-                "req_code": requirement.req_code,
-                "title": requirement.title,
-                "status": status,
-                "entries": [entry.test_spec_name for entry in req_entries],
-            }
-        )
-    total = len(requirements)
-    snapshot = RtmSnapshot(
-        project_id=mission.project_id,
-        snapshot_name=f"autonomous-{mission.id}-{source_work_item_id}",
-        total_requirements=total,
-        covered_requirements=covered,
-        partial_requirements=partial,
-        uncovered_requirements=uncovered,
-        coverage_percentage=round((covered / total) * 100, 2) if total else 0.0,
-        snapshot_data_json=json.dumps({"source_work_item_id": source_work_item_id, "rows": rows[:500]}),
-        created_at=_utcnow(),
-    )
-    session.add(snapshot)
-
-
-def _url_for_route(base_url: str, route: str) -> str:
-    parsed = urlparse(base_url)
-    if not parsed.scheme or not parsed.netloc:
-        return route
-    path = route if route.startswith("/") else f"/{route}"
-    return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-
-def _update_mission_team_progress(session: Session, mission: AutonomousMission) -> None:
-    mission.current_stage = "team_supervising"
-    mission.next_action = _stage_next_action("team_supervising")
-    mission.last_heartbeat_at = _utcnow()
-    mission.updated_at = mission.last_heartbeat_at
-    session.add(mission)
-    session.commit()
+def _whole_app_team_enabled(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _whole_app_team_enabled as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _team_roles(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _team_roles as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _max_parallel_agents(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _max_parallel_agents as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _run_parallel_team_supervisor(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _run_parallel_team_supervisor as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _recover_stale_work_items(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_recovery import _recover_stale_work_items as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _work_item_is_stale(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_recovery import _work_item_is_stale as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _stale_work_item_reason(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_recovery import _stale_work_item_reason as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _agent_task_recovery_state(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_recovery import _agent_task_recovery_state as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _active_recovery_work_item_exists(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_recovery import _active_recovery_work_item_exists as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _create_recovery_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_recovery import _create_recovery_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _plan_whole_app_work_items(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_planner import _plan_whole_app_work_items as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _planner_work_item_exists(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_planner import _planner_work_item_exists as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _create_planned_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_planner import _create_planned_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _frontier_planner_items(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_planner import _frontier_planner_items as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _count_work_items(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _count_work_items as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _role_surface(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _role_surface as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _role_objective(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _role_objective as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _autonomous_test_data_execution_context(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_prompt import _autonomous_test_data_execution_context as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _agent_prompt_for_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_prompt import _agent_prompt_for_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _work_item_context_bundle(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_prompt import _work_item_context_bundle as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _compact_json(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_prompt import _compact_json as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _safe_model_attr(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _safe_model_attr as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _browser_owner_metadata(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _browser_owner_metadata as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _tool_call_browser_action(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _tool_call_browser_action as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _snapshot_lines_from_app_map(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _snapshot_lines_from_app_map as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _attach_browser_owner_metadata(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _attach_browser_owner_metadata as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _record_browser_observations_for_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _record_browser_observations_for_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _allowed_tools_for_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _allowed_tools_for_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _short_tool_name(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _short_tool_name as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _is_browser_tool(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _is_browser_tool as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _browser_action_names(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _browser_action_names as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _state_hash_from_browser_contract(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _state_hash_from_browser_contract as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _browser_lease_for_handoff(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _browser_lease_for_handoff as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _browser_contract_memory_context(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _browser_contract_memory_context as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _browser_context_handoff(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _browser_context_handoff as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _assert_browser_lease_available(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _assert_browser_lease_available as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _validate_browser_handoff_mode(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _validate_browser_handoff_mode as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _child_browser_run_dir(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _child_browser_run_dir as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _prepare_child_browser_handoffs(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _prepare_child_browser_handoffs as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _validate_child_browser_handoff_contract(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _validate_child_browser_handoff_contract as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _autonomous_work_item_run_dir(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _autonomous_work_item_run_dir as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _prepare_autonomous_work_item_runtime(*args, **kwargs):
+    from orchestrator.services.autonomous_browser_context import _prepare_autonomous_work_item_runtime as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _enqueue_agent_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_executor import _enqueue_agent_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _execute_agent_work_item_direct(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_executor import _execute_agent_work_item_direct as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _enqueue_agent_work_item_legacy(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_executor import _enqueue_agent_work_item_legacy as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _sync_agent_work_items(*args, **kwargs):
+    from orchestrator.services.autonomous_work_item_executor import _sync_agent_work_items as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _create_findings_from_completed_work_items(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _create_findings_from_completed_work_items as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _create_contract_revision_work_item(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _create_contract_revision_work_item as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _merge_structured_work_item_artifacts(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _merge_structured_work_item_artifacts as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _dict_rows(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _dict_rows as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _autonomous_require_evidence(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _autonomous_require_evidence as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _row_has_required_evidence(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _row_has_required_evidence as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _merge_app_map_update(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _merge_app_map_update as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _merge_requirement_artifact(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _merge_requirement_artifact as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _merge_rtm_candidate(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _merge_rtm_candidate as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _merge_test_proposal_artifact(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _merge_test_proposal_artifact as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _merge_bug_or_finding_artifact(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _merge_bug_or_finding_artifact as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _create_rtm_snapshot(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _create_rtm_snapshot as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _url_for_route(*args, **kwargs):
+    from orchestrator.services.autonomous_artifact_ingestion import _url_for_route as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def _update_mission_team_progress(*args, **kwargs):
+    from orchestrator.services.autonomous_team_supervisor import _update_mission_team_progress as _impl
+
+    return _impl(*args, **kwargs)
 
 
 def _create_coverage_gap_artifacts(
