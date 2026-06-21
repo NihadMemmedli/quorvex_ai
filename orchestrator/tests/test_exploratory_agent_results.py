@@ -9,8 +9,8 @@ import pytest
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, ToolResultBlock, ToolUseBlock, UserMessage
 
 import orchestrator.agents.base_agent as base_agent_module
-from orchestrator.agents.exploratory_agent import ExplorationState, ExploratoryAgent
 from orchestrator.agents.auth_handler import AuthHandler
+from orchestrator.agents.exploratory_agent import ExplorationState, ExploratoryAgent
 from orchestrator.api.exploration import ExplorationStartRequest, _build_exploratory_agent_config
 
 

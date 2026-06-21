@@ -33,8 +33,8 @@ from .models_db import (  # noqa: F401
     AutonomousMissionRun,
     AutonomousTestProposal,
     AutoPilotAgentAttempt,
-    AutoPilotPhase,
     AutoPilotChecklistItem,
+    AutoPilotPhase,
     AutoPilotQuestion,
     # Auto Pilot pipeline models
     AutoPilotSession,

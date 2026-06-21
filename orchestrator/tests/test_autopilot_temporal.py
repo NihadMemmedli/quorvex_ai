@@ -45,8 +45,8 @@ from orchestrator.api import autopilot as autopilot_api
 from orchestrator.api import db as db_module
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
-    AutoPilotChecklistItem,
     AutoPilotAgentAttempt,
+    AutoPilotChecklistItem,
     AutoPilotPhase,
     AutoPilotQuestion,
     AutoPilotSession,

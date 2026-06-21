@@ -429,7 +429,11 @@ async def run_agent_with_retries(runner: Any, prompt: str, timeout_override: int
                 metadata={"resume_session_id": resume_session_id, "fresh_retry": force_fresh},
             )
 
-            def on_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+            def on_tool_use(
+                tool_name: str,
+                tool_input: dict[str, Any],
+                attempt_number: int = attempt_number,
+            ) -> None:
                 nonlocal last_tool
                 last_tool = str(tool_name)
                 if original_on_tool_use:
@@ -450,7 +454,7 @@ async def run_agent_with_retries(runner: Any, prompt: str, timeout_override: int
                     metadata=metadata,
                 )
 
-            def on_progress(progress: dict[str, Any]) -> None:
+            def on_progress(progress: dict[str, Any], attempt_number: int = attempt_number) -> None:
                 nonlocal last_tool
                 if original_on_progress:
                     original_on_progress(progress)
