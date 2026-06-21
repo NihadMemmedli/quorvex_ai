@@ -1943,20 +1943,25 @@ Original task follows. Obey it, but correct the failure above.
 
     async def _query_repair_agent(self, prompt: str):
         timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "180"))
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
             allowed_tools=[],
             tools=[],
             log_tools=False,
+            memory_agent_type=None,
+            memory_source_type=None,
+            memory_stage=None,
             session_dir=None,
             cwd=self.cwd,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
             requires_live_browser=False,
-            model_tier=self.model_tier,
             inject_memory=False,
             capture_memory=False,
+            env_vars={},
+            autopilot_retry_enabled=False,
+            autopilot_agent_kind=None,
+            enable_autopilot_for_owner=False,
+            runner_cls=AgentRunner,
         )
         return await runner.run(prompt)
 

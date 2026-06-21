@@ -50,6 +50,7 @@ from orchestrator.ai.validation import (
     should_gate_exploration,
     validate_exploration_result,
 )
+from orchestrator.services.agent_prompt_runtime import create_agent_runner
 from orchestrator.utils.playwright_mcp import (
     browser_runtime_status,
     live_browser_display_diagnostics,
@@ -1661,7 +1662,6 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
         target_url: str,
     ) -> dict[str, Any]:
         """Exercise the same planner AgentRunner path before creating test tasks."""
-        from orchestrator.utils.agent_runner import AgentRunner
         from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
 
         target_url = str(target_url or "https://example.com").strip() or "https://example.com"
@@ -1679,13 +1679,16 @@ Final response: `runtime_smoke: passed` if the tools completed.
 """
         tool_config = get_agent_tool_config("prd-live-planner", mcp_config_dir=preflight_dir)
         timeout = int(os.environ.get("AUTOPILOT_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS", "180"))
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
-            allowed_tools=tool_config.get("allowed_tools"),
-            tools=tool_config.get("tools"),
-            disallowed_tools=tool_config.get("disallowed_tools"),
+            tool_config=tool_config,
             log_tools=True,
-            on_task_enqueued=None,
+            include_tool_use_callback=False,
+            memory_agent_type=None,
+            memory_source_type=None,
+            memory_stage=None,
+            inject_memory=True,
             owner_type="autopilot",
             owner_id=self.session_id,
             owner_label=f"AutoPilot {self.session_id} runtime preflight",

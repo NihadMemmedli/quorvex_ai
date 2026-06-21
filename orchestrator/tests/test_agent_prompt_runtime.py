@@ -139,3 +139,106 @@ def test_create_agent_runner_applies_tool_config_and_budget(monkeypatch):
     assert runner.kwargs["preserve_browser_on_failure"] is True
     assert runner.kwargs["autopilot_retry_enabled"] is True
     assert runner.kwargs["autopilot_session_id"] == "healer-session"
+
+
+def test_create_agent_runner_applies_explicit_runtime_overrides(monkeypatch):
+    monkeypatch.setattr(agent_prompt_runtime, "AgentRunner", FakeAgentRunner)
+    source = _source(
+        owner_type="autopilot",
+        owner_id="source-owner",
+        owner_label="source label",
+        model_tier="standard",
+        cwd="/tmp/source",
+        autopilot_session_id="source-session",
+    )
+
+    runner = create_agent_runner(
+        source,
+        timeout_seconds=90,
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        memory_agent_type=None,
+        memory_source_type=None,
+        memory_stage=None,
+        cwd="/tmp/override",
+        owner_type="custom-owner-type",
+        owner_id="custom-owner",
+        owner_label="override label",
+        model_tier="tool_deep",
+        task_budget={"total": 4000},
+        env_vars={"AGENT_COST_LOG": "/tmp/cost.jsonl"},
+        autopilot_retry_enabled=True,
+        autopilot_session_id="override-session",
+        autopilot_stable_key="override-stable",
+        autopilot_agent_kind="override-kind",
+        autopilot_source_type="runtime_preflight",
+        autopilot_source_id="planner_smoke",
+        autopilot_checklist_title="Runtime preflight",
+        autopilot_phase_name="test_generation",
+        autopilot_checklist_kind="runtime_preflight",
+    )
+
+    assert runner.kwargs["cwd"] == "/tmp/override"
+    assert runner.kwargs["owner_type"] == "custom-owner-type"
+    assert runner.kwargs["owner_id"] == "custom-owner"
+    assert runner.kwargs["owner_label"] == "override label"
+    assert runner.kwargs["model_tier"] == "tool_deep"
+    assert runner.kwargs["task_budget"] == {"total": 4000}
+    assert runner.kwargs["env_vars"] == {"AGENT_COST_LOG": "/tmp/cost.jsonl"}
+    assert runner.kwargs["autopilot_retry_enabled"] is True
+    assert runner.kwargs["autopilot_session_id"] == "override-session"
+    assert runner.kwargs["autopilot_stable_key"] == "override-stable"
+    assert runner.kwargs["autopilot_agent_kind"] == "override-kind"
+    assert runner.kwargs["autopilot_source_type"] == "runtime_preflight"
+    assert runner.kwargs["autopilot_source_id"] == "planner_smoke"
+    assert runner.kwargs["autopilot_checklist_title"] == "Runtime preflight"
+    assert runner.kwargs["autopilot_phase_name"] == "test_generation"
+    assert runner.kwargs["autopilot_checklist_kind"] == "runtime_preflight"
+
+
+def test_create_agent_runner_allows_explicit_empty_autopilot_overrides(monkeypatch):
+    monkeypatch.setattr(agent_prompt_runtime, "AgentRunner", FakeAgentRunner)
+    source = _source(
+        owner_type="autopilot",
+        owner_id="source-owner",
+        autopilot_retry_enabled=True,
+        autopilot_session_id="source-session",
+        autopilot_stable_key="source-stable",
+        autopilot_agent_kind="source-kind",
+        autopilot_source_type="source-type",
+        autopilot_source_id="source-id",
+        autopilot_checklist_title="source title",
+        autopilot_phase_name="source-phase",
+        autopilot_checklist_kind="source-kind",
+    )
+
+    runner = create_agent_runner(
+        source,
+        timeout_seconds=90,
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        memory_agent_type=None,
+        memory_source_type=None,
+        memory_stage=None,
+        autopilot_retry_enabled=False,
+        autopilot_session_id=None,
+        autopilot_stable_key=None,
+        autopilot_agent_kind=None,
+        autopilot_source_type=None,
+        autopilot_source_id=None,
+        autopilot_checklist_title=None,
+        autopilot_phase_name=None,
+        autopilot_checklist_kind=None,
+    )
+
+    assert runner.kwargs["autopilot_retry_enabled"] is False
+    assert runner.kwargs["autopilot_session_id"] is None
+    assert runner.kwargs["autopilot_stable_key"] is None
+    assert runner.kwargs["autopilot_agent_kind"] is None
+    assert runner.kwargs["autopilot_source_type"] is None
+    assert runner.kwargs["autopilot_source_id"] is None
+    assert runner.kwargs["autopilot_checklist_title"] is None
+    assert runner.kwargs["autopilot_phase_name"] is None
+    assert runner.kwargs["autopilot_checklist_kind"] is None
