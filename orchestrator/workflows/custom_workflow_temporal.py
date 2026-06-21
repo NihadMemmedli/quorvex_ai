@@ -17,6 +17,28 @@ ACTIVITY_RETRY_POLICY = RetryPolicy(
 STEP_ACTIVITY_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 
 
+def custom_workflow_step_activity_payload(run_id: str, prepared: dict[str, Any]) -> dict[str, Any]:
+    attempt = int(prepared.get("attempt_count") or 0) + 1
+    return {
+        "run_id": run_id,
+        "step_id": prepared.get("step_id"),
+        "step_key": prepared.get("step_key"),
+        "step_order": prepared.get("step_order"),
+        "step_label": prepared.get("step_label"),
+        "step_type": prepared.get("step_type"),
+        "attempt": attempt,
+    }
+
+
+def custom_workflow_step_activity_id(run_id: str, prepared: dict[str, Any]) -> str:
+    attempt = int(prepared.get("attempt_count") or 0) + 1
+    return (
+        f"custom-workflow-step-{run_id}-"
+        f"{prepared.get('step_order')}-{prepared.get('step_key')}-"
+        f"{prepared.get('step_id')}-attempt-{attempt}"
+    )
+
+
 @workflow.defn(name="CustomWorkflowRun")
 class CustomWorkflowRun:
     """Durable wrapper around an existing persisted custom workflow run."""
@@ -91,20 +113,8 @@ class CustomWorkflowRun:
 
             step_result = await workflow.execute_activity(
                 "execute_custom_workflow_step",
-                {
-                    "run_id": run_id,
-                    "step_id": prepared.get("step_id"),
-                    "step_key": prepared.get("step_key"),
-                    "step_order": prepared.get("step_order"),
-                    "step_label": prepared.get("step_label"),
-                    "step_type": prepared.get("step_type"),
-                    "attempt": int(prepared.get("attempt_count") or 0) + 1,
-                },
-                activity_id=(
-                    f"custom-workflow-step-{run_id}-"
-                    f"{prepared.get('step_order')}-{prepared.get('step_key')}-"
-                    f"{prepared.get('step_id')}-attempt-{int(prepared.get('attempt_count') or 0) + 1}"
-                ),
+                custom_workflow_step_activity_payload(run_id, prepared),
+                activity_id=custom_workflow_step_activity_id(run_id, prepared),
                 start_to_close_timeout=timedelta(hours=12),
                 retry_policy=STEP_ACTIVITY_RETRY_POLICY,
             )

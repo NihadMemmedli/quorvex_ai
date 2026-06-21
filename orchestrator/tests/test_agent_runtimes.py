@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime, normalize_agent_runtime
 from orchestrator.services.agent_runtimes.claude import ClaudeAgentSdkRuntime
+from orchestrator.utils.agent_runner import AgentRunner
 
 
 def test_normalize_agent_runtime_defaults_and_aliases(monkeypatch):
@@ -23,6 +25,67 @@ def test_normalize_agent_runtime_defaults_and_aliases(monkeypatch):
 
 def test_runtime_resolver_coerces_legacy_hermes_to_claude_sdk():
     assert isinstance(get_agent_runtime("hermes"), ClaudeAgentSdkRuntime)
+
+
+def test_agent_runner_queue_task_kwargs_preserve_runtime_adapter_fields(monkeypatch):
+    monkeypatch.setenv("BROWSER_SLOT_PARENT_OWNER_TYPE", "test_run")
+    monkeypatch.setenv("BROWSER_SLOT_PARENT_RUN_ID", "parent-run-1")
+    runner = AgentRunner(
+        allowed_tools=["Read"],
+        tools=["Read", "Bash"],
+        disallowed_tools=["Write"],
+        permission_mode="bypassPermissions",
+        strict_mcp_config=False,
+        max_budget_usd=1.25,
+        task_budget={"total": 1200},
+        include_hook_events=True,
+        include_partial_messages=True,
+        output_format={"type": "json_schema"},
+        resume_session_id="session-1",
+        continue_conversation=True,
+        max_turns=7,
+        fallback_model="claude-fallback",
+        betas=["beta-1"],
+        owner_type="agent_run",
+        owner_id="agent-1",
+        owner_label="Agent 1",
+        requires_live_browser=True,
+        env_vars={"QUEUE_ONLY": "yes"},
+    )
+
+    kwargs = runner._queue_task_kwargs(
+        prompt="inspect",
+        timeout=123,
+        owner_metadata=runner._queue_owner_metadata(),
+    )
+
+    assert kwargs["prompt"] == "inspect"
+    assert kwargs["timeout_seconds"] == 123
+    assert kwargs["agent_type"] == "AgentRunner"
+    assert kwargs["operation_type"] == "run"
+    assert kwargs["env_vars"]["QUEUE_ONLY"] == "yes"
+    assert kwargs["allowed_tools"] == ["Read"]
+    assert kwargs["tools"] == ["Read", "Bash"]
+    assert kwargs["disallowed_tools"] == ["Write"]
+    assert kwargs["permission_mode"] == "bypassPermissions"
+    assert kwargs["strict_mcp_config"] is False
+    assert kwargs["max_budget_usd"] == 1.25
+    assert kwargs["task_budget"] == {"total": 1200}
+    assert kwargs["include_hook_events"] is True
+    assert kwargs["include_partial_messages"] is True
+    assert kwargs["output_format"] == {"type": "json_schema"}
+    assert kwargs["resume_session_id"] == "session-1"
+    assert kwargs["continue_conversation"] is True
+    assert kwargs["max_turns"] == 7
+    assert kwargs["fallback_model"] == "claude-fallback"
+    assert kwargs["betas"] == ["beta-1"]
+    assert kwargs["owner_type"] == "agent_run"
+    assert kwargs["owner_id"] == "agent-1"
+    assert kwargs["owner_label"] == "Agent 1"
+    assert kwargs["browser_slot_parent_owner_type"] == "test_run"
+    assert kwargs["browser_slot_parent_run_id"] == "parent-run-1"
+    assert kwargs["requires_live_browser"] is True
+    assert kwargs["cwd"] == os.getcwd()
 
 
 @pytest.mark.asyncio

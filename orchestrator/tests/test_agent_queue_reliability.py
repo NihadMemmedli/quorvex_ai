@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
@@ -26,6 +27,35 @@ from orchestrator.utils import browser_cleanup
 from orchestrator.utils.agent_runner import AgentRunner
 
 UTC = timezone.utc
+
+
+def test_agent_worker_task_env_helpers_restore_and_skip_testdata(monkeypatch):
+    worker = AgentWorker()
+    monkeypatch.setenv("QUEUE_ENV_EXISTING", "old")
+    monkeypatch.delenv("QUEUE_ENV_NEW", raising=False)
+    monkeypatch.delenv("TESTDATA_SECRET", raising=False)
+    task = AgentTask(
+        id="agent-env",
+        prompt="run",
+        env_vars={
+            "QUEUE_ENV_EXISTING": "new",
+            "QUEUE_ENV_NEW": "created",
+            "TESTDATA_SECRET": "ignored",
+        },
+    )
+
+    saved = worker._apply_task_env_vars(task)
+
+    assert saved == {"QUEUE_ENV_EXISTING": "old", "QUEUE_ENV_NEW": None}
+    assert os.environ["QUEUE_ENV_EXISTING"] == "new"
+    assert os.environ["QUEUE_ENV_NEW"] == "created"
+    assert "TESTDATA_SECRET" not in os.environ
+
+    worker._restore_task_env_vars(saved, task.id)
+
+    assert os.environ["QUEUE_ENV_EXISTING"] == "old"
+    assert "QUEUE_ENV_NEW" not in os.environ
+    assert "TESTDATA_SECRET" not in os.environ
 
 
 class _MemoryPipeline:

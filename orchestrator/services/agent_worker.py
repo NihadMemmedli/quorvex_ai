@@ -1004,16 +1004,85 @@ class AgentWorker:
             )
             return False
 
-    async def _execute_task(self, task: AgentTask):
-        """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
-        # Reset progress tracking for this task
+    def _reset_task_execution_state(self) -> None:
         with self._progress_lock:
             self._current_progress = self._empty_progress()
             self._last_execution_telemetry = {}
-        # Start heartbeat to signal we're alive
-        heartbeat = asyncio.create_task(self._heartbeat_loop(task.id))
-        cancel_monitor = asyncio.create_task(self._cancel_monitor_loop(task.id))
-        pause_monitor = asyncio.create_task(self._pause_monitor_loop(task.id))
+
+    def _start_task_monitors(self, task_id: str) -> tuple[asyncio.Task, asyncio.Task, asyncio.Task]:
+        return (
+            asyncio.create_task(self._heartbeat_loop(task_id)),
+            asyncio.create_task(self._cancel_monitor_loop(task_id)),
+            asyncio.create_task(self._pause_monitor_loop(task_id)),
+        )
+
+    async def _stop_task_monitors(self, *monitors: asyncio.Task) -> None:
+        for monitor in monitors:
+            monitor.cancel()
+        for monitor in monitors:
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
+
+    @staticmethod
+    def _apply_task_env_vars(task: AgentTask) -> dict[str, str | None]:
+        saved_env: dict[str, str | None] = {}
+        if not task.env_vars:
+            return saved_env
+        for key, value in task.env_vars.items():
+            if key.startswith("TESTDATA_"):
+                continue
+            saved_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        logger.info(f"Applied {len(task.env_vars)} env var(s) from task: {list(task.env_vars.keys())}")
+        return saved_env
+
+    @staticmethod
+    def _restore_task_env_vars(saved_env: dict[str, str | None], task_id: str) -> None:
+        for key, original_value in saved_env.items():
+            if original_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original_value
+        if saved_env:
+            logger.debug(f"Restored {len(saved_env)} env var(s) after task {task_id}")
+
+    def _clear_task_pause_state(self, task_id: str) -> None:
+        with self._pause_lock:
+            self._paused_task_ids.discard(task_id)
+            self._pause_started_at.pop(task_id, None)
+            self._paused_duration_seconds.pop(task_id, None)
+
+    async def _submit_emergency_failure_if_needed(self, task_id: str, result_submitted: bool) -> None:
+        if result_submitted:
+            return
+        logger.warning(f"Task {task_id}: result not submitted, emergency submit")
+        try:
+            await self.queue.submit_result(task_id, "", success=False, error="Worker failed to submit result")
+        except Exception:
+            logger.error(f"Emergency submit failed for {task_id}")
+
+    async def _release_browser_slot_if_needed(
+        self,
+        *,
+        task_id: str,
+        browser_pool,
+        browser_slot_request_id: str | None,
+        browser_slot_acquired: bool,
+        result_submitted: bool,
+    ) -> None:
+        if not (browser_slot_acquired and browser_pool and browser_slot_request_id):
+            return
+        try:
+            await browser_pool.release(browser_slot_request_id, success=result_submitted)
+        except Exception as exc:
+            logger.warning("Failed to release browser slot for task %s: %s", task_id, exc)
+
+    async def _execute_task(self, task: AgentTask):
+        """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
+        self._reset_task_execution_state()
+        heartbeat, cancel_monitor, pause_monitor = self._start_task_monitors(task.id)
         # Send initial heartbeat immediately
         await self.queue.update_heartbeat(task.id, progress=dict(self._current_progress))
 
@@ -1024,14 +1093,7 @@ class AgentWorker:
         # Save and apply task-specific env vars with isolation.
         # The pipeline may load credentials from the database that the worker's
         # .env file doesn't have, so we forward them through the queue.
-        saved_env = {}
-        if task.env_vars:
-            for key, value in task.env_vars.items():
-                if key.startswith("TESTDATA_"):
-                    continue
-                saved_env[key] = os.environ.get(key)  # None if not set
-                os.environ[key] = value
-            logger.info(f"Applied {len(task.env_vars)} env var(s) from task: {list(task.env_vars.keys())}")
+        saved_env = self._apply_task_env_vars(task)
 
         rate_limit_max_retries = 3
         provider_max_attempts = provider_retry_attempts()
@@ -1708,45 +1770,17 @@ class AgentWorker:
             _result_submitted = True
 
         finally:
-            cancel_monitor.cancel()
-            pause_monitor.cancel()
-            heartbeat.cancel()
-            try:
-                await cancel_monitor
-            except asyncio.CancelledError:
-                pass
-            try:
-                await pause_monitor
-            except asyncio.CancelledError:
-                pass
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
-            with self._pause_lock:
-                self._paused_task_ids.discard(task.id)
-                self._pause_started_at.pop(task.id, None)
-                self._paused_duration_seconds.pop(task.id, None)
-            # Emergency submit if result was never recorded
-            if not _result_submitted:
-                logger.warning(f"Task {task.id}: result not submitted, emergency submit")
-                try:
-                    await self.queue.submit_result(task.id, "", success=False, error="Worker failed to submit result")
-                except Exception:
-                    logger.error(f"Emergency submit failed for {task.id}")
-            if browser_slot_acquired and browser_pool and browser_slot_request_id:
-                try:
-                    await browser_pool.release(browser_slot_request_id, success=_result_submitted)
-                except Exception as exc:
-                    logger.warning("Failed to release browser slot for task %s: %s", task.id, exc)
-            # Restore environment variables to pre-task state
-            for key, original_value in saved_env.items():
-                if original_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = original_value
-            if saved_env:
-                logger.debug(f"Restored {len(saved_env)} env var(s) after task {task.id}")
+            await self._stop_task_monitors(cancel_monitor, pause_monitor, heartbeat)
+            self._clear_task_pause_state(task.id)
+            await self._submit_emergency_failure_if_needed(task.id, _result_submitted)
+            await self._release_browser_slot_if_needed(
+                task_id=task.id,
+                browser_pool=browser_pool,
+                browser_slot_request_id=browser_slot_request_id,
+                browser_slot_acquired=browser_slot_acquired,
+                result_submitted=_result_submitted,
+            )
+            self._restore_task_env_vars(saved_env, task.id)
 
     def _build_task_telemetry(
         self,

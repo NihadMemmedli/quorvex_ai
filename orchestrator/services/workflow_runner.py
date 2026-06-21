@@ -501,61 +501,82 @@ def prepare_next_workflow_step(run_id: str) -> dict[str, Any]:
         ).all()
         next_step = next((step for step in steps if step.status in {"pending", "running"}), None)
         if not next_step:
-            if any(step.status == "awaiting_input" for step in steps):
-                run.status = "awaiting_input"
-                run.updated_at = datetime.utcnow()
-                session.add(run)
-                emit_workflow_event(
-                    session,
-                    event_type="workflow.awaiting_input",
-                    message=f"Workflow run {run.id} is awaiting review input.",
-                    severity="warning",
-                    run=run,
-                    notify=_notify_for_run_event(session, run, "workflow.awaiting_input"),
-                )
-                session.commit()
-                return {"action": "awaiting_input", "status": "awaiting_input"}
-            run.status = "completed"
-            run.progress = 1.0
-            run.completed_at = datetime.utcnow()
-            run.updated_at = datetime.utcnow()
-            run.result = {"steps": {step.step_key: step.output for step in steps}}
-            session.add(run)
-            emit_workflow_event(
-                session,
-                event_type="workflow.completed",
-                message=f"Workflow run {run.id} completed.",
-                run=run,
-                notify=_notify_for_run_event(session, run, "workflow.completed"),
-            )
-            session.commit()
-            return {"action": "completed", "status": "completed"}
-        if run.status in {"queued", "awaiting_input"}:
-            run.status = "running"
-            emit_workflow_event(
-                session,
-                event_type="workflow.started",
-                message=f"Workflow run {run.id} started.",
-                run=run,
-                notify=False,
-            )
-        run.started_at = run.started_at or datetime.utcnow()
-        run.heartbeat_at = datetime.utcnow()
-        run.current_step_index = next_step.step_order
-        run.progress = next_step.step_order / max(len(steps), 1)
+            return _finish_workflow_without_runnable_step(session, run, steps)
+        return _prepare_runnable_workflow_step(session, run, next_step, steps)
+
+
+def _finish_workflow_without_runnable_step(
+    session: Session,
+    run: WorkflowRun,
+    steps: list[WorkflowRunStep],
+) -> dict[str, Any]:
+    if any(step.status == "awaiting_input" for step in steps):
+        run.status = "awaiting_input"
         run.updated_at = datetime.utcnow()
         session.add(run)
+        emit_workflow_event(
+            session,
+            event_type="workflow.awaiting_input",
+            message=f"Workflow run {run.id} is awaiting review input.",
+            severity="warning",
+            run=run,
+            notify=_notify_for_run_event(session, run, "workflow.awaiting_input"),
+        )
         session.commit()
-        return {
-            "action": "execute",
-            "status": run.status,
-            "step_id": next_step.id,
-            "step_key": next_step.step_key,
-            "step_order": next_step.step_order,
-            "step_label": next_step.label,
-            "step_type": next_step.step_type,
-            "attempt_count": next_step.attempt_count,
-        }
+        return {"action": "awaiting_input", "status": "awaiting_input"}
+    run.status = "completed"
+    run.progress = 1.0
+    run.completed_at = datetime.utcnow()
+    run.updated_at = datetime.utcnow()
+    run.result = {"steps": {step.step_key: step.output for step in steps}}
+    session.add(run)
+    emit_workflow_event(
+        session,
+        event_type="workflow.completed",
+        message=f"Workflow run {run.id} completed.",
+        run=run,
+        notify=_notify_for_run_event(session, run, "workflow.completed"),
+    )
+    session.commit()
+    return {"action": "completed", "status": "completed"}
+
+
+def _prepare_runnable_workflow_step(
+    session: Session,
+    run: WorkflowRun,
+    next_step: WorkflowRunStep,
+    steps: list[WorkflowRunStep],
+) -> dict[str, Any]:
+    if run.status in {"queued", "awaiting_input"}:
+        run.status = "running"
+        emit_workflow_event(
+            session,
+            event_type="workflow.started",
+            message=f"Workflow run {run.id} started.",
+            run=run,
+            notify=False,
+        )
+    run.started_at = run.started_at or datetime.utcnow()
+    run.heartbeat_at = datetime.utcnow()
+    run.current_step_index = next_step.step_order
+    run.progress = next_step.step_order / max(len(steps), 1)
+    run.updated_at = datetime.utcnow()
+    session.add(run)
+    session.commit()
+    return _prepared_workflow_step_payload(run, next_step)
+
+
+def _prepared_workflow_step_payload(run: WorkflowRun, next_step: WorkflowRunStep) -> dict[str, Any]:
+    return {
+        "action": "execute",
+        "status": run.status,
+        "step_id": next_step.id,
+        "step_key": next_step.step_key,
+        "step_order": next_step.step_order,
+        "step_label": next_step.label,
+        "step_type": next_step.step_type,
+        "attempt_count": next_step.attempt_count,
+    }
 
 
 async def execute_workflow_step_once(run_id: str, step_id: int | None) -> dict[str, Any]:
