@@ -23,6 +23,7 @@ from orchestrator.api.models_db import (
     RtmSnapshot,
 )
 from orchestrator.services import autonomous_activities as facade
+from orchestrator.services import autonomous_shared as shared
 
 
 def _create_findings_from_completed_work_items(
@@ -335,8 +336,8 @@ def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dic
     url = str(row.get("url") or row.get("target_url") or "").strip()
     if not url:
         return False
-    surface_key = facade._stable_dedupe_hash(
-        "surface", mission.project_id or "default", facade._route_from_url(url) or url
+    surface_key = shared._stable_dedupe_hash(
+        "surface", mission.project_id or "default", shared._route_from_url(url) or url
     )
     existing = session.exec(
         select(ApplicationMap).where(
@@ -351,7 +352,7 @@ def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dic
                 ApplicationMap.url == url,
             )
         ).first()
-    now = facade._utcnow()
+    now = shared._utcnow()
     if existing:
         existing.project_id = existing.project_id or mission.project_id
         existing.app_surface_key = existing.app_surface_key or surface_key
@@ -395,7 +396,7 @@ def _merge_requirement_artifact(
         return None, False, ""
     category = str(row.get("category") or "other").strip() or "other"
     criteria = facade._as_text_list(row.get("acceptance_criteria") or row.get("criteria"))
-    fingerprint = facade._requirement_fingerprint(
+    fingerprint = shared._requirement_fingerprint(
         {"title": title, "category": category, "acceptance_criteria": criteria}
     )
     existing_by_key = session.exec(
@@ -411,7 +412,7 @@ def _merge_requirement_artifact(
     for requirement in candidates:
         if not requirement:
             continue
-        existing_fingerprint = facade._requirement_fingerprint(
+        existing_fingerprint = shared._requirement_fingerprint(
             {
                 "title": requirement.title,
                 "category": requirement.category,
@@ -428,14 +429,14 @@ def _merge_requirement_artifact(
             requirement.description = str(row.get("description"))
         requirement.canonical_key = requirement.canonical_key or fingerprint
         requirement.confidence = max(float(requirement.confidence or 0), facade._as_float(row.get("confidence"), 0.7))
-        requirement.updated_at = facade._utcnow()
+        requirement.updated_at = shared._utcnow()
         session.add(requirement)
         return requirement, False, fingerprint
 
     truth_state = str(row.get("truth_state") or "candidate_requirement")
     if truth_state not in {"candidate_requirement", "confirmed_requirement", "manual_requirement", "observed_behavior"}:
         truth_state = "candidate_requirement"
-    now = facade._utcnow()
+    now = shared._utcnow()
     requirement = Requirement(
         project_id=mission.project_id,
         req_code=facade._next_requirement_code(session, mission.project_id),
@@ -482,7 +483,7 @@ def _merge_rtm_candidate(
         allow_candidate = bool(row.get("allow_candidate") or row.get("accepted_candidate"))
         if facade._requirement_truth_state(requirement) != "confirmed_requirement" and not allow_candidate:
             continue
-        dedupe_key = facade._stable_dedupe_hash(
+        dedupe_key = shared._stable_dedupe_hash(
             mission.project_id or "default",
             "rtm",
             requirement_id,
@@ -503,7 +504,7 @@ def _merge_rtm_candidate(
                     RtmEntry.test_spec_name == test_spec_name,
                 )
             ).first()
-        now = facade._utcnow()
+        now = shared._utcnow()
         if existing:
             existing.dedupe_key = existing.dedupe_key or dedupe_key
             existing.mapping_type = str(row.get("mapping_type") or existing.mapping_type or "suggested")
@@ -556,14 +557,14 @@ def _merge_test_proposal_artifact(
     target_url = str(row.get("target_url") or row.get("url") or "").strip() or facade._default_target_url(mission)
     if row.get("route") and not row.get("target_url"):
         target_url = facade._url_for_route(facade._default_target_url(mission), str(row["route"]))
-    fingerprint = facade._spec_fingerprint(row, requirement_ids=requirement_ids)
+    fingerprint = shared._spec_fingerprint(row, requirement_ids=requirement_ids)
     metadata = facade._artifact_source_metadata(
         item,
         artifact_type="test_proposal",
         fingerprint=fingerprint,
         extra={
             "requirement_ids": requirement_ids,
-            "route": row.get("route") or facade._route_from_url(target_url),
+            "route": row.get("route") or shared._route_from_url(target_url),
             "agent_rationale": rationale,
             "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
         },
@@ -606,9 +607,9 @@ def _merge_bug_or_finding_artifact(
         else str(row.get("finding_type") or "coverage_gap")
     )
     fingerprint = (
-        facade._bug_fingerprint(row)
+        shared._bug_fingerprint(row)
         if kind == "bug"
-        else facade._stable_dedupe_hash(
+        else shared._stable_dedupe_hash(
             "finding",
             kind,
             row.get("route") or row.get("target_url") or row.get("url"),
@@ -616,7 +617,7 @@ def _merge_bug_or_finding_artifact(
             description,
         )
     )
-    dedupe_key = facade._stable_dedupe_hash(mission.project_id or "default", kind, fingerprint)
+    dedupe_key = shared._stable_dedupe_hash(mission.project_id or "default", kind, fingerprint)
     existing = session.exec(
         select(AutonomousFinding).where(
             AutonomousFinding.project_id == mission.project_id,
@@ -625,14 +626,14 @@ def _merge_bug_or_finding_artifact(
     ).first()
     if existing:
         return existing, False
-    now = facade._utcnow()
+    now = shared._utcnow()
     evidence = facade._artifact_source_metadata(
         item,
         artifact_type=kind,
         fingerprint=fingerprint,
         extra={
             "target_url": row.get("target_url") or row.get("url"),
-            "route": row.get("route") or facade._route_from_url(row.get("target_url") or row.get("url")),
+            "route": row.get("route") or shared._route_from_url(row.get("target_url") or row.get("url")),
             "action": row.get("action"),
             "observed_failure": row.get("observed_failure"),
             "expected_behavior": row.get("expected_behavior"),
@@ -702,7 +703,7 @@ def _create_rtm_snapshot(session: Session, mission: AutonomousMission, *, source
         uncovered_requirements=uncovered,
         coverage_percentage=round((covered / total) * 100, 2) if total else 0.0,
         snapshot_data_json=json.dumps({"source_work_item_id": source_work_item_id, "rows": rows[:500]}),
-        created_at=facade._utcnow(),
+        created_at=shared._utcnow(),
     )
     session.add(snapshot)
 

@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from orchestrator.api.models_db import AutonomousAgentWorkItem, AutonomousMission
 from orchestrator.services import autonomous_activities as facade
+from orchestrator.services import autonomous_shared as shared
 from orchestrator.services.autonomous_events import create_autonomous_agent_event, emit_work_item_status_event
 
 
@@ -27,7 +28,7 @@ def _execute_agent_work_item_direct(
     item: AutonomousAgentWorkItem,
 ) -> bool:
     """Execute one autonomous work item inside the Temporal activity worker."""
-    now = facade._utcnow()
+    now = shared._utcnow()
     current_item = session.get(AutonomousAgentWorkItem, item.id)
     current_mission = session.get(AutonomousMission, mission.id)
     if (
@@ -131,7 +132,7 @@ def _execute_agent_work_item_direct(
                 current = session.get(AutonomousAgentWorkItem, item.id)
                 if not current or current.status != "running":
                     return
-                heartbeat_at = facade._utcnow()
+                heartbeat_at = shared._utcnow()
                 last_tool = progress.get("last_tool")
                 progress_payload = {
                     **progress,
@@ -212,7 +213,7 @@ def _execute_agent_work_item_direct(
                     "browser_child_handoffs": child_browser_handoffs,
                     **browser_runtime,
                 }
-                current.updated_at = facade._utcnow()
+                current.updated_at = shared._utcnow()
                 session.add(current)
                 session.commit()
                 _emit_event(
@@ -296,7 +297,7 @@ def _execute_agent_work_item_direct(
 
         result = asyncio.run(_run_agent())
     except Exception as exc:
-        now = facade._utcnow()
+        now = shared._utcnow()
         session.expire_all()
         item = session.get(AutonomousAgentWorkItem, item.id) or item
         current_mission = session.get(AutonomousMission, mission.id)
@@ -336,7 +337,7 @@ def _execute_agent_work_item_direct(
         facade.logger.warning("Failed to execute autonomous work item %s: %s", item.id, exc)
         return False
 
-    now = facade._utcnow()
+    now = shared._utcnow()
     session.expire_all()
     item = session.get(AutonomousAgentWorkItem, item.id) or item
     current_mission = session.get(AutonomousMission, mission.id) or mission
@@ -509,7 +510,7 @@ def _enqueue_agent_work_item_legacy(
 
         task_id = asyncio.run(_enqueue())
     except Exception as exc:
-        now = facade._utcnow()
+        now = shared._utcnow()
         item.status = "blocked"
         item.error_message = f"Unable to enqueue agent task: {exc}"
         item.completed_at = now
@@ -520,7 +521,7 @@ def _enqueue_agent_work_item_legacy(
         facade.logger.warning("Failed to enqueue autonomous work item %s: %s", item.id, exc)
         return False
 
-    now = facade._utcnow()
+    now = shared._utcnow()
     item.agent_task_id = task_id
     item.status = "running"
     item.attempt_count += 1
@@ -572,7 +573,7 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
         return 0
 
     completed_count = 0
-    now = facade._utcnow()
+    now = shared._utcnow()
     for item in running_items:
         task = task_by_id.get(str(item.agent_task_id))
         if not task:

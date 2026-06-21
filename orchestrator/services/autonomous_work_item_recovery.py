@@ -10,6 +10,7 @@ from sqlmodel import Session, col, select
 
 from orchestrator.api.models_db import AutonomousAgentWorkItem, AutonomousMission, AutonomousMissionRun
 from orchestrator.services import autonomous_activities as facade
+from orchestrator.services import autonomous_shared as shared
 from orchestrator.services.autonomous_events import emit_work_item_status_event
 
 
@@ -18,10 +19,10 @@ def _recover_stale_work_items(
     mission: AutonomousMission,
     run: AutonomousMissionRun,
 ) -> int:
-    now = facade._utcnow()
+    now = shared._utcnow()
     stale_after = now - timedelta(
         minutes=max(
-            5, facade._config_int(mission.config, "work_item_stale_minutes", facade.DEFAULT_WORK_ITEM_STALE_MINUTES)
+            5, facade._config_int(mission.config, "work_item_stale_minutes", shared.DEFAULT_WORK_ITEM_STALE_MINUTES)
         )
     )
     running_items = session.exec(

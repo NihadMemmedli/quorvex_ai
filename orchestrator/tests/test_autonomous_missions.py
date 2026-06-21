@@ -62,6 +62,7 @@ from orchestrator.api.models_db import (
     RtmEntry,
     RtmSnapshot,
 )
+from orchestrator.services import autonomous_activities, autonomous_shared
 from orchestrator.services.autonomous_activities import (
     _agent_prompt_for_work_item,
     _allowed_tools_for_work_item,
@@ -118,6 +119,27 @@ def _create_project_and_mission(session: Session, *, mission_type: str = "covera
     session.commit()
     session.refresh(mission)
     return mission
+
+
+def test_autonomous_shared_helpers_remain_facade_compatible():
+    row = {
+        "title": "Login redirects",
+        "category": "authentication",
+        "acceptance_criteria": ["User reaches /dashboard after login"],
+    }
+
+    assert autonomous_activities.DEFAULT_WORK_ITEM_BATCH_SIZE == autonomous_shared.DEFAULT_WORK_ITEM_BATCH_SIZE
+    assert (
+        autonomous_activities._route_from_url("https://example.com/login?next=/dashboard")
+        == "/login?next=/dashboard"
+    )
+    assert autonomous_activities._requirement_fingerprint(row) == autonomous_shared._requirement_fingerprint(row)
+    assert autonomous_activities._stable_dedupe_hash(
+        "Login", {"route": "/dashboard"}
+    ) == autonomous_shared._stable_dedupe_hash(
+        "Login",
+        {"route": "/dashboard"},
+    )
 
 
 def test_autonomous_work_item_prompt_includes_testdata_and_delegation_instructions():
