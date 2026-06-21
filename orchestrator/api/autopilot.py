@@ -35,8 +35,8 @@ from orchestrator.utils.playwright_mcp import browser_runtime_status, live_brows
 from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
 from .models_db import (
-    AutoPilotPhase,
     AutoPilotChecklistItem,
+    AutoPilotPhase,
     AutoPilotQuestion,
     AutoPilotSession,
     AutoPilotSpecTask,
