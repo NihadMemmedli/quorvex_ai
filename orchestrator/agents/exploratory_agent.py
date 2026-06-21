@@ -23,6 +23,10 @@ from .explorer_result_synthesizer import (
 )
 
 
+def _stable_id(content: str) -> str:
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
 @dataclass
 class Observation:
     """A single observation during exploration."""
@@ -579,7 +583,7 @@ Step 6: Return the final summary JSON when done"""
                 try:
                     # We need to track the current page to link elements to it
                     current_page_url = config.get("url")  # Start with initial URL
-                    current_page_id = hashlib.md5(current_page_url.encode()).hexdigest()
+                    current_page_id = _stable_id(current_page_url)
 
                     # Ensure start page exists
                     memory_manager.graph_store.add_page(current_page_id, current_page_url)
@@ -594,7 +598,7 @@ Step 6: Return the final summary JSON when done"""
                         if act_type == "navigate":
                             # This action IS a page visit
                             new_page_url = target
-                            new_page_id = hashlib.md5(new_page_url.encode()).hexdigest()
+                            new_page_id = _stable_id(new_page_url)
                             memory_manager.graph_store.add_page(new_page_id, new_page_url)
 
                             memory_manager.graph_store.add_navigation(
@@ -629,7 +633,7 @@ Step 6: Return the final summary JSON when done"""
                         pages = flow.get("pages", [])
                         for page_url in pages:
                             if page_url and len(page_url) > 1:
-                                pid = hashlib.md5(page_url.encode()).hexdigest()
+                                pid = _stable_id(page_url)
                                 memory_manager.graph_store.add_page(pid, page_url)
                 except Exception as e:
                     print(f"⚠️ Error storing elements/pages: {e}")

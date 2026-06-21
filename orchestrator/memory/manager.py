@@ -16,6 +16,10 @@ from .graph_store import GraphStore, get_graph_store
 from .vector_store import VectorStore, get_vector_store
 
 
+def _stable_id(content: str) -> str:
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
 class MemoryManager:
     """
     Main memory manager that coordinates vector and graph storage.
@@ -60,7 +64,7 @@ class MemoryManager:
     def _generate_pattern_id(self, action: str, selector_type: str, selector_value: str) -> str:
         """Generate unique pattern ID from action and selector"""
         content = f"{action}:{selector_type}:{selector_value}"
-        return hashlib.md5(content.encode()).hexdigest()
+        return _stable_id(content)
 
     def store_test_pattern(
         self,
@@ -261,7 +265,7 @@ class MemoryManager:
         """
         # Generate element ID
         selector_str = json.dumps(selector, sort_keys=True)
-        element_id = hashlib.md5(f"{url}:{selector_str}".encode()).hexdigest()
+        element_id = _stable_id(f"{url}:{selector_str}")
 
         # Create description for embedding
         description = f"{element_type}"
@@ -344,7 +348,7 @@ class MemoryManager:
         Returns:
             Flow ID
         """
-        flow_id = hashlib.md5(f"{title}:{json.dumps(pages or [])}".encode()).hexdigest()
+        flow_id = _stable_id(f"{title}:{json.dumps(pages or [])}")
 
         # Determine start/end pages if possible
         start_page = None
@@ -369,14 +373,14 @@ class MemoryManager:
             if not start_page:
                 # Create it if it doesn't exist? Ideally we should have stored pages before flows.
                 # Use a deterministic ID for the page based on URL
-                start_page = hashlib.md5(start_url.encode()).hexdigest()
+                start_page = _stable_id(start_url)
                 self.graph_store.add_page(start_page, start_url)
 
             if len(pages) > 1:
                 end_url = pages[-1]
                 end_page = find_page_id(end_url)
                 if not end_page:
-                    end_page = hashlib.md5(end_url.encode()).hexdigest()
+                    end_page = _stable_id(end_url)
                     self.graph_store.add_page(end_page, end_url)
 
         # If no start page, use a placeholder or handle gracefully
@@ -608,7 +612,7 @@ class MemoryManager:
         Returns:
             Idea ID
         """
-        idea_id = hashlib.md5(f"{description}:{category}".encode()).hexdigest()
+        idea_id = _stable_id(f"{description}:{category}")
 
         idea_metadata = self._sanitize_metadata(
             {
