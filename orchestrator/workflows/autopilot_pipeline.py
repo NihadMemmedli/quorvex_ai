@@ -4141,7 +4141,7 @@ test.describe({suite}, () => {{
             for ref in (
                 evidence_metadata.get("test_data_refs")
                 or evidence_metadata.get("testDataRefs")
-                or config.test_data_refs
+                or getattr(config, "test_data_refs", None)
                 or []
             )
             if str(ref).strip()

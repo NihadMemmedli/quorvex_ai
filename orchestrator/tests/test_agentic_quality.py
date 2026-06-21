@@ -481,6 +481,88 @@ def _pipeline_with_results(results: list[PipelineTestResult], tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_run_delegates_browser_flow_through_extracted_stages(
+    monkeypatch, tmp_path: Path
+):
+    pipeline = object.__new__(FullNativePipeline)
+    calls: list[str] = []
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.test")
+    run_dir = tmp_path / "run"
+    test_path = tmp_path / "generated.spec.ts"
+    expected_plan_path = tmp_path / "plan.md"
+    draft_path = tmp_path / "plan.draft.spec.ts"
+    ctx = full_native_pipeline._NativeRunContext(
+        spec_path=str(spec),
+        spec_file=spec,
+        run_dir=run_dir,
+        browser="chromium",
+        hybrid_healing=False,
+        max_iterations=20,
+        skip_planning=False,
+        existing_test_path=None,
+        force_api=False,
+        handoff_manifest_path=run_dir / "handoff_manifest.json",
+        spec_content=spec.read_text(),
+        raw_included_spec_content=spec.read_text(),
+        resolved_spec_content=spec.read_text(),
+        target_url="https://example.test",
+        auth_context={},
+        test_data_context={},
+        credentials=None,
+        login_url=None,
+        run_id=None,
+        spec_type=full_native_pipeline.SpecType.STANDARD,
+    )
+
+    def fake_prepare_native_run(**kwargs):
+        calls.append("prepare")
+        assert kwargs["spec_path"] == str(spec)
+        assert kwargs["browser"] == "chromium"
+        run_dir.mkdir()
+        return full_native_pipeline._NativeRunPreparation(context=ctx)
+
+    async def fake_planning(ctx_arg):
+        calls.append("planning")
+        assert ctx_arg is ctx
+        return full_native_pipeline._BrowserPlanningStageResult(
+            plan_path=expected_plan_path,
+            planner_draft_script_path=draft_path,
+        )
+
+    async def fake_generation(ctx_arg, *, plan_path, planner_draft_script_path):
+        calls.append("generation")
+        assert ctx_arg is ctx
+        assert plan_path == expected_plan_path
+        assert planner_draft_script_path == draft_path
+        return full_native_pipeline._BrowserGenerationStageResult(
+            test_path=test_path,
+            design={"design": True},
+            critic={"critic": True},
+        )
+
+    async def fake_initial(ctx_arg, *, test_path, plan_path, design, critic):
+        calls.append("initial")
+        assert ctx_arg is ctx
+        assert test_path == tmp_path / "generated.spec.ts"
+        assert plan_path == expected_plan_path
+        assert design == {"design": True}
+        assert critic == {"critic": True}
+        return {"success": True, "stage": "completed"}
+
+    monkeypatch.setattr(full_native_pipeline, "cleanup_orphaned_browsers", lambda: calls.append("cleanup"))
+    pipeline._prepare_native_run = fake_prepare_native_run
+    pipeline._run_browser_planning_stage = fake_planning
+    pipeline._run_browser_generation_stage = fake_generation
+    pipeline._run_initial_test_or_heal = fake_initial
+
+    result = await pipeline.run(str(spec), run_dir, browser="chromium")
+
+    assert result == {"success": True, "stage": "completed"}
+    assert calls == ["prepare", "planning", "cleanup", "generation", "initial"]
+
+
+@pytest.mark.asyncio
 async def test_api_pipeline_records_handoff_manifest(tmp_path: Path):
     spec = tmp_path / "api.md"
     spec.write_text("# API\nBase URL: https://example.test\nGET /health\nVerify response status is 200")
