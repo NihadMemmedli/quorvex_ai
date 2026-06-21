@@ -27,13 +27,6 @@ class HealerTimeoutError(Exception):
     pass
 
 
-def _optional_env_float(name: str) -> float | None:
-    value = os.environ.get(name)
-    if not value:
-        return None
-    return float(value)
-
-
 # Add orchestrator to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -46,6 +39,7 @@ from orchestrator.ai.prompt_registry import (
     attach_prompt_metadata,
     build_prompt_metadata,
 )
+from orchestrator.services.agent_prompt_runtime import create_agent_runner
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner
 from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
 from orchestrator.utils.text_utils import truncate_middle
@@ -301,37 +295,25 @@ Rules:
         continue_conversation: bool = False,
     ) -> AgentResult:
         timeout = int(os.environ.get("HEALER_SCHEMA_RETRY_TIMEOUT_SECONDS", "180"))
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
             allowed_tools=[],
             tools=[],
             log_tools=False,
-            on_progress=self.on_progress,
-            on_task_enqueued=self.on_task_enqueued,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
-            model_tier=self.model_tier,
             memory_agent_type="NativeHealer",
             memory_source_type="test_file",
             memory_stage="native_healer_schema_retry",
             inject_memory=False,
             capture_memory=False,
-            env_vars=self.env_vars,
-            cwd=self.cwd,
             requires_live_browser=False,
             resume_session_id=None,
             continue_conversation=False,
             force_direct_execution=True,
-            autopilot_retry_enabled=bool(getattr(self, "autopilot_retry_enabled", False)),
-            autopilot_session_id=getattr(self, "autopilot_session_id", None),
-            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_healer_schema_retry"),
-            autopilot_source_type=getattr(self, "autopilot_source_type", None),
-            autopilot_source_id=getattr(self, "autopilot_source_id", None),
-            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
-            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
-            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+            enable_autopilot_for_owner=False,
+            include_tool_use_callback=False,
+            runner_cls=AgentRunner,
         )
         return await runner.run(prompt)
 
@@ -723,36 +705,21 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             tool_config = get_agent_tool_config(
                 "playwright-test-healer", mcp_config_dir=self.cwd
             )
-            runner = AgentRunner(
+            runner = create_agent_runner(
+                self,
                 timeout_seconds=effective_timeout,
+                tool_config=tool_config,
                 allowed_tools=tool_config.get("allowed_tools") or [],
-                tools=tool_config.get("tools"),
-                disallowed_tools=tool_config.get("disallowed_tools"),
                 log_tools=True,
-                on_tool_use=self.on_tool_use,
-                on_progress=self.on_progress,
-                on_task_enqueued=self.on_task_enqueued,
-                owner_type=self.owner_type,
-                owner_id=self.owner_id,
-                owner_label=self.owner_label,
-                model_tier=self.model_tier,
-                max_budget_usd=_optional_env_float("HEALER_MAX_BUDGET_USD"),
+                max_budget_env="HEALER_MAX_BUDGET_USD",
                 memory_agent_type="NativeHealer",
                 memory_source_type="test_file",
                 memory_stage="native_healer",
                 inject_memory=False,
-                env_vars=self.env_vars,
-                cwd=self.cwd,
                 preserve_browser_on_failure=True,
-                autopilot_retry_enabled=bool(getattr(self, "autopilot_retry_enabled", False)),
-                autopilot_session_id=getattr(self, "autopilot_session_id", None),
-                autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
                 autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_healer"),
-                autopilot_source_type=getattr(self, "autopilot_source_type", None),
-                autopilot_source_id=getattr(self, "autopilot_source_id", None),
-                autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
-                autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
-                autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+                enable_autopilot_for_owner=False,
+                runner_cls=AgentRunner,
             )
             result = await runner.run(prompt)
             self.last_agent_result = result
