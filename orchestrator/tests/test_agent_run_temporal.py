@@ -53,6 +53,10 @@ from orchestrator.api.models_db import AgentRun, AgentRunEvent, DomainJob
 from orchestrator.api.requirements import get_bulk_generate_job_status, get_generate_job_status
 from orchestrator.api.rtm import get_rtm_generate_job_status
 from orchestrator.services.agent_run_activities import (
+    _finalize_reattached_agent_task,
+    _handle_agent_task_reattach_failure,
+    _load_agent_run_execution_state,
+    _mark_agent_run_activity_cancelled,
     execute_agent_run,
     finalize_agent_run_workflow,
     mark_agent_run_temporal_started,
@@ -1349,6 +1353,51 @@ def test_agent_run_temporal_activity_records_started_metadata():
         _cleanup_run(run_id)
 
 
+def test_agent_run_execution_state_copies_context_before_session_close():
+    run_id = "agent-temporal-execution-state"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="custom",
+            status="running",
+            agent_task_id="agent-task-existing",
+            config_json='{"prompt":"inspect"}',
+        )
+        session.add(run)
+        session.commit()
+
+    try:
+        state = _load_agent_run_execution_state(run_id)
+
+        assert state["terminal"] is False
+        assert state["agent_type"] == "custom"
+        assert state["config"] == {"prompt": "inspect"}
+        assert state["agent_task_id"] == "agent-task-existing"
+        assert state["payload"]["status"] == "running"
+    finally:
+        _cleanup_run(run_id)
+
+
+def test_agent_run_activity_cancelled_helper_persists_terminal_status():
+    run_id = "agent-temporal-activity-cancelled"
+    _create_run(run_id, status="running")
+
+    try:
+        result = _mark_agent_run_activity_cancelled(run_id)
+
+        assert result["status"] == "cancelled"
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "cancelled"
+            assert run.completed_at is not None
+            assert run.progress["phase"] == "cancelled"
+        assert _latest_event(run_id, "cancel") is not None
+    finally:
+        _cleanup_run(run_id)
+
+
 def test_finalize_agent_run_workflow_recovers_custom_raw_output_as_partial(tmp_path, monkeypatch):
     run_id = "agent-temporal-partial-custom"
     _ensure_tables()
@@ -1399,6 +1448,79 @@ def test_finalize_agent_run_workflow_recovers_custom_raw_output_as_partial(tmp_p
             assert run.result["structured_report"]["evidence"]
             assert run.progress["raw_output_chars"] > 0
             assert run.progress["artifact_count"] >= 1
+    finally:
+        _cleanup_run(run_id)
+
+
+def test_reattach_finalizer_failure_falls_back_to_partial_result(monkeypatch):
+    run = AgentRun(
+        id="agent-temporal-finalizer-fallback",
+        agent_type="custom",
+        status="running",
+        config_json='{"prompt":"inspect"}',
+    )
+
+    class BrokenFinalizer:
+        def finalize(self, **_kwargs):
+            raise RuntimeError("bad finalizer")
+
+    monkeypatch.setattr(
+        "orchestrator.services.agent_run_finalizer.AgentRunFinalizer",
+        lambda: BrokenFinalizer(),
+    )
+
+    _finalize_reattached_agent_task(
+        run,
+        "agent-temporal-finalizer-fallback",
+        "agent-task-existing",
+        "partial output",
+        [],
+        {},
+    )
+
+    assert run.status == "completed_partial"
+    assert run.result["summary"] == "partial output"
+    assert run.result["contract_status"] == "partial"
+    assert run.result["diagnostics"]["finalizer"]["agent_task_id"] == "agent-task-existing"
+
+
+def test_reattach_failure_without_recovery_marks_retry_and_returns_none(monkeypatch):
+    run_id = "agent-temporal-reattach-retry"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="custom",
+            status="running",
+            agent_task_id="agent-task-existing",
+            config_json='{"prompt":"inspect"}',
+        )
+        session.add(run)
+        session.commit()
+
+    monkeypatch.setattr(
+        "orchestrator.services.agent_run_activities._recover_custom_agent_partial_result",
+        lambda *_args: None,
+    )
+
+    try:
+        result = _handle_agent_task_reattach_failure(
+            run_id,
+            "agent-task-existing",
+            RuntimeError("queue disconnected"),
+        )
+
+        assert result is None
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "running"
+            assert run.progress["phase"] == "retrying"
+            assert run.progress["status"] == "running"
+            assert "queue disconnected" in run.progress["message"]
+        event = _latest_event(run_id, "retry")
+        assert event is not None
+        assert event.payload["retryable"] is True
     finally:
         _cleanup_run(run_id)
 

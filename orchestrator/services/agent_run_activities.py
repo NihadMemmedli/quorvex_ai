@@ -103,15 +103,13 @@ def mark_agent_run_temporal_started(payload: dict[str, Any]) -> dict[str, Any]:
 async def execute_agent_run(payload: dict[str, Any]) -> dict[str, Any]:
     """Execute or reattach to the Redis-backed agent task for one AgentRun."""
     run_id = str(payload["run_id"])
-    with Session(engine) as session:
-        run = session.get(AgentRun, run_id)
-        if not run:
-            return {"run_id": run_id, "status": "missing", "terminal": True, "error_message": "Agent run disappeared"}
-        if run.status in TERMINAL_STATUSES:
-            return _run_payload(run)
-        agent_type = run.agent_type
-        config = run.config
-        agent_task_id = run.agent_task_id
+    state = _load_agent_run_execution_state(run_id)
+    if state["terminal"]:
+        return state["payload"]
+
+    agent_type = state["agent_type"]
+    config = state["config"]
+    agent_task_id = state["agent_task_id"]
 
     if agent_type == "__temporal_smoke__" and config.get("temporal_smoke") is True:
         return _complete_smoke_agent_run(run_id)
@@ -119,37 +117,73 @@ async def execute_agent_run(payload: dict[str, Any]) -> dict[str, Any]:
     if agent_task_id:
         return await _reattach_agent_task(run_id, agent_task_id)
 
+    return await _execute_agent_run_directly(run_id, agent_type, config)
+
+
+def _load_agent_run_execution_state(run_id: str) -> dict[str, Any]:
+    with Session(engine) as session:
+        run = session.get(AgentRun, run_id)
+        if not run:
+            return {
+                "terminal": True,
+                "payload": {
+                    "run_id": run_id,
+                    "status": "missing",
+                    "terminal": True,
+                    "error_message": "Agent run disappeared",
+                },
+            }
+        if run.status in TERMINAL_STATUSES:
+            return {"terminal": True, "payload": _run_payload(run)}
+        return {
+            "terminal": False,
+            "payload": _run_payload(run),
+            "agent_type": run.agent_type,
+            "config": run.config,
+            "agent_task_id": run.agent_task_id,
+        }
+
+
+async def _execute_agent_run_directly(
+    run_id: str,
+    agent_type: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
     from orchestrator.api.main import execute_agent_background
 
     with _temporal_agent_execution_env():
         try:
             await execute_agent_background(run_id, agent_type, config)
         except asyncio.CancelledError:
-            with Session(engine) as session:
-                run = session.get(AgentRun, run_id)
-                if run and run.status not in TERMINAL_STATUSES:
-                    run.status = "cancelled"
-                    run.completed_at = datetime.utcnow()
-                    run.progress = {
-                        **(run.progress or {}),
-                        "phase": "cancelled",
-                        "status": "cancelled",
-                        "message": "Agent run cancelled.",
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                    session.add(run)
-                    session.commit()
-                    create_agent_run_event(
-                        run_id=run.id,
-                        agent_task_id=run.agent_task_id,
-                        event_type="cancel",
-                        message="Agent activity cancelled.",
-                        payload={"status": run.status},
-                        session=session,
-                    )
-                return _run_payload(run)
+            return _mark_agent_run_activity_cancelled(run_id)
     with Session(engine) as session:
         run = session.get(AgentRun, run_id)
+        return _run_payload(run)
+
+
+def _mark_agent_run_activity_cancelled(run_id: str) -> dict[str, Any]:
+    with Session(engine) as session:
+        run = session.get(AgentRun, run_id)
+        if run and run.status not in TERMINAL_STATUSES:
+            run.status = "cancelled"
+            run.completed_at = datetime.utcnow()
+            run.progress = {
+                **(run.progress or {}),
+                "phase": "cancelled",
+                "status": "cancelled",
+                "message": "Agent run cancelled.",
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            session.add(run)
+            session.commit()
+            create_agent_run_event(
+                run_id=run.id,
+                agent_task_id=run.agent_task_id,
+                event_type="cancel",
+                message="Agent activity cancelled.",
+                payload={"status": run.status},
+                session=session,
+            )
         return _run_payload(run)
 
 
@@ -199,77 +233,10 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
         )
         final_task = await queue.get_task(agent_task_id)
     except Exception as exc:
-        with Session(engine) as session:
-            run = session.get(AgentRun, run_id)
-            if run and run.status not in TERMINAL_STATUSES:
-                recovered = None
-                if run.agent_type == "custom":
-                    try:
-                        recovered = _recover_custom_agent_partial_result(run, exc)
-                    except Exception:
-                        recovered = None
-                elif run.agent_type == "exploratory":
-                    try:
-                        if _exploratory_result_has_usable_evidence(run.result):
-                            recovered = _merge_agent_failure_into_result(
-                                run.result,
-                                exc,
-                                failure_reason="reattach_failed_after_evidence",
-                            )
-                        else:
-                            recovered = _recover_exploratory_partial_result(run_id, run.config, exc)
-                    except Exception:
-                        recovered = None
-                if recovered is not None:
-                    run.status = PARTIAL_STATUS
-                    run.completed_at = datetime.utcnow()
-                    run.result = recovered
-                    run.progress = {
-                        **(run.progress or {}),
-                        "phase": PARTIAL_STATUS,
-                        "status": PARTIAL_STATUS,
-                        "message": recovered.get("summary")
-                        or (
-                            "Recovered partial custom agent evidence after task reattach failed."
-                            if run.agent_type == "custom"
-                            else "Recovered partial Explorer evidence after task reattach failed."
-                        ),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                    event_type = "partial"
-                    event_level = "warning"
-                    event_message = (
-                        "Agent task reattach failed, but partial custom agent evidence was recovered."
-                        if run.agent_type == "custom"
-                        else "Agent task reattach failed, but partial Explorer evidence was recovered."
-                    )
-                    payload = {"error": str(exc), "status": run.status, "failure_reason": recovered.get("failure_reason")}
-                else:
-                    run.progress = {
-                        **(run.progress or {}),
-                        "phase": "retrying",
-                        "status": run.status,
-                        "message": f"Agent task reattach failed and will be retried by Temporal: {exc}",
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                    event_type = "retry"
-                    event_level = "warning"
-                    event_message = f"Agent task reattach failed; Temporal will retry if attempts remain: {exc}"
-                    payload = {"error": str(exc), "status": run.status, "retryable": True}
-                session.add(run)
-                session.commit()
-                create_agent_run_event(
-                    run_id=run.id,
-                    agent_task_id=agent_task_id,
-                    event_type=event_type,
-                    level=event_level,
-                    message=event_message,
-                    payload=payload,
-                    session=session,
-                )
-                if recovered is None:
-                    raise
-            return _run_payload(run)
+        recovered = _handle_agent_task_reattach_failure(run_id, agent_task_id, exc)
+        if recovered is None:
+            raise
+        return recovered
 
     with Session(engine) as session:
         run = session.get(AgentRun, run_id)
@@ -282,46 +249,7 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
                     if isinstance(value, list):
                         tool_calls = value
                         break
-            try:
-                from orchestrator.services.agent_run_finalizer import AgentRunFinalizer
-
-                finalized = AgentRunFinalizer().finalize(
-                    run_id=run_id,
-                    agent_type=run.agent_type,
-                    config=run.config,
-                    raw_model_output=result_text or "",
-                    tool_calls=tool_calls,
-                    runtime_diagnostics={
-                        "source": "temporal_reattach",
-                        "agent_task_id": agent_task_id,
-                        "task_telemetry": task_telemetry if isinstance(task_telemetry, dict) else {},
-                    },
-                )
-                run.status = finalized.status
-                run.result = finalized.result
-            except Exception as finalizer_error:
-                run.status = PARTIAL_STATUS if result_text else "failed"
-                run.result = {
-                    "summary": (result_text or str(finalizer_error))[:500],
-                    "output": result_text or "",
-                    "contract_status": "partial" if result_text else "invalid",
-                    "repair_attempts": [
-                        {
-                            "attempt": 0,
-                            "strategy": "agent_run_finalizer",
-                            "status": "failed",
-                            "error": str(finalizer_error),
-                        }
-                    ],
-                    "contract_warnings": ["Agent output finalization failed."],
-                    "diagnostics": {
-                        "finalizer": {
-                            "source": "temporal_reattach",
-                            "agent_task_id": agent_task_id,
-                            "error": str(finalizer_error),
-                        }
-                    },
-                }
+            _finalize_reattached_agent_task(run, run_id, agent_task_id, result_text or "", tool_calls, task_telemetry)
             run.completed_at = datetime.utcnow()
             run.progress = {
                 **(run.progress or {}),
@@ -346,6 +274,136 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
                 session=session,
             )
         return _run_payload(run)
+
+
+def _recover_agent_task_reattach_failure(run: AgentRun, run_id: str, exc: Exception) -> dict[str, Any] | None:
+    if run.agent_type == "custom":
+        try:
+            return _recover_custom_agent_partial_result(run, exc)
+        except Exception:
+            return None
+    if run.agent_type == "exploratory":
+        try:
+            if _exploratory_result_has_usable_evidence(run.result):
+                return _merge_agent_failure_into_result(
+                    run.result,
+                    exc,
+                    failure_reason="reattach_failed_after_evidence",
+                )
+            return _recover_exploratory_partial_result(run_id, run.config, exc)
+        except Exception:
+            return None
+    return None
+
+
+def _handle_agent_task_reattach_failure(
+    run_id: str,
+    agent_task_id: str,
+    exc: Exception,
+) -> dict[str, Any] | None:
+    with Session(engine) as session:
+        run = session.get(AgentRun, run_id)
+        if not run or run.status in TERMINAL_STATUSES:
+            return _run_payload(run)
+        recovered = _recover_agent_task_reattach_failure(run, run_id, exc)
+        if recovered is not None:
+            run.status = PARTIAL_STATUS
+            run.completed_at = datetime.utcnow()
+            run.result = recovered
+            run.progress = {
+                **(run.progress or {}),
+                "phase": PARTIAL_STATUS,
+                "status": PARTIAL_STATUS,
+                "message": recovered.get("summary")
+                or (
+                    "Recovered partial custom agent evidence after task reattach failed."
+                    if run.agent_type == "custom"
+                    else "Recovered partial Explorer evidence after task reattach failed."
+                ),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            event_type = "partial"
+            event_level = "warning"
+            event_message = (
+                "Agent task reattach failed, but partial custom agent evidence was recovered."
+                if run.agent_type == "custom"
+                else "Agent task reattach failed, but partial Explorer evidence was recovered."
+            )
+            event_payload = {"error": str(exc), "status": run.status, "failure_reason": recovered.get("failure_reason")}
+        else:
+            run.progress = {
+                **(run.progress or {}),
+                "phase": "retrying",
+                "status": run.status,
+                "message": f"Agent task reattach failed and will be retried by Temporal: {exc}",
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            event_type = "retry"
+            event_level = "warning"
+            event_message = f"Agent task reattach failed; Temporal will retry if attempts remain: {exc}"
+            event_payload = {"error": str(exc), "status": run.status, "retryable": True}
+        session.add(run)
+        session.commit()
+        create_agent_run_event(
+            run_id=run.id,
+            agent_task_id=agent_task_id,
+            event_type=event_type,
+            level=event_level,
+            message=event_message,
+            payload=event_payload,
+            session=session,
+        )
+        return _run_payload(run) if recovered is not None else None
+
+
+def _finalize_reattached_agent_task(
+    run: AgentRun,
+    run_id: str,
+    agent_task_id: str,
+    result_text: str,
+    tool_calls: list[Any],
+    task_telemetry: Any,
+) -> None:
+    try:
+        from orchestrator.services.agent_run_finalizer import AgentRunFinalizer
+
+        finalized = AgentRunFinalizer().finalize(
+            run_id=run_id,
+            agent_type=run.agent_type,
+            config=run.config,
+            raw_model_output=result_text,
+            tool_calls=tool_calls,
+            runtime_diagnostics={
+                "source": "temporal_reattach",
+                "agent_task_id": agent_task_id,
+                "task_telemetry": task_telemetry if isinstance(task_telemetry, dict) else {},
+            },
+        )
+        run.status = finalized.status
+        run.result = finalized.result
+    except Exception as finalizer_error:
+        run.status = PARTIAL_STATUS if result_text else "failed"
+        run.result = {
+            "summary": (result_text or str(finalizer_error))[:500],
+            "output": result_text,
+            "contract_status": "partial" if result_text else "invalid",
+            "repair_attempts": [
+                {
+                    "attempt": 0,
+                    "strategy": "agent_run_finalizer",
+                    "status": "failed",
+                    "error": str(finalizer_error),
+                }
+            ],
+            "contract_warnings": ["Agent output finalization failed."],
+            "diagnostics": {
+                "finalizer": {
+                    "source": "temporal_reattach",
+                    "agent_task_id": agent_task_id,
+                    "error": str(finalizer_error),
+                }
+            },
+        }
 
 
 def set_agent_run_control_status(payload: dict[str, Any]) -> dict[str, Any]:

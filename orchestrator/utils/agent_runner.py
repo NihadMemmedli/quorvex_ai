@@ -2258,6 +2258,50 @@ class AgentRunner:
             browser_slot_parent_run_id,
         )
 
+    def _queue_task_kwargs(
+        self,
+        *,
+        prompt: str,
+        timeout: int,
+        owner_metadata: tuple[str | None, str | None, str | None, str | None, str | None],
+    ) -> dict[str, Any]:
+        (
+            owner_type,
+            owner_id,
+            owner_label,
+            browser_slot_parent_owner_type,
+            browser_slot_parent_run_id,
+        ) = owner_metadata
+        return {
+            "prompt": prompt,
+            "timeout_seconds": timeout,
+            "agent_type": "AgentRunner",
+            "operation_type": "run",
+            "cwd": str(self.cwd) if self.cwd else os.getcwd(),
+            "env_vars": self._collect_api_env_vars(),
+            "allowed_tools": self.allowed_tools,
+            "tools": self._effective_tools(),
+            "disallowed_tools": self.disallowed_tools,
+            "permission_mode": self._effective_permission_mode(),
+            "strict_mcp_config": self.strict_mcp_config,
+            "max_budget_usd": self.max_budget_usd,
+            "task_budget": self.task_budget,
+            "include_hook_events": self.include_hook_events,
+            "include_partial_messages": self.include_partial_messages,
+            "output_format": self.output_format,
+            "resume_session_id": self.resume_session_id,
+            "continue_conversation": self.continue_conversation,
+            "max_turns": self.max_turns,
+            "fallback_model": self.fallback_model,
+            "betas": self.betas,
+            "owner_type": owner_type,
+            "owner_id": owner_id,
+            "owner_label": owner_label,
+            "browser_slot_parent_owner_type": browser_slot_parent_owner_type,
+            "browser_slot_parent_run_id": browser_slot_parent_run_id,
+            "requires_live_browser": self.requires_live_browser,
+        }
+
     async def _run_via_queue(self, prompt: str, timeout: int) -> AgentResult:
         """
         Run agent via Redis queue (executed by separate worker process).
@@ -2316,42 +2360,13 @@ class AgentRunner:
             logger.info(f"Enqueueing task via agent queue (timeout={timeout}s)")
             print("   📤 Enqueueing agent task...", flush=True)
 
-            (
-                owner_type,
-                owner_id,
-                owner_label,
-                browser_slot_parent_owner_type,
-                browser_slot_parent_run_id,
-            ) = self._queue_owner_metadata()
-
+            owner_metadata = self._queue_owner_metadata()
             task_id = await queue.enqueue_task(
-                prompt=prompt,
-                timeout_seconds=timeout,
-                agent_type="AgentRunner",
-                operation_type="run",
-                cwd=str(self.cwd) if self.cwd else os.getcwd(),
-                env_vars=self._collect_api_env_vars(),
-                allowed_tools=self.allowed_tools,
-                tools=self._effective_tools(),
-                disallowed_tools=self.disallowed_tools,
-                permission_mode=self._effective_permission_mode(),
-                strict_mcp_config=self.strict_mcp_config,
-                max_budget_usd=self.max_budget_usd,
-                task_budget=self.task_budget,
-                include_hook_events=self.include_hook_events,
-                include_partial_messages=self.include_partial_messages,
-                output_format=self.output_format,
-                resume_session_id=self.resume_session_id,
-                continue_conversation=self.continue_conversation,
-                max_turns=self.max_turns,
-                fallback_model=self.fallback_model,
-                betas=self.betas,
-                owner_type=owner_type,
-                owner_id=owner_id,
-                owner_label=owner_label,
-                browser_slot_parent_owner_type=browser_slot_parent_owner_type,
-                browser_slot_parent_run_id=browser_slot_parent_run_id,
-                requires_live_browser=self.requires_live_browser,
+                **self._queue_task_kwargs(
+                    prompt=prompt,
+                    timeout=timeout,
+                    owner_metadata=owner_metadata,
+                )
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")

@@ -98,6 +98,10 @@ from orchestrator.services.workflow_runner import (
     workflow_step_catalog,
 )
 from orchestrator.services.workflow_step_registry import WORKFLOW_TEMPLATES, sync_builtin_workflow_step_types
+from orchestrator.workflows.custom_workflow_temporal import (
+    custom_workflow_step_activity_id,
+    custom_workflow_step_activity_payload,
+)
 
 
 def _ensure_tables() -> None:
@@ -1219,6 +1223,31 @@ def test_prepare_next_workflow_step_updates_run_projection():
     assert run.current_step_index == 0
     assert run.heartbeat_at is not None
     assert step.status == "pending"
+
+
+def test_custom_workflow_step_activity_helpers_preserve_id_and_attempt_shape():
+    prepared = {
+        "step_id": 42,
+        "step_key": "run-agent",
+        "step_order": 1,
+        "step_label": "Run agent",
+        "step_type": "start_custom_agent",
+        "attempt_count": 1,
+    }
+
+    assert custom_workflow_step_activity_payload("run-123", prepared) == {
+        "run_id": "run-123",
+        "step_id": 42,
+        "step_key": "run-agent",
+        "step_order": 1,
+        "step_label": "Run agent",
+        "step_type": "start_custom_agent",
+        "attempt": 2,
+    }
+    assert (
+        custom_workflow_step_activity_id("run-123", prepared)
+        == "custom-workflow-step-run-123-1-run-agent-42-attempt-2"
+    )
 
 
 def test_handle_workflow_step_failure_returns_retry_action_with_backoff():
