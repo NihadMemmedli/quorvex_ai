@@ -34,6 +34,7 @@ from orchestrator.ai.prompt_registry import (
     build_prompt_metadata,
 )
 from orchestrator.memory import get_memory_manager
+from orchestrator.services.agent_prompt_runtime import create_agent_runner
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.utils.agent_tool_allowlists import (
     PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS,
@@ -495,42 +496,25 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         profile_name = "prd-live-planner" if target_url else "prd-only-planner"
         tool_config = get_agent_tool_config(profile_name, mcp_config_dir=self.cwd)
 
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
-            allowed_tools=tool_config.get("allowed_tools"),
-            tools=tool_config.get("tools"),
-            disallowed_tools=tool_config.get("disallowed_tools"),
+            tool_config=tool_config,
             log_tools=True,
-            on_tool_use=self.on_tool_use,
-            on_progress=self.on_progress,
-            on_task_enqueued=self.on_task_enqueued,
+            memory_agent_type="NativePlanner",
+            memory_source_type="prd",
+            memory_stage="native_planner",
+            inject_memory=False,
             session_dir=self.session_dir,
-            cwd=self.cwd,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
             requires_live_browser=bool(target_url),
-            model_tier=self.model_tier,
-            env_vars=self.env_vars,
             resume_session_id=getattr(self, "_planner_retry_session_id", None),
             continue_conversation=bool(
                 getattr(self, "_planner_retry_continue_conversation", False)
                 and not getattr(self, "_planner_retry_session_id", None)
             ),
             preserve_browser_on_failure=self.owner_type == "autopilot",
-            autopilot_retry_enabled=(
-                bool(getattr(self, "autopilot_retry_enabled", False))
-                or self.owner_type == "autopilot"
-            ),
-            autopilot_session_id=getattr(self, "autopilot_session_id", None)
-            or self.owner_id,
-            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_planner"),
-            autopilot_source_type=getattr(self, "autopilot_source_type", None),
-            autopilot_source_id=getattr(self, "autopilot_source_id", None),
-            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
-            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
-            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+            runner_cls=AgentRunner,
             tool_permission_guard=(
                 self._build_live_plan_permission_guard(target_url)
                 if target_url
@@ -1959,20 +1943,25 @@ Original task follows. Obey it, but correct the failure above.
 
     async def _query_repair_agent(self, prompt: str):
         timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "180"))
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
             allowed_tools=[],
             tools=[],
             log_tools=False,
+            memory_agent_type=None,
+            memory_source_type=None,
+            memory_stage=None,
             session_dir=None,
             cwd=self.cwd,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
             requires_live_browser=False,
-            model_tier=self.model_tier,
             inject_memory=False,
             capture_memory=False,
+            env_vars={},
+            autopilot_retry_enabled=False,
+            autopilot_agent_kind=None,
+            enable_autopilot_for_owner=False,
+            runner_cls=AgentRunner,
         )
         return await runner.run(prompt)
 

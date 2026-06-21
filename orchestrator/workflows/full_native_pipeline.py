@@ -41,6 +41,7 @@ from load_env import setup_claude_env
 
 setup_claude_env()
 
+from orchestrator.services.agent_prompt_runtime import create_agent_runner
 from orchestrator.services.handoff_manifest import (
     init_manifest,
     load_manifest,
@@ -270,7 +271,8 @@ root_cause: one concise sentence, or "none" if passed
 """
         timeout = int(os.environ.get("PLANNER_DRAFT_DEBUG_TIMEOUT_SECONDS", "180"))
         try:
-            runner = AgentRunner(
+            runner = create_agent_runner(
+                self,
                 timeout_seconds=timeout,
                 allowed_tools=build_allowed_tools(
                     ["Read"],
@@ -278,15 +280,11 @@ root_cause: one concise sentence, or "none" if passed
                     mcp_config_dir=run_dir,
                 ),
                 log_tools=True,
-                on_tool_use=getattr(self, "on_tool_use", None),
-                on_progress=getattr(self, "on_progress", None),
-                on_task_enqueued=getattr(self, "on_task_enqueued", None),
+                memory_agent_type=None,
+                memory_source_type=None,
+                memory_stage=None,
                 cwd=run_dir,
-                owner_type=getattr(self, "owner_type", None),
-                owner_id=getattr(self, "owner_id", None),
-                owner_label=getattr(self, "owner_label", None),
                 requires_live_browser=True,
-                model_tier=getattr(self, "model_tier", None),
                 env_vars=getattr(self, "test_data_env_vars", {}),
                 inject_memory=False,
                 capture_memory=False,
@@ -301,6 +299,7 @@ root_cause: one concise sentence, or "none" if passed
                 autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
                 autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
                 autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+                runner_cls=AgentRunner,
             )
             result = await runner.run(prompt)
             output = result.output or ""
@@ -2113,17 +2112,17 @@ Requirements:
             token_budget = max(1000, int(raw_budget))
         except ValueError:
             token_budget = 12000
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
             allowed_tools=[],
             tools=[],
             log_tools=False,
+            memory_agent_type=None,
+            memory_source_type=None,
+            memory_stage=None,
             cwd=getattr(getattr(self, "native_generator", None), "cwd", None),
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
             requires_live_browser=False,
-            model_tier=self.model_tier,
             task_budget={"total": token_budget},
             inject_memory=False,
             capture_memory=False,
@@ -2137,6 +2136,7 @@ Requirements:
             autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
             autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
             autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+            runner_cls=AgentRunner,
         )
         return await runner.run(prompt)
 

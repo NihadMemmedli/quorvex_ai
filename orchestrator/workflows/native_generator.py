@@ -21,13 +21,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _optional_env_float(name: str) -> float | None:
-    value = os.environ.get(name)
-    if not value:
-        return None
-    return float(value)
-
-
 # Add orchestrator to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -44,6 +37,7 @@ from orchestrator.ai.prompt_registry import (
     attach_prompt_metadata,
     build_prompt_metadata,
 )
+from orchestrator.services.agent_prompt_runtime import create_agent_runner
 from orchestrator.services.handoff_manifest import (
     record_artifact,
     record_attempt,
@@ -566,41 +560,24 @@ Rules:
         continue_conversation: bool = False,
     ) -> AgentResult:
         timeout = int(os.environ.get("GENERATOR_SCHEMA_RETRY_TIMEOUT_SECONDS", "180"))
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
             allowed_tools=[],
             tools=[],
             log_tools=False,
-            on_progress=self.on_progress,
-            on_task_enqueued=self.on_task_enqueued,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
-            model_tier=self.model_tier,
             memory_agent_type="NativeGenerator",
             memory_source_type="spec",
             memory_stage="native_generator_schema_retry",
             inject_memory=False,
             capture_memory=False,
-            env_vars=self.env_vars,
-            cwd=self.cwd,
             requires_live_browser=False,
             resume_session_id=None,
             continue_conversation=False,
             force_direct_execution=True,
-            autopilot_retry_enabled=(
-                bool(getattr(self, "autopilot_retry_enabled", False))
-                or self.owner_type == "autopilot"
-            ),
-            autopilot_session_id=getattr(self, "autopilot_session_id", None)
-            or self.owner_id,
-            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_schema_retry"),
-            autopilot_source_type=getattr(self, "autopilot_source_type", None),
-            autopilot_source_id=getattr(self, "autopilot_source_id", None),
-            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
-            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
-            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+            include_tool_use_callback=False,
+            runner_cls=AgentRunner,
         )
         return await runner.run(prompt)
 
@@ -933,44 +910,23 @@ changed_selectors: JSON array of selector changes, or []
         tool_config = get_agent_tool_config(
             "playwright-test-generator", mcp_config_dir=self.cwd
         )
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
-            allowed_tools=tool_config.get("allowed_tools"),
-            tools=tool_config.get("tools"),
-            disallowed_tools=tool_config.get("disallowed_tools"),
+            tool_config=tool_config,
             log_tools=True,
-            on_tool_use=self.on_tool_use,
-            on_progress=self.on_progress,
-            on_task_enqueued=self.on_task_enqueued,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
-            model_tier=self.model_tier,
-            max_budget_usd=_optional_env_float("GENERATOR_MAX_BUDGET_USD"),
+            max_budget_env="GENERATOR_MAX_BUDGET_USD",
             memory_agent_type="NativeGenerator",
             memory_source_type="spec",
             memory_stage="native_generator_self_heal",
             inject_memory=False,
             capture_memory=False,
-            env_vars=self.env_vars,
-            cwd=self.cwd,
             resume_session_id=None,
             continue_conversation=False,
             force_direct_execution=True,
             preserve_browser_on_failure=True,
-            autopilot_retry_enabled=(
-                bool(getattr(self, "autopilot_retry_enabled", False))
-                or self.owner_type == "autopilot"
-            ),
-            autopilot_session_id=getattr(self, "autopilot_session_id", None)
-            or self.owner_id,
-            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_self_heal"),
-            autopilot_source_type=getattr(self, "autopilot_source_type", None),
-            autopilot_source_id=getattr(self, "autopilot_source_id", None),
-            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
-            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
-            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+            runner_cls=AgentRunner,
         )
         return await runner.run(prompt)
 
@@ -1557,41 +1513,20 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
         tool_config = get_agent_tool_config(
             "playwright-test-generator", mcp_config_dir=self.cwd
         )
-        runner = AgentRunner(
+        runner = create_agent_runner(
+            self,
             timeout_seconds=timeout,
-            allowed_tools=tool_config.get("allowed_tools"),
-            tools=tool_config.get("tools"),
-            disallowed_tools=tool_config.get("disallowed_tools"),
+            tool_config=tool_config,
             log_tools=True,
-            on_tool_use=self.on_tool_use,
-            on_progress=self.on_progress,
-            on_task_enqueued=self.on_task_enqueued,
-            owner_type=self.owner_type,
-            owner_id=self.owner_id,
-            owner_label=self.owner_label,
-            model_tier=self.model_tier,
-            max_budget_usd=_optional_env_float("GENERATOR_MAX_BUDGET_USD"),
+            max_budget_env="GENERATOR_MAX_BUDGET_USD",
             memory_agent_type="NativeGenerator",
             memory_source_type="spec",
             memory_stage="native_generator",
             inject_memory=False,
-            env_vars=self.env_vars,
-            cwd=self.cwd,
             requires_live_browser=True,
             preserve_browser_on_failure=self.owner_type == "autopilot",
-            autopilot_retry_enabled=(
-                bool(getattr(self, "autopilot_retry_enabled", False))
-                or self.owner_type == "autopilot"
-            ),
-            autopilot_session_id=getattr(self, "autopilot_session_id", None)
-            or self.owner_id,
-            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation"),
-            autopilot_source_type=getattr(self, "autopilot_source_type", None),
-            autopilot_source_id=getattr(self, "autopilot_source_id", None),
-            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
-            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
-            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
+            runner_cls=AgentRunner,
         )
 
         result = await runner.run(prompt)

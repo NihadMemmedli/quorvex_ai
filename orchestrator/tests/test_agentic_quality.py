@@ -25,11 +25,15 @@ from orchestrator.workflows.agentic_quality import (
 
 memory_stub = types.ModuleType("orchestrator.memory")
 memory_stub.get_memory_manager = lambda *args, **kwargs: None
-sys.modules.setdefault("orchestrator.memory", memory_stub)
+previous_memory_module = sys.modules.get("orchestrator.memory")
+sys.modules["orchestrator.memory"] = memory_stub
 
 full_native_pipeline = importlib.import_module("orchestrator.workflows.full_native_pipeline")
 if sys.modules.get("orchestrator.memory") is memory_stub:
-    del sys.modules["orchestrator.memory"]
+    if previous_memory_module is None:
+        del sys.modules["orchestrator.memory"]
+    else:
+        sys.modules["orchestrator.memory"] = previous_memory_module
 
 FullNativePipeline = full_native_pipeline.FullNativePipeline
 PipelineTestResult = full_native_pipeline.TestResult
