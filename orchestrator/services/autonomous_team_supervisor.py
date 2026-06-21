@@ -16,6 +16,7 @@ from orchestrator.api.models_db import (
     ExecutionSettings,
 )
 from orchestrator.services import autonomous_activities as facade
+from orchestrator.services import autonomous_shared as shared
 
 
 def _whole_app_team_enabled(mission: AutonomousMission) -> bool:
@@ -34,12 +35,12 @@ def _team_roles(mission: AutonomousMission) -> list[str]:
         selected = [str(role).strip() for role in roles if str(role).strip()]
         if selected:
             return selected[:12]
-    return list(facade.WHOLE_APP_TEAM_ROLES)
+    return list(shared.WHOLE_APP_TEAM_ROLES)
 
 
 def _max_parallel_agents(mission: AutonomousMission) -> int:
-    configured = facade._config_int(mission.config, "max_parallel_agents", facade.DEFAULT_MAX_PARALLEL_AGENTS)
-    global_limit = facade.DEFAULT_MAX_PARALLEL_AGENTS
+    configured = facade._config_int(mission.config, "max_parallel_agents", shared.DEFAULT_MAX_PARALLEL_AGENTS)
+    global_limit = shared.DEFAULT_MAX_PARALLEL_AGENTS
     try:
         with Session(facade.engine) as session:
             settings = session.get(ExecutionSettings, 1)
@@ -116,7 +117,7 @@ def _run_parallel_team_supervisor(
             .order_by(col(AutonomousAgentWorkItem.priority).asc(), col(AutonomousAgentWorkItem.created_at).asc())
         ).all()
         pending = sorted(queued_candidates, key=facade._queued_work_item_sort_key)[
-            : min(facade.DEFAULT_WORK_ITEM_BATCH_SIZE, available_slots)
+            : min(shared.DEFAULT_WORK_ITEM_BATCH_SIZE, available_slots)
         ]
         for item in pending:
             if facade._enqueue_agent_work_item(session, mission, item):
@@ -124,7 +125,7 @@ def _run_parallel_team_supervisor(
             else:
                 summary["work_items_blocked"] += 1
 
-    summary["active_count"] = facade._count_work_items(session, mission.id, facade.WORK_ITEM_ACTIVE_STATUSES)
+    summary["active_count"] = facade._count_work_items(session, mission.id, shared.WORK_ITEM_ACTIVE_STATUSES)
     summary["running_count"] = facade._count_work_items(session, mission.id, {"running"})
     summary["completed_count"] = facade._count_work_items(session, mission.id, {"completed"})
     summary["blocked_count"] = facade._count_work_items(session, mission.id, {"blocked", "failed"})
@@ -182,7 +183,7 @@ def _role_objective(role: str, mission: AutonomousMission) -> str:
 def _update_mission_team_progress(session: Session, mission: AutonomousMission) -> None:
     mission.current_stage = "team_supervising"
     mission.next_action = facade._stage_next_action("team_supervising")
-    mission.last_heartbeat_at = facade._utcnow()
+    mission.last_heartbeat_at = shared._utcnow()
     mission.updated_at = mission.last_heartbeat_at
     session.add(mission)
     session.commit()

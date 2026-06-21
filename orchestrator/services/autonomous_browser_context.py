@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from orchestrator.api.models_db import AutonomousAgentWorkItem, AutonomousMission
 from orchestrator.services import autonomous_activities as facade
+from orchestrator.services import autonomous_shared as shared
 from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 
 
@@ -50,7 +51,7 @@ def _browser_owner_metadata(
         "child_agent_id": child_agent_id,
         "handoff_id": handoff_id or item_id,
         "role": facade._safe_model_attr(item, "role"),
-        "recorded_at": facade._utcnow().isoformat(),
+        "recorded_at": shared._utcnow().isoformat(),
     }
 
 
@@ -251,7 +252,7 @@ def _browser_action_names(allowed_tools: list[str]) -> list[str]:
         short_name = facade._short_tool_name(tool)
         if short_name.startswith("browser_") and short_name not in actions:
             actions.append(short_name)
-    return actions or list(facade.DEFAULT_BROWSER_ACTIONS)
+    return actions or list(shared.DEFAULT_BROWSER_ACTIONS)
 
 
 def _state_hash_from_browser_contract(contract: dict[str, Any] | None) -> str | None:
@@ -277,8 +278,8 @@ def _browser_lease_for_handoff(
     contract: dict[str, Any],
     owner_type: str = "autonomous_work_item",
 ) -> dict[str, Any]:
-    safe_mode = mode if mode in facade.BROWSER_LEASE_MODES else "isolated"
-    now = facade._utcnow()
+    safe_mode = mode if mode in shared.BROWSER_LEASE_MODES else "isolated"
+    now = shared._utcnow()
     last_snapshot_at = contract.get("last_snapshot_at") or contract.get("live_snapshot_at")
     return {
         "owner_type": owner_type,
@@ -366,7 +367,7 @@ def _browser_context_handoff(
         ],
         "risk_level": str((mission.config or {}).get("browser_risk_level") or "medium"),
         "allowed_browser_actions": facade._browser_action_names(allowed_tools),
-        "handoff_mode": mode if mode in facade.BROWSER_LEASE_MODES else "isolated",
+        "handoff_mode": mode if mode in shared.BROWSER_LEASE_MODES else "isolated",
         "omitted_browser_memory": memory_context.get("omitted") or {"states": 0, "frontier": 0},
     }
     contract["browser_lease"] = facade._browser_lease_for_handoff(
@@ -387,7 +388,7 @@ def _assert_browser_lease_available(
 ) -> None:
     if mode == "isolated":
         return
-    now = facade._utcnow()
+    now = shared._utcnow()
     running_items = session.exec(
         select(AutonomousAgentWorkItem).where(
             AutonomousAgentWorkItem.mission_id == mission_id,
@@ -429,7 +430,7 @@ def _validate_browser_handoff_mode(
         snapshot_dt = datetime.fromisoformat(str(snapshot_at))
     except ValueError as exc:
         raise RuntimeError("Sequential browser handoff has an invalid browser_snapshot timestamp.") from exc
-    if facade._utcnow() - snapshot_dt.replace(tzinfo=None) > timedelta(seconds=max_snapshot_age_seconds):
+    if shared._utcnow() - snapshot_dt.replace(tzinfo=None) > timedelta(seconds=max_snapshot_age_seconds):
         raise RuntimeError("Sequential browser handoff requires a browser_snapshot captured within the last 5 minutes.")
 
 

@@ -17,6 +17,7 @@ from orchestrator.api.models_db import (
     RtmEntry,
 )
 from orchestrator.services import autonomous_activities as facade
+from orchestrator.services import autonomous_shared as shared
 
 
 def _plan_whole_app_work_items(
@@ -26,7 +27,7 @@ def _plan_whole_app_work_items(
 ) -> int:
     """Create bounded, idempotent work items from canonical app state."""
     config = mission.config or {}
-    limit = max(1, min(facade._config_int(config, "planner_batch_size", facade.DEFAULT_WORK_ITEM_BATCH_SIZE), 20))
+    limit = max(1, min(facade._config_int(config, "planner_batch_size", shared.DEFAULT_WORK_ITEM_BATCH_SIZE), 20))
     created = 0
 
     requirements = session.exec(
