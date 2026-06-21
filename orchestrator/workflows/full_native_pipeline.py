@@ -92,6 +92,53 @@ class TestResult:
     error_summary: str = ""
 
 
+@dataclass
+class _NativeRunContext:
+    """Internal state shared across browser native pipeline stages."""
+
+    spec_path: str
+    spec_file: Path
+    run_dir: Path
+    browser: str
+    hybrid_healing: bool
+    max_iterations: int
+    skip_planning: bool
+    existing_test_path: str | None
+    force_api: bool
+    handoff_manifest_path: Path
+    spec_content: str
+    raw_included_spec_content: str
+    resolved_spec_content: str
+    target_url: str
+    auth_context: dict[str, Any]
+    test_data_context: dict[str, Any]
+    credentials: dict[str, str] | None
+    login_url: str | None
+    run_id: str | None
+    spec_type: SpecType
+
+
+@dataclass
+class _NativeRunPreparation:
+    context: _NativeRunContext | None = None
+    result: dict[str, Any] | None = None
+
+
+@dataclass
+class _BrowserPlanningStageResult:
+    plan_path: Path | None = None
+    planner_draft_script_path: Path | None = None
+    result: dict[str, Any] | None = None
+
+
+@dataclass
+class _BrowserGenerationStageResult:
+    test_path: Path | None = None
+    design: dict[str, Any] | None = None
+    critic: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+
+
 class FullNativePipeline:
     """
     Unified native pipeline using browser at every stage.
@@ -375,6 +422,103 @@ root_cause: one concise sentence, or "none" if passed
         Returns:
             Dict with pipeline results
         """
+        preparation = self._prepare_native_run(
+            spec_path=spec_path,
+            run_dir=run_dir,
+            browser=browser,
+            hybrid_healing=hybrid_healing,
+            max_iterations=max_iterations,
+            skip_planning=skip_planning,
+            existing_test_path=existing_test_path,
+            force_api=force_api,
+            storage_state_path=storage_state_path,
+            browser_auth_context=browser_auth_context,
+        )
+        if preparation.result is not None:
+            return preparation.result
+
+        ctx = preparation.context
+        if ctx is None:
+            return {
+                "success": False,
+                "error": "Native run preparation did not produce context",
+                "stage": "setup",
+            }
+
+        if ctx.spec_type == SpecType.API:
+            return await self._run_api_pipeline(
+                spec_path=ctx.spec_path,
+                spec_content=ctx.resolved_spec_content,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                target_url=ctx.target_url,
+                hybrid_healing=ctx.hybrid_healing,
+                max_iterations=ctx.max_iterations,
+                handoff_manifest_path=ctx.handoff_manifest_path,
+            )
+
+        if ctx.spec_type == SpecType.MIXED:
+            logger.info("Mixed browser + API spec detected")
+            logger.info(
+                "   Browser steps will use page fixture, API steps will use request fixture"
+            )
+
+        if ctx.existing_test_path:
+            return await self._run_healing_only_mode(ctx)
+
+        try:
+            (ctx.run_dir / "status.txt").write_text("running")
+
+            planning = await self._run_browser_planning_stage(ctx)
+            if planning.result is not None:
+                return planning.result
+
+            cleanup_orphaned_browsers()
+
+            generation = await self._run_browser_generation_stage(
+                ctx,
+                plan_path=planning.plan_path,
+                planner_draft_script_path=planning.planner_draft_script_path,
+            )
+            if generation.result is not None:
+                return generation.result
+            if generation.test_path is None:
+                return {
+                    "success": False,
+                    "error": "Native generator did not return a test path",
+                    "stage": "generation",
+                }
+
+            return await self._run_initial_test_or_heal(
+                ctx,
+                test_path=generation.test_path,
+                plan_path=planning.plan_path,
+                design=generation.design,
+                critic=generation.critic,
+            )
+
+        except Exception as e:
+            logger.error(f"Pipeline error: {e}", exc_info=True)
+            cleanup_orphaned_browsers()
+            (ctx.run_dir / "status.txt").write_text("error")
+            self._write_pipeline_error(ctx.run_dir, str(e), "exception")
+            self._publish_agentic_summary(ctx.run_dir)
+            return {"success": False, "error": str(e), "stage": "exception"}
+
+    def _prepare_native_run(
+        self,
+        *,
+        spec_path: str,
+        run_dir: Path,
+        browser: str,
+        hybrid_healing: bool,
+        max_iterations: int,
+        skip_planning: bool,
+        existing_test_path: str | None,
+        force_api: bool,
+        storage_state_path: str | None,
+        browser_auth_context: dict[str, Any] | None,
+    ) -> _NativeRunPreparation:
         run_dir.mkdir(parents=True, exist_ok=True)
         handoff_manifest_path = init_manifest(run_dir, pipeline_type="browser")
         record_stage(
@@ -438,21 +582,25 @@ root_cause: one concise sentence, or "none" if passed
                 credential_resolution_status="missing",
                 failure_category="test_data",
             )
-            return {
-                "success": False,
-                "error": error_msg,
-                "stage": "test_data_resolution",
-                "missing_test_data": missing_test_data,
-            }
+            return _NativeRunPreparation(
+                result={
+                    "success": False,
+                    "error": error_msg,
+                    "stage": "test_data_resolution",
+                    "missing_test_data": missing_test_data,
+                }
+            )
+
         fixture_file = self._write_test_data_fixture_file(run_dir, test_data_context)
         self._apply_test_data_execution_context(test_data_context)
         self._log_test_data_fixture_context(test_data_context, fixture_file)
         self._write_run_metrics(
             run_dir,
-            credential_resolution_status="resolved" if (test_data_context or {}).get("refs") else "not_required",
+            credential_resolution_status="resolved"
+            if (test_data_context or {}).get("refs")
+            else "not_required",
         )
 
-        # Extract URL from spec (resolves @include directives first)
         target_url = self._extract_url(spec_content, spec_path)
         if not target_url:
             generated_from = re.search(r"Generated from:\s*`?([^`\n]+)`?", spec_content)
@@ -466,18 +614,16 @@ root_cause: one concise sentence, or "none" if passed
             else:
                 error_msg = "No target URL found in spec (checked includes too)"
             logger.error(error_msg)
-            logger.error(
-                "Note: @include templates are resolved when searching for URLs"
-            )
-            # Write status file so the API wrapper can update DB
+            logger.error("Note: @include templates are resolved when searching for URLs")
             (run_dir / "status.txt").write_text("error")
-            return {
-                "success": False,
-                "error": error_msg,
-                "stage": "url_extraction",
-            }
+            return _NativeRunPreparation(
+                result={
+                    "success": False,
+                    "error": error_msg,
+                    "stage": "url_extraction",
+                }
+            )
 
-        # Resolve includes for the full spec content
         resolved_spec_content = self._resolve_includes(spec_content, spec_path)
 
         logger.info("=" * 80)
@@ -490,13 +636,11 @@ root_cause: one concise sentence, or "none" if passed
             f"   Healing Mode: {'Hybrid (Native -> Ralph)' if hybrid_healing else 'Native Only'}"
         )
 
-        # Initialize progress reporter for real-time UI updates
         run_id = extract_run_id_from_path(run_dir)
         self._memory_run_id = run_id
         if run_id:
             init_progress_reporter(run_id)
 
-        # Save both original and resolved spec to run dir
         (run_dir / "spec.md").write_text(spec_content)
         (run_dir / "spec_resolved.md").write_text(resolved_spec_content)
         record_artifact(
@@ -520,7 +664,6 @@ root_cause: one concise sentence, or "none" if passed
             validation_status="valid",
         )
 
-        # Extract credentials before @testdata directives are rendered into masked markdown.
         credentials = (
             (test_data_context or {}).get("login_credentials")
             or self._extract_credentials(spec_content)
@@ -528,7 +671,6 @@ root_cause: one concise sentence, or "none" if passed
         )
         login_url = self._extract_login_url(resolved_spec_content, target_url)
 
-        # --- DETECT SPEC TYPE ---
         spec_type = SpecType.STANDARD
         try:
             spec_type = SpecDetector.detect_spec_type(spec_file)
@@ -537,839 +679,71 @@ root_cause: one concise sentence, or "none" if passed
         if force_api:
             spec_type = SpecType.API
 
-        # --- API TEST PIPELINE ---
-        if spec_type == SpecType.API:
-            return await self._run_api_pipeline(
+        return _NativeRunPreparation(
+            context=_NativeRunContext(
                 spec_path=spec_path,
-                spec_content=resolved_spec_content,
+                spec_file=spec_file,
                 run_dir=run_dir,
                 browser=browser,
-                target_url=target_url,
                 hybrid_healing=hybrid_healing,
                 max_iterations=max_iterations,
+                skip_planning=skip_planning,
+                existing_test_path=existing_test_path,
+                force_api=force_api,
                 handoff_manifest_path=handoff_manifest_path,
-            )
-
-        # --- MIXED TEST PIPELINE ---
-        if spec_type == SpecType.MIXED:
-            logger.info("Mixed browser + API spec detected")
-            logger.info(
-                "   Browser steps will use page fixture, API steps will use request fixture"
-            )
-            # Mixed specs go through the normal browser pipeline with a flag
-            # The generator handles [API] prefixed steps specially
-
-        # --- HEALING-ONLY MODE ---
-        # When existing_test_path is provided, skip Stages 1-2 and go directly to healing
-        if existing_test_path:
-            try:
-                logger.info("Healing existing test (skipping planning/generation)...")
-                report_progress("testing", "Running existing test...")
-
-                test_path = Path(existing_test_path)
-                if not test_path.exists():
-                    error_msg = f"Existing test file not found: {existing_test_path}"
-                    (run_dir / "status.txt").write_text("error")
-                    self._write_pipeline_error(run_dir, error_msg, "healing_setup")
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "stage": "healing_setup",
-                    }
-
-                # Create export.json for dashboard
-                export_data = {
-                    "testFilePath": str(test_path),
-                    "code": test_path.read_text(),
-                    "dependencies": ["@playwright/test"],
-                    "notes": ["Healing existing test (skipped planning/generation)"],
-                }
-                (run_dir / "export.json").write_text(json.dumps(export_data, indent=2))
-
-                # Stage 3: Run existing test
-                logger.info("Stage 3: Running existing test...")
-
-                result = self._run_test(str(test_path), str(run_dir), browser)
-
-                if result.passed:
-                    logger.info("Test PASSED!")
-                    stability_result = await self._verify_stability_or_harden(
-                        test_path=test_path,
-                        run_dir=run_dir,
-                        browser=browser,
-                        success_stage="completed",
-                        attempts=0,
-                    )
-                    if stability_result:
-                        return stability_result
-                    (run_dir / "status.txt").write_text("passed")
-                    self._publish_agentic_summary(run_dir)
-                    return {
-                        "success": True,
-                        "test_path": str(test_path),
-                        "attempts": 0,
-                        "stage": "completed",
-                    }
-
-                logger.error(f"Test FAILED: {result.error_summary}")
-                diagnosis = self._run_failure_triage(
-                    test_path=test_path,
-                    run_dir=run_dir,
-                    result=result,
-                    design=None,
-                    critic=None,
-                )
-                if not diagnosis.get("heal_allowed", True):
-                    logger.error(
-                        "Failure triage marked this failure as non-healable; skipping healing"
-                    )
-                    (run_dir / "status.txt").write_text("failed")
-                    self._publish_agentic_summary(run_dir)
-                    return {
-                        "success": False,
-                        "test_path": str(test_path),
-                        "attempts": 0,
-                        "stage": "triage_blocked_healing",
-                        "diagnosis": diagnosis,
-                    }
-
-                # Stage 4: Healing
-                if hybrid_healing:
-                    return await self._hybrid_healing(
-                        test_path=test_path,
-                        run_dir=run_dir,
-                        browser=browser,
-                        max_iterations=max_iterations,
-                        spec_path=spec_path,
-                    )
-                else:
-                    return await self._native_healing(
-                        test_path=test_path,
-                        run_dir=run_dir,
-                        browser=browser,
-                        result=result,
-                        diagnosis=diagnosis,
-                        plan_path=None,
-                        handoff_manifest_path=handoff_manifest_path,
-                    )
-            except Exception as e:
-                error_msg = f"Healing-only pipeline crashed: {e}"
-                logger.error(error_msg, exc_info=True)
-                try:
-                    (run_dir / "status.txt").write_text("error")
-                    self._write_pipeline_error(run_dir, error_msg, "healing")
-                except Exception:
-                    pass
-                return {"success": False, "error": error_msg, "stage": "healing"}
-
-        try:
-            # Mark pipeline as running
-            (run_dir / "status.txt").write_text("running")
-
-            # Stage 1: Native Planning with browser exploration
-            plan_path: Path | None = None
-            planner_draft_script_path: Path | None = None
-            if not skip_planning:
-                logger.info("Stage 1: Native Planning (browser exploration)...")
-                report_progress("planning", "Exploring application structure...")
-                record_stage(
-                    handoff_manifest_path,
-                    "planner",
-                    status="running",
-                    metadata={"target_url": target_url, "login_url": login_url},
-                )
-                record_consumption(
-                    handoff_manifest_path,
-                    "planner",
-                    "resolved_spec",
-                    status="used",
-                    metadata={"path": str(run_dir / "spec_resolved.md")},
-                )
-
-                # Use resolved spec for planning so planner sees included templates
-                resolved_spec_path = run_dir / "spec_resolved.md"
-                try:
-                    plan_path = await self._run_native_planner(
-                        spec_path=str(resolved_spec_path),
-                        run_dir=run_dir,
-                        target_url=target_url,
-                        login_url=login_url,
-                        credentials=credentials,
-                        auth_context=auth_context,
-                    )
-                except SpecGenerationError as exc:
-                    error_msg = str(exc)
-                    failure_category = (
-                        exc.diagnostics.get("failure_category")
-                        if isinstance(exc.diagnostics, dict)
-                        else None
-                    ) or "planner_validation"
-                    logger.error("Native planner failed validation: %s", error_msg)
-                    planner_result = getattr(self.native_planner, "last_agent_result", None)
-                    record_attempt(
-                        handoff_manifest_path,
-                        "planner",
-                        stage_attempt=1,
-                        status="failed",
-                        agent_session_id=getattr(planner_result, "session_id", None),
-                        executor_mode="queue_or_direct",
-                        model_tier=getattr(self.native_planner, "model_tier", None),
-                        timeout_seconds=int(os.environ.get("PLANNER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
-                        error_type=getattr(planner_result, "error_type", None) or failure_category,
-                        tool_call_summary={
-                            "count": len(getattr(planner_result, "tool_calls", []) or []),
-                            "tools": [
-                                getattr(call, "name", None)
-                                for call in (getattr(planner_result, "tool_calls", []) or [])
-                            ],
-                        },
-                        metadata={"diagnostics": exc.diagnostics},
-                    )
-                    (run_dir / "status.txt").write_text("error")
-                    self._write_pipeline_error(
-                        run_dir,
-                        error_msg,
-                        "runtime_failed" if failure_category == "runtime_failed" else "planning",
-                        {"planner_diagnostics": exc.diagnostics},
-                    )
-                    record_stage(
-                        handoff_manifest_path,
-                        "planner",
-                        status="failed",
-                        failure_reason=error_msg,
-                        metadata={"diagnostics": exc.diagnostics},
-                    )
-                    self._write_run_metrics(
-                        run_dir,
-                        planner_success=False,
-                        failure_category=failure_category,
-                    )
-                    self._publish_agentic_summary(run_dir)
-                    cleanup_orphaned_browsers()
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "stage": "runtime_failed"
-                        if failure_category == "runtime_failed"
-                        else "planning",
-                        "planner_diagnostics": exc.diagnostics,
-                    }
-
-                if plan_path and plan_path.exists():
-                    logger.info(f"Plan created: {plan_path}")
-                    try:
-                        plan_text = plan_path.read_text()
-                    except OSError:
-                        plan_text = ""
-                    run_plan_md_path = run_dir / "plan.md"
-                    if plan_text:
-                        run_plan_md_path.write_text(plan_text)
-                    record_artifact(
-                        handoff_manifest_path,
-                        "planner_plan",
-                        run_plan_md_path if run_plan_md_path.exists() else plan_path,
-                        kind="planner_markdown_plan",
-                        producer_stage="planner",
-                        required=True,
-                        consumers=["generator", "healer"],
-                        validation_status="valid",
-                        metadata={"source_path": str(plan_path)},
-                    )
-                    raw_draft_path = getattr(
-                        self.native_planner, "last_draft_script_path", None
-                    )
-                    if raw_draft_path:
-                        candidate_draft_path = Path(raw_draft_path)
-                        if candidate_draft_path.exists():
-                            planner_draft_script_path = candidate_draft_path
-                            logger.info(
-                                "Planner draft script created: %s",
-                                planner_draft_script_path,
-                            )
-                            draft_debug = await self._debug_validate_planner_draft_script(
-                                draft_path=planner_draft_script_path,
-                                run_dir=run_dir,
-                                browser=browser,
-                            )
-                            record_artifact(
-                                handoff_manifest_path,
-                                "planner_draft_script",
-                                planner_draft_script_path,
-                                kind="planner_draft_playwright",
-                                producer_stage="planner",
-                                required=True,
-                                consumers=["generator", "healer"],
-                                validation_status=(
-                                    "valid"
-                                    if draft_debug.get("status") == "passed"
-                                    else "debug_failed"
-                                ),
-                                metadata={"debug_validation": draft_debug},
-                            )
-                    planner_selectors = []
-                    planner_selectors = extract_plan_selectors(plan_text, limit=30) if plan_text else []
-                    evidence_summary_path = run_dir / "planner_evidence_summary.json"
-                    evidence_summary_path.write_text(
-                        json.dumps(
-                            {
-                                "plan_path": str(run_plan_md_path if run_plan_md_path.exists() else plan_path),
-                                "source_plan_path": str(plan_path),
-                                "planner_draft_script_path": str(planner_draft_script_path)
-                                if planner_draft_script_path
-                                else None,
-                                "selector_count": len(planner_selectors),
-                                "selectors": planner_selectors,
-                            },
-                            indent=2,
-                        )
-                    )
-                    record_artifact(
-                        handoff_manifest_path,
-                        "planner_evidence_summary",
-                        evidence_summary_path,
-                        kind="planner_evidence_summary",
-                        producer_stage="planner",
-                        required=False,
-                        consumers=["generator", "healer", "reporting"],
-                        validation_status="valid",
-                    )
-                    planner_result = getattr(self.native_planner, "last_agent_result", None)
-                    record_attempt(
-                        handoff_manifest_path,
-                        "planner",
-                        stage_attempt=1,
-                        status="passed",
-                        agent_session_id=getattr(planner_result, "session_id", None),
-                        executor_mode="queue_or_direct",
-                        model_tier=getattr(self.native_planner, "model_tier", None),
-                        timeout_seconds=int(os.environ.get("PLANNER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
-                        error_type=getattr(planner_result, "error_type", None),
-                        tool_call_summary={
-                            "count": len(getattr(planner_result, "tool_calls", []) or []),
-                            "tools": [
-                                getattr(call, "name", None)
-                                for call in (getattr(planner_result, "tool_calls", []) or [])
-                            ],
-                        },
-                        input_artifact_hashes=self._manifest_artifact_hashes(
-                            handoff_manifest_path,
-                            ["resolved_spec"],
-                        ),
-                        output_artifact_hash=self._file_sha256(
-                            run_plan_md_path if run_plan_md_path.exists() else plan_path
-                        ),
-                        metadata={
-                            "planner_draft_script_path": str(planner_draft_script_path)
-                            if planner_draft_script_path
-                            else None,
-                        },
-                    )
-                    record_stage(
-                        handoff_manifest_path,
-                        "planner",
-                        status="ready",
-                        metadata={
-                            "plan_path": str(run_plan_md_path if run_plan_md_path.exists() else plan_path),
-                            "source_plan_path": str(plan_path),
-                            "planner_draft_script_path": str(planner_draft_script_path)
-                            if planner_draft_script_path
-                            else None,
-                            "selector_count": len(planner_selectors),
-                        },
-                    )
-                    self._emit_handoff_event(
-                        "planner_handoff_ready",
-                        "Planner handoff artifacts are ready.",
-                        payload={
-                            "artifacts": self._manifest_artifact_payload(
-                                handoff_manifest_path,
-                                [
-                                    "planner_plan",
-                                    "planner_draft_script",
-                                    "planner_evidence_summary",
-                                ],
-                            ),
-                            "selector_count": len(planner_selectors),
-                        },
-                    )
-                    self._write_run_metrics(run_dir, planner_success=True)
-                else:
-                    logger.warning(
-                        "Planner didn't create a structured plan, continuing with original spec"
-                    )
-                    record_stage(
-                        handoff_manifest_path,
-                        "planner",
-                        status="skipped_or_missing",
-                        failure_reason="planner did not create a structured plan",
-                    )
-                    self._write_run_metrics(run_dir, planner_success=False)
-            else:
-                record_stage(
-                    handoff_manifest_path,
-                    "planner",
-                    status="skipped",
-                    metadata={"reason": "skip_planning"},
-                )
-
-            # Safety-net: clean up any orphaned browsers from planner stage
-            cleanup_orphaned_browsers()
-
-            logger.info("Agentic quality: analyzing test design...")
-            report_progress("planning", "Analyzing test design and flake risk...")
-            design = self.test_design_agent.analyze(
-                spec_content=resolved_spec_content,
+                spec_content=spec_content,
+                raw_included_spec_content=raw_included_spec_content,
+                resolved_spec_content=resolved_spec_content,
                 target_url=target_url,
-                credentials=credentials,
-                plan_path=plan_path,
-                run_dir=run_dir,
-            )
-            design_context = self.test_design_agent.condensed_context(design)
-            self._publish_agentic_summary(run_dir)
-
-            # Stage 2: Native Generation with live browser
-            logger.info("Stage 2: Native Generation (live browser)...")
-            report_progress("generating", "Creating test code with live browser...")
-            if not plan_path:
-                record_artifact(
-                    handoff_manifest_path,
-                    "planner_plan",
-                    run_dir / "plan.md",
-                    kind="planner_markdown_plan",
-                    producer_stage="planner",
-                    required=False,
-                    consumers=["generator", "healer"],
-                    validation_status="optional_missing",
-                    failure_reason="planning was skipped or did not produce a plan",
-                )
-            if not planner_draft_script_path:
-                record_artifact(
-                    handoff_manifest_path,
-                    "planner_draft_script",
-                    run_dir / "plan.draft.spec.ts",
-                    kind="planner_draft_playwright",
-                    producer_stage="planner",
-                    required=False,
-                    consumers=["generator", "healer"],
-                    validation_status="optional_missing",
-                    failure_reason="planning was skipped or did not produce a draft script",
-                )
-            record_stage(
-                handoff_manifest_path,
-                "generator",
-                status="running",
-                metadata={
-                    "target_url": target_url,
-                    "plan_path": str(plan_path) if plan_path else None,
-                    "planner_draft_script_path": str(planner_draft_script_path)
-                    if planner_draft_script_path
-                    else None,
-                },
-            )
-
-            # Use resolved spec for generation so all included content is visible
-            # But keep the original spec name for the output file
-            resolved_spec_path = run_dir / "spec_resolved.md"
-            original_spec_name = (
-                spec_file.stem
-            )  # e.g., "12-create-trip-with-minimal-information"
-            test_path = await self._run_native_generator(
-                spec_path=str(resolved_spec_path),
-                target_url=target_url,
-                output_name=original_spec_name,
-                run_dir=run_dir,
-                browser=browser,
-                design_context=design_context,
-                memory_run_id=getattr(self, "_memory_run_id", None),
                 auth_context=auth_context,
-                execution_credentials=credentials,
-                plan_path=plan_path,
-                planner_draft_script_path=planner_draft_script_path,
-                handoff_manifest_path=handoff_manifest_path,
+                test_data_context=test_data_context or {},
+                credentials=credentials,
+                login_url=login_url,
+                run_id=run_id,
+                spec_type=spec_type,
             )
+        )
 
-            if not test_path or not test_path.exists():
-                diagnostics = self._generator_failure_diagnostics()
-                error_msg = (
-                    diagnostics.get("last_agent_result", {}).get("error")
-                    or diagnostics.get("exception")
-                    or "Native generator failed to create test file"
-                )
-                generator_result = getattr(self.native_generator, "last_agent_result", None)
-                record_attempt(
-                    handoff_manifest_path,
-                    "generator",
-                    stage_attempt=1,
-                    status="failed",
-                    agent_session_id=getattr(generator_result, "session_id", None),
-                    executor_mode="queue_or_direct",
-                    model_tier=getattr(self.native_generator, "model_tier", None),
-                    timeout_seconds=int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
-                    error_type=getattr(generator_result, "error_type", None) or "no_generated_test",
-                    tool_call_summary={
-                        "count": len(getattr(generator_result, "tool_calls", []) or []),
-                        "tools": [
-                            getattr(call, "name", None)
-                            for call in (getattr(generator_result, "tool_calls", []) or [])
-                        ],
-                    },
-                    input_artifact_hashes=self._manifest_artifact_hashes(
-                        handoff_manifest_path,
-                        ["planner_plan", "planner_draft_script"],
-                    ),
-                    metadata=diagnostics,
-                )
-                (run_dir / "status.txt").write_text("error")
-                self._write_pipeline_error(run_dir, error_msg, "generation", diagnostics)
-                record_stage(
-                    handoff_manifest_path,
-                    "generator",
-                    status="failed",
-                    failure_reason=error_msg,
-                    metadata={
-                        **getattr(self.native_generator, "last_handoff_consumption", {}),
-                        **diagnostics,
-                    },
-                )
-                self._write_run_metrics(run_dir, generation_success=False)
-                self._publish_agentic_summary(run_dir)
-                self._attribute_memory_outcome(
-                    stage="native_generator",
-                    success=False,
-                    outcome_status="generation_failed",
-                    source_type="spec",
-                    source_id=str(resolved_spec_path),
-                    spec_path=str(resolved_spec_path),
-                )
-                return {"success": False, "error": error_msg, "stage": "generation"}
+    async def _run_healing_only_mode(self, ctx: _NativeRunContext) -> dict[str, Any]:
+        try:
+            logger.info("Healing existing test (skipping planning/generation)...")
+            report_progress("testing", "Running existing test...")
 
-            generation_repair_metadata: dict[str, Any] = {}
-            validation_error = self._validate_generated_test_file(
-                test_path=test_path,
-                run_dir=run_dir,
-                browser=browser,
-                test_type="browser",
-            )
-            generated_test_metadata = dict(
-                getattr(self.native_generator, "last_handoff_consumption", {}) or {}
-            )
-            generator_self_run = (
-                getattr(self.native_generator, "last_self_run_result", None) or {}
-            )
-            if generator_self_run:
-                generated_test_metadata["generator_self_run_status"] = (
-                    generator_self_run.get("final_status")
-                )
-                generated_test_metadata["generator_self_heal_attempts"] = getattr(
-                    self.native_generator, "last_self_heal_attempts", 0
-                )
-                if getattr(self.native_generator, "last_self_heal_artifact_path", None):
-                    generated_test_metadata["generator_self_heal_artifact"] = str(
-                        self.native_generator.last_self_heal_artifact_path
-                    )
-            record_artifact(
-                handoff_manifest_path,
-                "generated_test",
-                test_path,
-                kind="playwright_test",
-                producer_stage="generator",
-                required=True,
-                consumers=["test_run", "healer", "reporting"],
-                validation_status="pending_validation",
-                metadata=generated_test_metadata,
-            )
-            generator_result = getattr(self.native_generator, "last_agent_result", None)
-            record_attempt(
-                handoff_manifest_path,
-                "generator",
-                stage_attempt=1,
-                status="passed",
-                agent_session_id=getattr(generator_result, "session_id", None),
-                executor_mode="queue_or_direct",
-                model_tier=getattr(self.native_generator, "model_tier", None),
-                timeout_seconds=int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
-                error_type=getattr(generator_result, "error_type", None),
-                tool_call_summary={
-                    "count": len(getattr(generator_result, "tool_calls", []) or []),
-                    "tools": [
-                        getattr(call, "name", None)
-                        for call in (getattr(generator_result, "tool_calls", []) or [])
-                    ],
-                },
-                input_artifact_hashes=self._manifest_artifact_hashes(
-                    handoff_manifest_path,
-                    ["planner_plan", "planner_draft_script"],
-                ),
-                output_artifact_hash=self._file_sha256(test_path),
-                metadata=generated_test_metadata,
-            )
-            validation_status = validate_artifact(
-                handoff_manifest_path,
-                "generated_test",
-                validator=lambda _path: (validation_error is None, validation_error),
-            )
-            if validation_error:
-                generation_repair_metadata = await self._attempt_generation_format_repair(
-                    test_path=test_path,
-                    run_dir=run_dir,
-                    browser=browser,
-                    test_type="browser",
-                    original_validation_error=validation_error,
-                    spec_content=resolved_spec_content,
-                    spec_path=resolved_spec_path,
-                    target_url=target_url,
-                    plan_path=plan_path,
-                    planner_draft_script_path=planner_draft_script_path,
-                )
-                repair_artifact_path = generation_repair_metadata.get(
-                    "generation_repair_artifact_path"
-                )
-                if repair_artifact_path:
-                    record_artifact(
-                        handoff_manifest_path,
-                        "generation_repair_attempt",
-                        Path(str(repair_artifact_path)),
-                        kind="generation_repair_attempt",
-                        producer_stage="generator",
-                        required=False,
-                        consumers=["reporting"],
-                        validation_status="valid",
-                        metadata=generation_repair_metadata,
-                    )
-                if generation_repair_metadata.get("generation_repair_accepted"):
-                    record_artifact(
-                        handoff_manifest_path,
-                        "generated_test",
-                        test_path,
-                        kind="playwright_test",
-                        producer_stage="generator",
-                        required=True,
-                        consumers=["test_run", "healer", "reporting"],
-                        validation_status="pending_validation",
-                        metadata={
-                            **getattr(self.native_generator, "last_handoff_consumption", {}),
-                            **generation_repair_metadata,
-                        },
-                    )
-                    validation_error = self._validate_generated_test_file(
-                        test_path=test_path,
-                        run_dir=run_dir,
-                        browser=browser,
-                        test_type="browser",
-                    )
-                    validation_status = validate_artifact(
-                        handoff_manifest_path,
-                        "generated_test",
-                        validator=lambda _path: (validation_error is None, validation_error),
-                    )
-
-            if validation_error:
-                logger.error(validation_error)
-                (run_dir / "status.txt").write_text("error")
-                self._write_pipeline_error(
-                    run_dir,
-                    validation_error,
-                    "generation_validation",
-                    generation_repair_metadata,
-                )
-                self._write_run_metrics(
-                    run_dir,
-                    generation_success=False,
-                    failure_category="generation_validation",
-                    **generation_repair_metadata,
-                )
-                record_stage(
-                    handoff_manifest_path,
-                    "generator",
-                    status="failed",
-                    failure_reason=validation_error,
-                    metadata={
-                        **getattr(self.native_generator, "last_handoff_consumption", {}),
-                        "validation": validation_status,
-                    **generation_repair_metadata,
-                },
-            )
-                self._publish_agentic_summary(run_dir)
+            test_path = Path(str(ctx.existing_test_path))
+            if not test_path.exists():
+                error_msg = f"Existing test file not found: {ctx.existing_test_path}"
+                (ctx.run_dir / "status.txt").write_text("error")
+                self._write_pipeline_error(ctx.run_dir, error_msg, "healing_setup")
                 return {
                     "success": False,
-                    "error": validation_error,
-                    "stage": "generation_validation",
-                    **generation_repair_metadata,
+                    "error": error_msg,
+                    "stage": "healing_setup",
                 }
 
-            logger.info(f"Test generated: {test_path}")
-            record_stage(
-                handoff_manifest_path,
-                "generator",
-                status="ready",
-                metadata={
-                    **getattr(self.native_generator, "last_handoff_consumption", {}),
-                    "test_path": str(test_path),
-                    "validation": validation_status,
-                    **generation_repair_metadata,
-                },
-            )
-            self._emit_handoff_event(
-                "generator_handoff_consumed",
-                "Generator consumed planner handoff context.",
-                payload={
-                    "artifacts": self._manifest_artifact_payload(
-                        handoff_manifest_path,
-                        ["planner_plan", "planner_draft_script", "generated_test"],
-                    ),
-                    "consumption": getattr(self.native_generator, "last_handoff_consumption", {}),
-                    "validation": validation_status,
-                    "repair": generation_repair_metadata,
-                },
-            )
-            self._write_run_metrics(
-                run_dir,
-                generation_success=True,
-                generator_self_run_status=(
-                    getattr(self.native_generator, "last_self_run_result", {}) or {}
-                ).get("final_status"),
-                generator_self_heal_attempts=getattr(
-                    self.native_generator, "last_self_heal_attempts", 0
-                ),
-                **generation_repair_metadata,
-            )
-            self._attribute_memory_outcome(
-                stage="native_generator",
-                success=True,
-                outcome_status="test_generated",
-                source_type="spec",
-                source_id=str(resolved_spec_path),
-                spec_path=str(resolved_spec_path),
-                test_path=str(test_path),
-            )
-
-            logger.info("Agentic quality: reviewing generated test...")
-            report_progress("generating", "Reviewing generated test for flake risks...")
-            critic = self.test_critic_agent.review(
-                test_path=test_path, design=design, run_dir=run_dir
-            )
-            self._publish_agentic_summary(run_dir)
-
-            # Create export.json for dashboard
             export_data = {
                 "testFilePath": str(test_path),
                 "code": test_path.read_text(),
                 "dependencies": ["@playwright/test"],
-                "notes": ["Generated with Native Generator"],
+                "notes": ["Healing existing test (skipped planning/generation)"],
             }
-            (run_dir / "export.json").write_text(json.dumps(export_data, indent=2))
+            (ctx.run_dir / "export.json").write_text(json.dumps(export_data, indent=2))
 
-            # Safety-net: clean up any orphaned browsers from generator stage
-            cleanup_orphaned_browsers()
-
-            generator_self_run = (
-                getattr(self.native_generator, "last_self_run_result", None) or {}
-            )
-            if getattr(self.native_generator, "last_self_heal_passed", False):
-                logger.info("Skipping initial pipeline test run; generator self-run already passed.")
-                record_stage(
-                    handoff_manifest_path,
-                    "test_run",
-                    status="passed",
-                    metadata={
-                        "exit_code": 0,
-                        "source": "generator_self_run",
-                        "generator_self_run_status": generator_self_run.get("final_status"),
-                        "generator_self_heal_attempts": getattr(
-                            self.native_generator, "last_self_heal_attempts", 0
-                        ),
-                    },
-                )
-                self._write_run_metrics(
-                    run_dir,
-                    initial_run_passed=True,
-                    healing_started=False,
-                    healing_attempts=0,
-                    heal_rescued=False,
-                    generator_self_run_status=generator_self_run.get("final_status"),
-                    generator_self_heal_attempts=getattr(
-                        self.native_generator, "last_self_heal_attempts", 0
-                    ),
-                )
-                stability_result = await self._verify_stability_or_harden(
-                    test_path=test_path,
-                    run_dir=run_dir,
-                    browser=browser,
-                    success_stage="completed",
-                    attempts=getattr(self.native_generator, "last_self_heal_attempts", 0),
-                )
-                if stability_result:
-                    self._write_run_metrics(run_dir, stable_first_pass=False)
-                    return stability_result
-                self._record_passing_selectors(test_path)
-                (run_dir / "status.txt").write_text("passed")
-                self._write_run_metrics(run_dir, stable_first_pass=True)
-                self._publish_agentic_summary(run_dir)
-                return {
-                    "success": True,
-                    "test_path": str(test_path),
-                    "attempts": getattr(self.native_generator, "last_self_heal_attempts", 0),
-                    "stage": "completed",
-                    "generator_self_run": generator_self_run,
-                }
-
-            # Stage 3: Run test
-            logger.info("Stage 3: Running test...")
-            report_progress("testing", "Running generated test...")
-            record_stage(
-                handoff_manifest_path,
-                "test_run",
-                status="running",
-                metadata={"browser": browser, "test_path": str(test_path)},
-            )
-            record_consumption(
-                handoff_manifest_path,
-                "test_run",
-                "generated_test",
-                status="used",
-                metadata={"path": str(test_path)},
-            )
-
-            result = self._run_test(str(test_path), str(run_dir), browser)
+            logger.info("Stage 3: Running existing test...")
+            result = self._run_test(str(test_path), str(ctx.run_dir), ctx.browser)
 
             if result.passed:
-                logger.info("Test PASSED on first run!")
-                record_stage(
-                    handoff_manifest_path,
-                    "test_run",
-                    status="passed",
-                    metadata={"exit_code": result.exit_code},
-                )
-                self._write_run_metrics(
-                    run_dir,
-                    initial_run_passed=True,
-                    healing_started=False,
-                    healing_attempts=0,
-                    heal_rescued=False,
-                )
-                self._attribute_memory_outcome(
-                    stage="native_generator",
-                    success=True,
-                    outcome_status="first_run_passed",
-                    source_type="spec",
-                    source_id=str(resolved_spec_path),
-                    spec_path=str(resolved_spec_path),
-                    test_path=str(test_path),
-                )
+                logger.info("Test PASSED!")
                 stability_result = await self._verify_stability_or_harden(
                     test_path=test_path,
-                    run_dir=run_dir,
-                    browser=browser,
+                    run_dir=ctx.run_dir,
+                    browser=ctx.browser,
                     success_stage="completed",
                     attempts=0,
                 )
                 if stability_result:
-                    self._write_run_metrics(run_dir, stable_first_pass=False)
                     return stability_result
-                self._record_passing_selectors(test_path)
-                (run_dir / "status.txt").write_text("passed")
-                self._write_run_metrics(run_dir, stable_first_pass=True)
-                self._publish_agentic_summary(run_dir)
+                (ctx.run_dir / "status.txt").write_text("passed")
+                self._publish_agentic_summary(ctx.run_dir)
                 return {
                     "success": True,
                     "test_path": str(test_path),
@@ -1378,58 +752,19 @@ root_cause: one concise sentence, or "none" if passed
                 }
 
             logger.error(f"Test FAILED: {result.error_summary}")
-            failure_category = categorize_error(result.error_summary or result.output[-2000:])
-            record_stage(
-                handoff_manifest_path,
-                "test_run",
-                status="failed",
-                failure_reason=result.error_summary or result.output[-500:],
-                metadata={
-                    "exit_code": result.exit_code,
-                    "failure_category": failure_category,
-                },
-            )
-            self._emit_handoff_event(
-                "test_run_handoff_failed",
-                "Generated test failed and is ready for healer handoff.",
-                level="warning",
-                payload={
-                    "artifacts": self._manifest_artifact_payload(
-                        handoff_manifest_path,
-                        ["generated_test", "planner_plan", "planner_draft_script"],
-                    ),
-                    "failure_category": failure_category,
-                    "error_summary": result.error_summary,
-                },
-            )
-            self._write_run_metrics(
-                run_dir,
-                initial_run_passed=False,
-                stable_first_pass=False,
-                failure_category=failure_category,
-            )
-            self._attribute_memory_outcome(
-                stage="native_generator",
-                success=False,
-                outcome_status="first_run_failed",
-                source_type="spec",
-                source_id=str(resolved_spec_path),
-                spec_path=str(resolved_spec_path),
-                test_path=str(test_path),
-            )
             diagnosis = self._run_failure_triage(
                 test_path=test_path,
-                run_dir=run_dir,
+                run_dir=ctx.run_dir,
                 result=result,
-                design=design,
-                critic=critic,
+                design=None,
+                critic=None,
             )
             if not diagnosis.get("heal_allowed", True):
                 logger.error(
                     "Failure triage marked this failure as non-healable; skipping healing"
                 )
-                (run_dir / "status.txt").write_text("failed")
-                self._publish_agentic_summary(run_dir)
+                (ctx.run_dir / "status.txt").write_text("failed")
+                self._publish_agentic_summary(ctx.run_dir)
                 return {
                     "success": False,
                     "test_path": str(test_path),
@@ -1438,46 +773,896 @@ root_cause: one concise sentence, or "none" if passed
                     "diagnosis": diagnosis,
                 }
 
-            # Stage 4: Healing
-            if hybrid_healing:
-                healing_result = await self._hybrid_healing(
+            if ctx.hybrid_healing:
+                return await self._hybrid_healing(
                     test_path=test_path,
-                    run_dir=run_dir,
-                    browser=browser,
-                    max_iterations=max_iterations,
-                    spec_path=spec_path,
+                    run_dir=ctx.run_dir,
+                    browser=ctx.browser,
+                    max_iterations=ctx.max_iterations,
+                    spec_path=ctx.spec_path,
                 )
-            else:
-                healing_result = await self._native_healing(
-                    test_path=test_path,
-                    run_dir=run_dir,
-                    browser=browser,
-                    result=result,
-                    diagnosis=diagnosis,
-                    plan_path=plan_path,
-                    handoff_manifest_path=handoff_manifest_path,
+            return await self._native_healing(
+                test_path=test_path,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                result=result,
+                diagnosis=diagnosis,
+                plan_path=None,
+                handoff_manifest_path=ctx.handoff_manifest_path,
+            )
+        except Exception as e:
+            error_msg = f"Healing-only pipeline crashed: {e}"
+            logger.error(error_msg, exc_info=True)
+            try:
+                (ctx.run_dir / "status.txt").write_text("error")
+                self._write_pipeline_error(ctx.run_dir, error_msg, "healing")
+            except Exception:
+                pass
+            return {"success": False, "error": error_msg, "stage": "healing"}
+
+    async def _run_browser_planning_stage(
+        self, ctx: _NativeRunContext
+    ) -> _BrowserPlanningStageResult:
+        plan_path: Path | None = None
+        planner_draft_script_path: Path | None = None
+        if not ctx.skip_planning:
+            logger.info("Stage 1: Native Planning (browser exploration)...")
+            report_progress("planning", "Exploring application structure...")
+            record_stage(
+                ctx.handoff_manifest_path,
+                "planner",
+                status="running",
+                metadata={"target_url": ctx.target_url, "login_url": ctx.login_url},
+            )
+            record_consumption(
+                ctx.handoff_manifest_path,
+                "planner",
+                "resolved_spec",
+                status="used",
+                metadata={"path": str(ctx.run_dir / "spec_resolved.md")},
+            )
+
+            resolved_spec_path = ctx.run_dir / "spec_resolved.md"
+            try:
+                plan_path = await self._run_native_planner(
+                    spec_path=str(resolved_spec_path),
+                    run_dir=ctx.run_dir,
+                    target_url=ctx.target_url,
+                    login_url=ctx.login_url,
+                    credentials=ctx.credentials,
+                    auth_context=ctx.auth_context,
+                )
+            except SpecGenerationError as exc:
+                error_msg = str(exc)
+                failure_category = (
+                    exc.diagnostics.get("failure_category")
+                    if isinstance(exc.diagnostics, dict)
+                    else None
+                ) or "planner_validation"
+                logger.error("Native planner failed validation: %s", error_msg)
+                planner_result = getattr(self.native_planner, "last_agent_result", None)
+                record_attempt(
+                    ctx.handoff_manifest_path,
+                    "planner",
+                    stage_attempt=1,
+                    status="failed",
+                    agent_session_id=getattr(planner_result, "session_id", None),
+                    executor_mode="queue_or_direct",
+                    model_tier=getattr(self.native_planner, "model_tier", None),
+                    timeout_seconds=int(
+                        os.environ.get(
+                            "PLANNER_TIMEOUT_SECONDS",
+                            os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+                        )
+                    ),
+                    error_type=getattr(planner_result, "error_type", None)
+                    or failure_category,
+                    tool_call_summary={
+                        "count": len(getattr(planner_result, "tool_calls", []) or []),
+                        "tools": [
+                            getattr(call, "name", None)
+                            for call in (
+                                getattr(planner_result, "tool_calls", []) or []
+                            )
+                        ],
+                    },
+                    metadata={"diagnostics": exc.diagnostics},
+                )
+                (ctx.run_dir / "status.txt").write_text("error")
+                self._write_pipeline_error(
+                    ctx.run_dir,
+                    error_msg,
+                    "runtime_failed"
+                    if failure_category == "runtime_failed"
+                    else "planning",
+                    {"planner_diagnostics": exc.diagnostics},
+                )
+                record_stage(
+                    ctx.handoff_manifest_path,
+                    "planner",
+                    status="failed",
+                    failure_reason=error_msg,
+                    metadata={"diagnostics": exc.diagnostics},
+                )
+                self._write_run_metrics(
+                    ctx.run_dir,
+                    planner_success=False,
+                    failure_category=failure_category,
+                )
+                self._publish_agentic_summary(ctx.run_dir)
+                cleanup_orphaned_browsers()
+                return _BrowserPlanningStageResult(
+                    result={
+                        "success": False,
+                        "error": error_msg,
+                        "stage": "runtime_failed"
+                        if failure_category == "runtime_failed"
+                        else "planning",
+                        "planner_diagnostics": exc.diagnostics,
+                    }
                 )
 
-            # Safety-net: clean up any orphaned browsers from healing stage
-            cleanup_orphaned_browsers()
+            if plan_path and plan_path.exists():
+                logger.info(f"Plan created: {plan_path}")
+                try:
+                    plan_text = plan_path.read_text()
+                except OSError:
+                    plan_text = ""
+                run_plan_md_path = ctx.run_dir / "plan.md"
+                if plan_text:
+                    run_plan_md_path.write_text(plan_text)
+                record_artifact(
+                    ctx.handoff_manifest_path,
+                    "planner_plan",
+                    run_plan_md_path if run_plan_md_path.exists() else plan_path,
+                    kind="planner_markdown_plan",
+                    producer_stage="planner",
+                    required=True,
+                    consumers=["generator", "healer"],
+                    validation_status="valid",
+                    metadata={"source_path": str(plan_path)},
+                )
+                raw_draft_path = getattr(self.native_planner, "last_draft_script_path", None)
+                if raw_draft_path:
+                    candidate_draft_path = Path(raw_draft_path)
+                    if candidate_draft_path.exists():
+                        planner_draft_script_path = candidate_draft_path
+                        logger.info(
+                            "Planner draft script created: %s",
+                            planner_draft_script_path,
+                        )
+                        draft_debug = await self._debug_validate_planner_draft_script(
+                            draft_path=planner_draft_script_path,
+                            run_dir=ctx.run_dir,
+                            browser=ctx.browser,
+                        )
+                        record_artifact(
+                            ctx.handoff_manifest_path,
+                            "planner_draft_script",
+                            planner_draft_script_path,
+                            kind="planner_draft_playwright",
+                            producer_stage="planner",
+                            required=True,
+                            consumers=["generator", "healer"],
+                            validation_status=(
+                                "valid"
+                                if draft_debug.get("status") == "passed"
+                                else "debug_failed"
+                            ),
+                            metadata={"debug_validation": draft_debug},
+                        )
+                planner_selectors = (
+                    extract_plan_selectors(plan_text, limit=30) if plan_text else []
+                )
+                evidence_summary_path = ctx.run_dir / "planner_evidence_summary.json"
+                evidence_summary_path.write_text(
+                    json.dumps(
+                        {
+                            "plan_path": str(
+                                run_plan_md_path
+                                if run_plan_md_path.exists()
+                                else plan_path
+                            ),
+                            "source_plan_path": str(plan_path),
+                            "planner_draft_script_path": str(planner_draft_script_path)
+                            if planner_draft_script_path
+                            else None,
+                            "selector_count": len(planner_selectors),
+                            "selectors": planner_selectors,
+                        },
+                        indent=2,
+                    )
+                )
+                record_artifact(
+                    ctx.handoff_manifest_path,
+                    "planner_evidence_summary",
+                    evidence_summary_path,
+                    kind="planner_evidence_summary",
+                    producer_stage="planner",
+                    required=False,
+                    consumers=["generator", "healer", "reporting"],
+                    validation_status="valid",
+                )
+                planner_result = getattr(self.native_planner, "last_agent_result", None)
+                record_attempt(
+                    ctx.handoff_manifest_path,
+                    "planner",
+                    stage_attempt=1,
+                    status="passed",
+                    agent_session_id=getattr(planner_result, "session_id", None),
+                    executor_mode="queue_or_direct",
+                    model_tier=getattr(self.native_planner, "model_tier", None),
+                    timeout_seconds=int(
+                        os.environ.get(
+                            "PLANNER_TIMEOUT_SECONDS",
+                            os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+                        )
+                    ),
+                    error_type=getattr(planner_result, "error_type", None),
+                    tool_call_summary={
+                        "count": len(getattr(planner_result, "tool_calls", []) or []),
+                        "tools": [
+                            getattr(call, "name", None)
+                            for call in (
+                                getattr(planner_result, "tool_calls", []) or []
+                            )
+                        ],
+                    },
+                    input_artifact_hashes=self._manifest_artifact_hashes(
+                        ctx.handoff_manifest_path,
+                        ["resolved_spec"],
+                    ),
+                    output_artifact_hash=self._file_sha256(
+                        run_plan_md_path if run_plan_md_path.exists() else plan_path
+                    ),
+                    metadata={
+                        "planner_draft_script_path": str(planner_draft_script_path)
+                        if planner_draft_script_path
+                        else None,
+                    },
+                )
+                record_stage(
+                    ctx.handoff_manifest_path,
+                    "planner",
+                    status="ready",
+                    metadata={
+                        "plan_path": str(
+                            run_plan_md_path if run_plan_md_path.exists() else plan_path
+                        ),
+                        "source_plan_path": str(plan_path),
+                        "planner_draft_script_path": str(planner_draft_script_path)
+                        if planner_draft_script_path
+                        else None,
+                        "selector_count": len(planner_selectors),
+                    },
+                )
+                self._emit_handoff_event(
+                    "planner_handoff_ready",
+                    "Planner handoff artifacts are ready.",
+                    payload={
+                        "artifacts": self._manifest_artifact_payload(
+                            ctx.handoff_manifest_path,
+                            [
+                                "planner_plan",
+                                "planner_draft_script",
+                                "planner_evidence_summary",
+                            ],
+                        ),
+                        "selector_count": len(planner_selectors),
+                    },
+                )
+                self._write_run_metrics(ctx.run_dir, planner_success=True)
+            else:
+                logger.warning(
+                    "Planner didn't create a structured plan, continuing with original spec"
+                )
+                record_stage(
+                    ctx.handoff_manifest_path,
+                    "planner",
+                    status="skipped_or_missing",
+                    failure_reason="planner did not create a structured plan",
+                )
+                self._write_run_metrics(ctx.run_dir, planner_success=False)
+        else:
+            record_stage(
+                ctx.handoff_manifest_path,
+                "planner",
+                status="skipped",
+                metadata={"reason": "skip_planning"},
+            )
+
+        return _BrowserPlanningStageResult(
+            plan_path=plan_path,
+            planner_draft_script_path=planner_draft_script_path,
+        )
+
+    async def _run_browser_generation_stage(
+        self,
+        ctx: _NativeRunContext,
+        *,
+        plan_path: Path | None,
+        planner_draft_script_path: Path | None,
+    ) -> _BrowserGenerationStageResult:
+        logger.info("Agentic quality: analyzing test design...")
+        report_progress("planning", "Analyzing test design and flake risk...")
+        design = self.test_design_agent.analyze(
+            spec_content=ctx.resolved_spec_content,
+            target_url=ctx.target_url,
+            credentials=ctx.credentials,
+            plan_path=plan_path,
+            run_dir=ctx.run_dir,
+        )
+        design_context = self.test_design_agent.condensed_context(design)
+        self._publish_agentic_summary(ctx.run_dir)
+
+        logger.info("Stage 2: Native Generation (live browser)...")
+        report_progress("generating", "Creating test code with live browser...")
+        if not plan_path:
+            record_artifact(
+                ctx.handoff_manifest_path,
+                "planner_plan",
+                ctx.run_dir / "plan.md",
+                kind="planner_markdown_plan",
+                producer_stage="planner",
+                required=False,
+                consumers=["generator", "healer"],
+                validation_status="optional_missing",
+                failure_reason="planning was skipped or did not produce a plan",
+            )
+        if not planner_draft_script_path:
+            record_artifact(
+                ctx.handoff_manifest_path,
+                "planner_draft_script",
+                ctx.run_dir / "plan.draft.spec.ts",
+                kind="planner_draft_playwright",
+                producer_stage="planner",
+                required=False,
+                consumers=["generator", "healer"],
+                validation_status="optional_missing",
+                failure_reason="planning was skipped or did not produce a draft script",
+            )
+        record_stage(
+            ctx.handoff_manifest_path,
+            "generator",
+            status="running",
+            metadata={
+                "target_url": ctx.target_url,
+                "plan_path": str(plan_path) if plan_path else None,
+                "planner_draft_script_path": str(planner_draft_script_path)
+                if planner_draft_script_path
+                else None,
+            },
+        )
+
+        resolved_spec_path = ctx.run_dir / "spec_resolved.md"
+        test_path = await self._run_native_generator(
+            spec_path=str(resolved_spec_path),
+            target_url=ctx.target_url,
+            output_name=ctx.spec_file.stem,
+            run_dir=ctx.run_dir,
+            browser=ctx.browser,
+            design_context=design_context,
+            memory_run_id=getattr(self, "_memory_run_id", None),
+            auth_context=ctx.auth_context,
+            execution_credentials=ctx.credentials,
+            plan_path=plan_path,
+            planner_draft_script_path=planner_draft_script_path,
+            handoff_manifest_path=ctx.handoff_manifest_path,
+        )
+
+        if not test_path or not test_path.exists():
+            diagnostics = self._generator_failure_diagnostics()
+            error_msg = (
+                diagnostics.get("last_agent_result", {}).get("error")
+                or diagnostics.get("exception")
+                or "Native generator failed to create test file"
+            )
+            generator_result = getattr(self.native_generator, "last_agent_result", None)
+            record_attempt(
+                ctx.handoff_manifest_path,
+                "generator",
+                stage_attempt=1,
+                status="failed",
+                agent_session_id=getattr(generator_result, "session_id", None),
+                executor_mode="queue_or_direct",
+                model_tier=getattr(self.native_generator, "model_tier", None),
+                timeout_seconds=int(
+                    os.environ.get(
+                        "GENERATOR_TIMEOUT_SECONDS",
+                        os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+                    )
+                ),
+                error_type=getattr(generator_result, "error_type", None)
+                or "no_generated_test",
+                tool_call_summary={
+                    "count": len(getattr(generator_result, "tool_calls", []) or []),
+                    "tools": [
+                        getattr(call, "name", None)
+                        for call in (getattr(generator_result, "tool_calls", []) or [])
+                    ],
+                },
+                input_artifact_hashes=self._manifest_artifact_hashes(
+                    ctx.handoff_manifest_path,
+                    ["planner_plan", "planner_draft_script"],
+                ),
+                metadata=diagnostics,
+            )
+            (ctx.run_dir / "status.txt").write_text("error")
+            self._write_pipeline_error(ctx.run_dir, error_msg, "generation", diagnostics)
+            record_stage(
+                ctx.handoff_manifest_path,
+                "generator",
+                status="failed",
+                failure_reason=error_msg,
+                metadata={
+                    **getattr(self.native_generator, "last_handoff_consumption", {}),
+                    **diagnostics,
+                },
+            )
+            self._write_run_metrics(ctx.run_dir, generation_success=False)
+            self._publish_agentic_summary(ctx.run_dir)
             self._attribute_memory_outcome(
-                stage="native_healer",
-                success=bool(healing_result.get("success")),
-                outcome_status=str(healing_result.get("stage") or "healing_completed"),
-                source_type="test_file",
-                source_id=str(test_path),
+                stage="native_generator",
+                success=False,
+                outcome_status="generation_failed",
+                source_type="spec",
+                source_id=str(resolved_spec_path),
+                spec_path=str(resolved_spec_path),
+            )
+            return _BrowserGenerationStageResult(
+                design=design,
+                result={"success": False, "error": error_msg, "stage": "generation"},
+            )
+
+        generation_repair_metadata: dict[str, Any] = {}
+        validation_error = self._validate_generated_test_file(
+            test_path=test_path,
+            run_dir=ctx.run_dir,
+            browser=ctx.browser,
+            test_type="browser",
+        )
+        generated_test_metadata = dict(
+            getattr(self.native_generator, "last_handoff_consumption", {}) or {}
+        )
+        generator_self_run = (
+            getattr(self.native_generator, "last_self_run_result", None) or {}
+        )
+        if generator_self_run:
+            generated_test_metadata["generator_self_run_status"] = (
+                generator_self_run.get("final_status")
+            )
+            generated_test_metadata["generator_self_heal_attempts"] = getattr(
+                self.native_generator, "last_self_heal_attempts", 0
+            )
+            if getattr(self.native_generator, "last_self_heal_artifact_path", None):
+                generated_test_metadata["generator_self_heal_artifact"] = str(
+                    self.native_generator.last_self_heal_artifact_path
+                )
+        record_artifact(
+            ctx.handoff_manifest_path,
+            "generated_test",
+            test_path,
+            kind="playwright_test",
+            producer_stage="generator",
+            required=True,
+            consumers=["test_run", "healer", "reporting"],
+            validation_status="pending_validation",
+            metadata=generated_test_metadata,
+        )
+        generator_result = getattr(self.native_generator, "last_agent_result", None)
+        record_attempt(
+            ctx.handoff_manifest_path,
+            "generator",
+            stage_attempt=1,
+            status="passed",
+            agent_session_id=getattr(generator_result, "session_id", None),
+            executor_mode="queue_or_direct",
+            model_tier=getattr(self.native_generator, "model_tier", None),
+            timeout_seconds=int(
+                os.environ.get(
+                    "GENERATOR_TIMEOUT_SECONDS",
+                    os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+                )
+            ),
+            error_type=getattr(generator_result, "error_type", None),
+            tool_call_summary={
+                "count": len(getattr(generator_result, "tool_calls", []) or []),
+                "tools": [
+                    getattr(call, "name", None)
+                    for call in (getattr(generator_result, "tool_calls", []) or [])
+                ],
+            },
+            input_artifact_hashes=self._manifest_artifact_hashes(
+                ctx.handoff_manifest_path,
+                ["planner_plan", "planner_draft_script"],
+            ),
+            output_artifact_hash=self._file_sha256(test_path),
+            metadata=generated_test_metadata,
+        )
+        validation_status = validate_artifact(
+            ctx.handoff_manifest_path,
+            "generated_test",
+            validator=lambda _path: (validation_error is None, validation_error),
+        )
+        if validation_error:
+            generation_repair_metadata = await self._attempt_generation_format_repair(
+                test_path=test_path,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                test_type="browser",
+                original_validation_error=validation_error,
+                spec_content=ctx.resolved_spec_content,
+                spec_path=resolved_spec_path,
+                target_url=ctx.target_url,
+                plan_path=plan_path,
+                planner_draft_script_path=planner_draft_script_path,
+            )
+            repair_artifact_path = generation_repair_metadata.get(
+                "generation_repair_artifact_path"
+            )
+            if repair_artifact_path:
+                record_artifact(
+                    ctx.handoff_manifest_path,
+                    "generation_repair_attempt",
+                    Path(str(repair_artifact_path)),
+                    kind="generation_repair_attempt",
+                    producer_stage="generator",
+                    required=False,
+                    consumers=["reporting"],
+                    validation_status="valid",
+                    metadata=generation_repair_metadata,
+                )
+            if generation_repair_metadata.get("generation_repair_accepted"):
+                record_artifact(
+                    ctx.handoff_manifest_path,
+                    "generated_test",
+                    test_path,
+                    kind="playwright_test",
+                    producer_stage="generator",
+                    required=True,
+                    consumers=["test_run", "healer", "reporting"],
+                    validation_status="pending_validation",
+                    metadata={
+                        **getattr(self.native_generator, "last_handoff_consumption", {}),
+                        **generation_repair_metadata,
+                    },
+                )
+                validation_error = self._validate_generated_test_file(
+                    test_path=test_path,
+                    run_dir=ctx.run_dir,
+                    browser=ctx.browser,
+                    test_type="browser",
+                )
+                validation_status = validate_artifact(
+                    ctx.handoff_manifest_path,
+                    "generated_test",
+                    validator=lambda _path: (validation_error is None, validation_error),
+                )
+
+        if validation_error:
+            logger.error(validation_error)
+            (ctx.run_dir / "status.txt").write_text("error")
+            self._write_pipeline_error(
+                ctx.run_dir,
+                validation_error,
+                "generation_validation",
+                generation_repair_metadata,
+            )
+            self._write_run_metrics(
+                ctx.run_dir,
+                generation_success=False,
+                failure_category="generation_validation",
+                **generation_repair_metadata,
+            )
+            record_stage(
+                ctx.handoff_manifest_path,
+                "generator",
+                status="failed",
+                failure_reason=validation_error,
+                metadata={
+                    **getattr(self.native_generator, "last_handoff_consumption", {}),
+                    "validation": validation_status,
+                    **generation_repair_metadata,
+                },
+            )
+            self._publish_agentic_summary(ctx.run_dir)
+            return _BrowserGenerationStageResult(
+                test_path=test_path,
+                design=design,
+                result={
+                    "success": False,
+                    "error": validation_error,
+                    "stage": "generation_validation",
+                    **generation_repair_metadata,
+                },
+            )
+
+        logger.info(f"Test generated: {test_path}")
+        record_stage(
+            ctx.handoff_manifest_path,
+            "generator",
+            status="ready",
+            metadata={
+                **getattr(self.native_generator, "last_handoff_consumption", {}),
+                "test_path": str(test_path),
+                "validation": validation_status,
+                **generation_repair_metadata,
+            },
+        )
+        self._emit_handoff_event(
+            "generator_handoff_consumed",
+            "Generator consumed planner handoff context.",
+            payload={
+                "artifacts": self._manifest_artifact_payload(
+                    ctx.handoff_manifest_path,
+                    ["planner_plan", "planner_draft_script", "generated_test"],
+                ),
+                "consumption": getattr(
+                    self.native_generator, "last_handoff_consumption", {}
+                ),
+                "validation": validation_status,
+                "repair": generation_repair_metadata,
+            },
+        )
+        self._write_run_metrics(
+            ctx.run_dir,
+            generation_success=True,
+            generator_self_run_status=(
+                getattr(self.native_generator, "last_self_run_result", {}) or {}
+            ).get("final_status"),
+            generator_self_heal_attempts=getattr(
+                self.native_generator, "last_self_heal_attempts", 0
+            ),
+            **generation_repair_metadata,
+        )
+        self._attribute_memory_outcome(
+            stage="native_generator",
+            success=True,
+            outcome_status="test_generated",
+            source_type="spec",
+            source_id=str(resolved_spec_path),
+            spec_path=str(resolved_spec_path),
+            test_path=str(test_path),
+        )
+
+        logger.info("Agentic quality: reviewing generated test...")
+        report_progress("generating", "Reviewing generated test for flake risks...")
+        critic = self.test_critic_agent.review(
+            test_path=test_path, design=design, run_dir=ctx.run_dir
+        )
+        self._publish_agentic_summary(ctx.run_dir)
+
+        export_data = {
+            "testFilePath": str(test_path),
+            "code": test_path.read_text(),
+            "dependencies": ["@playwright/test"],
+            "notes": ["Generated with Native Generator"],
+        }
+        (ctx.run_dir / "export.json").write_text(json.dumps(export_data, indent=2))
+
+        cleanup_orphaned_browsers()
+        return _BrowserGenerationStageResult(
+            test_path=test_path,
+            design=design,
+            critic=critic,
+        )
+
+    async def _run_initial_test_or_heal(
+        self,
+        ctx: _NativeRunContext,
+        *,
+        test_path: Path,
+        plan_path: Path | None,
+        design: dict[str, Any] | None,
+        critic: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        resolved_spec_path = ctx.run_dir / "spec_resolved.md"
+        generator_self_run = (
+            getattr(self.native_generator, "last_self_run_result", None) or {}
+        )
+        if getattr(self.native_generator, "last_self_heal_passed", False):
+            logger.info(
+                "Skipping initial pipeline test run; generator self-run already passed."
+            )
+            record_stage(
+                ctx.handoff_manifest_path,
+                "test_run",
+                status="passed",
+                metadata={
+                    "exit_code": 0,
+                    "source": "generator_self_run",
+                    "generator_self_run_status": generator_self_run.get("final_status"),
+                    "generator_self_heal_attempts": getattr(
+                        self.native_generator, "last_self_heal_attempts", 0
+                    ),
+                },
+            )
+            self._write_run_metrics(
+                ctx.run_dir,
+                initial_run_passed=True,
+                healing_started=False,
+                healing_attempts=0,
+                heal_rescued=False,
+                generator_self_run_status=generator_self_run.get("final_status"),
+                generator_self_heal_attempts=getattr(
+                    self.native_generator, "last_self_heal_attempts", 0
+                ),
+            )
+            stability_result = await self._verify_stability_or_harden(
+                test_path=test_path,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                success_stage="completed",
+                attempts=getattr(self.native_generator, "last_self_heal_attempts", 0),
+            )
+            if stability_result:
+                self._write_run_metrics(ctx.run_dir, stable_first_pass=False)
+                return stability_result
+            self._record_passing_selectors(test_path)
+            (ctx.run_dir / "status.txt").write_text("passed")
+            self._write_run_metrics(ctx.run_dir, stable_first_pass=True)
+            self._publish_agentic_summary(ctx.run_dir)
+            return {
+                "success": True,
+                "test_path": str(test_path),
+                "attempts": getattr(self.native_generator, "last_self_heal_attempts", 0),
+                "stage": "completed",
+                "generator_self_run": generator_self_run,
+            }
+
+        logger.info("Stage 3: Running test...")
+        report_progress("testing", "Running generated test...")
+        record_stage(
+            ctx.handoff_manifest_path,
+            "test_run",
+            status="running",
+            metadata={"browser": ctx.browser, "test_path": str(test_path)},
+        )
+        record_consumption(
+            ctx.handoff_manifest_path,
+            "test_run",
+            "generated_test",
+            status="used",
+            metadata={"path": str(test_path)},
+        )
+
+        result = self._run_test(str(test_path), str(ctx.run_dir), ctx.browser)
+
+        if result.passed:
+            logger.info("Test PASSED on first run!")
+            record_stage(
+                ctx.handoff_manifest_path,
+                "test_run",
+                status="passed",
+                metadata={"exit_code": result.exit_code},
+            )
+            self._write_run_metrics(
+                ctx.run_dir,
+                initial_run_passed=True,
+                healing_started=False,
+                healing_attempts=0,
+                heal_rescued=False,
+            )
+            self._attribute_memory_outcome(
+                stage="native_generator",
+                success=True,
+                outcome_status="first_run_passed",
+                source_type="spec",
+                source_id=str(resolved_spec_path),
+                spec_path=str(resolved_spec_path),
                 test_path=str(test_path),
             )
-            return healing_result
+            stability_result = await self._verify_stability_or_harden(
+                test_path=test_path,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                success_stage="completed",
+                attempts=0,
+            )
+            if stability_result:
+                self._write_run_metrics(ctx.run_dir, stable_first_pass=False)
+                return stability_result
+            self._record_passing_selectors(test_path)
+            (ctx.run_dir / "status.txt").write_text("passed")
+            self._write_run_metrics(ctx.run_dir, stable_first_pass=True)
+            self._publish_agentic_summary(ctx.run_dir)
+            return {
+                "success": True,
+                "test_path": str(test_path),
+                "attempts": 0,
+                "stage": "completed",
+            }
 
-        except Exception as e:
-            logger.error(f"Pipeline error: {e}", exc_info=True)
-            # Emergency cleanup on pipeline failure
-            cleanup_orphaned_browsers()
-            (run_dir / "status.txt").write_text("error")
-            self._write_pipeline_error(run_dir, str(e), "exception")
-            self._publish_agentic_summary(run_dir)
-            return {"success": False, "error": str(e), "stage": "exception"}
+        logger.error(f"Test FAILED: {result.error_summary}")
+        failure_category = categorize_error(result.error_summary or result.output[-2000:])
+        record_stage(
+            ctx.handoff_manifest_path,
+            "test_run",
+            status="failed",
+            failure_reason=result.error_summary or result.output[-500:],
+            metadata={
+                "exit_code": result.exit_code,
+                "failure_category": failure_category,
+            },
+        )
+        self._emit_handoff_event(
+            "test_run_handoff_failed",
+            "Generated test failed and is ready for healer handoff.",
+            level="warning",
+            payload={
+                "artifacts": self._manifest_artifact_payload(
+                    ctx.handoff_manifest_path,
+                    ["generated_test", "planner_plan", "planner_draft_script"],
+                ),
+                "failure_category": failure_category,
+                "error_summary": result.error_summary,
+            },
+        )
+        self._write_run_metrics(
+            ctx.run_dir,
+            initial_run_passed=False,
+            stable_first_pass=False,
+            failure_category=failure_category,
+        )
+        self._attribute_memory_outcome(
+            stage="native_generator",
+            success=False,
+            outcome_status="first_run_failed",
+            source_type="spec",
+            source_id=str(resolved_spec_path),
+            spec_path=str(resolved_spec_path),
+            test_path=str(test_path),
+        )
+        diagnosis = self._run_failure_triage(
+            test_path=test_path,
+            run_dir=ctx.run_dir,
+            result=result,
+            design=design,
+            critic=critic,
+        )
+        if not diagnosis.get("heal_allowed", True):
+            logger.error(
+                "Failure triage marked this failure as non-healable; skipping healing"
+            )
+            (ctx.run_dir / "status.txt").write_text("failed")
+            self._publish_agentic_summary(ctx.run_dir)
+            return {
+                "success": False,
+                "test_path": str(test_path),
+                "attempts": 0,
+                "stage": "triage_blocked_healing",
+                "diagnosis": diagnosis,
+            }
+
+        if ctx.hybrid_healing:
+            healing_result = await self._hybrid_healing(
+                test_path=test_path,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                max_iterations=ctx.max_iterations,
+                spec_path=ctx.spec_path,
+            )
+        else:
+            healing_result = await self._native_healing(
+                test_path=test_path,
+                run_dir=ctx.run_dir,
+                browser=ctx.browser,
+                result=result,
+                diagnosis=diagnosis,
+                plan_path=plan_path,
+                handoff_manifest_path=ctx.handoff_manifest_path,
+            )
+
+        cleanup_orphaned_browsers()
+        self._attribute_memory_outcome(
+            stage="native_healer",
+            success=bool(healing_result.get("success")),
+            outcome_status=str(healing_result.get("stage") or "healing_completed"),
+            source_type="test_file",
+            source_id=str(test_path),
+            test_path=str(test_path),
+        )
+        return healing_result
 
     async def _run_native_planner(
         self,
