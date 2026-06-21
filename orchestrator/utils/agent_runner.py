@@ -1883,6 +1883,14 @@ class AgentRunner:
             self._save_debug_output(agent_result.output, agent_result.tool_calls, agent_result.messages_received)
 
         if agent_result:
+            browser_tool_calls = len(
+                [
+                    tool_call
+                    for tool_call in agent_result.tool_calls
+                    if tool_call.name.startswith("mcp__playwright")
+                ]
+            )
+            last_tool = agent_result.tool_calls[-1].name if agent_result.tool_calls else None
             self._emit_progress(
                 {
                     "phase": "completed" if agent_result.success else "failed",
@@ -1892,6 +1900,8 @@ class AgentRunner:
                     "tool_calls": len(agent_result.tool_calls),
                     "completed_tool_calls": len(agent_result.tool_calls),
                     "pending_tool_calls": 0,
+                    "browser_tool_calls": browser_tool_calls,
+                    "last_tool": last_tool,
                     "output_chars": len(agent_result.output or ""),
                     "elapsed_seconds": agent_result.duration_seconds,
                     "unproductive_stream": agent_result.error_type == "unproductive_stream",
