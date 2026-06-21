@@ -290,7 +290,9 @@ class ExploratoryAgent(BaseAgent):
         auth_section = ""
         if auth_config.get("type") == "credentials":
             creds = auth_config.get("credentials", {})
-            login_url = auth_config.get("login_url", "/login")
+            login_url = str(auth_config.get("login_url") or "").strip()
+            if not login_url:
+                raise ValueError("Credentials authentication requires login_url")
             # Resolve relative login URL against base URL
             if login_url and not login_url.startswith("http"):
                 from urllib.parse import urlparse

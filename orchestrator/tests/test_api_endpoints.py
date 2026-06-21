@@ -16,7 +16,7 @@ import os
 import shutil
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -1122,6 +1122,174 @@ class TestAgentDefinitionEndpoints:
                     session.delete(definition)
                 session.commit()
 
+    @pytest.mark.parametrize("run_payload", [{"project_id": "default", "prompt": "Inspect the app"}, {"project_id": "default", "prompt": "Inspect the app", "url": "   "}])
+    def test_run_agent_definition_rejects_browser_tools_without_target_url(self, client, run_payload):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentDefinition
+
+        create_response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": f"Browser URL Required {uuid4().hex}",
+                "system_prompt": "Inspect the target.",
+                "tool_ids": ["browser_navigate"],
+            },
+        )
+        assert create_response.status_code == 200, create_response.text
+        definition_id = create_response.json()["id"]
+
+        try:
+            run_response = client.post(
+                f"/api/agents/definitions/{definition_id}/runs",
+                json=run_payload,
+            )
+
+            assert run_response.status_code == 400
+            assert run_response.json() == {
+                "detail": "Custom agents with browser tools require a valid http(s) Target URL."
+            }
+        finally:
+            with Session(engine) as session:
+                definition = session.get(AgentDefinition, definition_id)
+                if definition:
+                    session.delete(definition)
+                session.commit()
+
+    def test_run_agent_definition_with_browser_tools_stores_valid_target_url(self, client, monkeypatch):
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+
+        class FakeAgentStatus:
+            active = 0
+            max_slots = 3
+            queued = 0
+
+        class FakeResourceManager:
+            def get_agent_status(self):
+                return FakeAgentStatus()
+
+        async def fake_get_resource_manager():
+            return FakeResourceManager()
+
+        async def fake_start_agent_run_temporal_or_fail(run, session, *, workflow_attempt=None):
+            run.temporal_workflow_id = f"agent-workflow-{run.id}"
+            run.temporal_run_id = "temporal-run-1"
+            session.add(run)
+            session.commit()
+
+        monkeypatch.setattr(main_module, "get_resource_manager", fake_get_resource_manager)
+        monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
+
+        create_response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": f"Browser URL Stored {uuid4().hex}",
+                "system_prompt": "Inspect the target.",
+                "tool_ids": ["browser_navigate"],
+            },
+        )
+        assert create_response.status_code == 200, create_response.text
+        definition_id = create_response.json()["id"]
+        run_id = None
+
+        try:
+            run_response = client.post(
+                f"/api/agents/definitions/{definition_id}/runs",
+                json={
+                    "project_id": "default",
+                    "prompt": "Inspect the dashboard",
+                    "url": "  https://example.com/dashboard  ",
+                },
+            )
+
+            assert run_response.status_code == 200, run_response.text
+            run_id = run_response.json()["run_id"]
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                config = json.loads(run.config_json)
+                assert config["url"] == "https://example.com/dashboard"
+                assert "mcp__playwright-test__browser_navigate" in config["allowed_tools"]
+        finally:
+            with Session(engine) as session:
+                if run_id:
+                    for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                        session.delete(event)
+                    run = session.get(AgentRun, run_id)
+                    if run:
+                        session.delete(run)
+                definition = session.get(AgentDefinition, definition_id)
+                if definition:
+                    session.delete(definition)
+                session.commit()
+
+    def test_run_agent_definition_without_browser_tools_accepts_blank_target_url(self, client, monkeypatch):
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+
+        class FakeAgentStatus:
+            active = 0
+            max_slots = 3
+            queued = 0
+
+        class FakeResourceManager:
+            def get_agent_status(self):
+                return FakeAgentStatus()
+
+        async def fake_get_resource_manager():
+            return FakeResourceManager()
+
+        async def fake_start_agent_run_temporal_or_fail(run, session, *, workflow_attempt=None):
+            run.temporal_workflow_id = f"agent-workflow-{run.id}"
+            run.temporal_run_id = "temporal-run-1"
+            session.add(run)
+            session.commit()
+
+        monkeypatch.setattr(main_module, "get_resource_manager", fake_get_resource_manager)
+        monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
+
+        create_response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": f"Text Agent Blank URL {uuid4().hex}",
+                "system_prompt": "Inspect repository context.",
+                "tool_ids": ["read_file"],
+            },
+        )
+        assert create_response.status_code == 200, create_response.text
+        definition_id = create_response.json()["id"]
+        run_id = None
+
+        try:
+            run_response = client.post(
+                f"/api/agents/definitions/{definition_id}/runs",
+                json={"project_id": "default", "prompt": "Summarize the workspace", "url": "   "},
+            )
+
+            assert run_response.status_code == 200, run_response.text
+            run_id = run_response.json()["run_id"]
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert json.loads(run.config_json)["url"] is None
+        finally:
+            with Session(engine) as session:
+                if run_id:
+                    for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                        session.delete(event)
+                    run = session.get(AgentRun, run_id)
+                    if run:
+                        session.delete(run)
+                definition = session.get(AgentDefinition, definition_id)
+                if definition:
+                    session.delete(definition)
+                session.commit()
+
     def test_get_run_includes_live_browser_metadata(self, client, monkeypatch):
         """GET /runs/{id} should expose runtime metadata for live browser view."""
         from orchestrator.api import main as main_module
@@ -1179,8 +1347,8 @@ class TestAgentDefinitionEndpoints:
                     session.delete(run)
                     session.commit()
 
-    def test_get_run_includes_log_diagnostics_without_execution_log(self, client, monkeypatch):
-        """GET /runs/{id} should expose DB and browser-pool diagnostics before execution.log exists."""
+    def test_get_run_includes_log_diagnostics_and_stale_output_health(self, client, monkeypatch):
+        """GET /runs/{id} should expose DB, browser-pool, and stale-output diagnostics."""
         from orchestrator.api import main as main_module
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import TestRun as DBTestRun
@@ -1216,6 +1384,7 @@ class TestAgentDefinitionEndpoints:
                     status="running",
                     created_at=datetime.utcnow(),
                     current_stage="planning",
+                    stage_started_at=datetime.utcnow() - timedelta(minutes=5),
                     stage_message="Planning test steps",
                 )
             )
@@ -1224,9 +1393,19 @@ class TestAgentDefinitionEndpoints:
         try:
             run_dir = main_module.RUNS_DIR / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
+            execution_log = run_dir / "execution.log"
+            execution_log.write_text("planning started\n")
+            old_mtime = (datetime.utcnow() - timedelta(minutes=4)).timestamp()
+            os.utime(execution_log, (old_mtime, old_mtime))
             response = client.get(f"/runs/{run_id}")
             assert response.status_code == 200
             data = response.json()
+            assert data["stage_started_at"] is not None
+            assert data["diagnostics"]["browser_pool"]["running_requests"] == [run_id]
+            assert data["health"]["stage_age_seconds"] >= 240
+            assert data["health"]["last_log_age_seconds"] >= 180
+            assert data["health"]["has_recent_output"] is False
+            assert data["health"]["stuck_warning"]
             assert "Run Lifecycle" in data["log"]
             assert "status=running" in data["log"]
             assert "Browser Pool" in data["log"]
@@ -1306,6 +1485,90 @@ class TestAgentDefinitionEndpoints:
             assert "Test run is waiting for a browser slot" not in data["log"]
             assert any(section["title"] == "Pipeline Error" for section in data["log_sections"])
             assert any(section["title"] == "Test Data" for section in data["log_sections"])
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_get_run_warns_when_temporal_activity_history_is_stale(self, client, monkeypatch):
+        """Active Temporal test runs should expose stale started activity warnings."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+        from orchestrator.services import temporal_client
+
+        class _Pool:
+            async def get_status(self):
+                return {
+                    "max_browsers": 1,
+                    "running": 1,
+                    "queued": 0,
+                    "available": 0,
+                    "running_requests": [run_id],
+                    "queued_requests": [],
+                    "running_details": [],
+                    "by_type": {"test_run": 1},
+                }
+
+        async def fake_temporal_diagnostics(workflow_id, run_id_arg=None):
+            return {
+                "available": True,
+                "workflow_type": "TestRunWorkflow",
+                "workflow_status": "WORKFLOW_EXECUTION_STATUS_RUNNING",
+                "task_queue": "browser-workflows",
+                "history_event_count": 9,
+                "history_last_event_at": (datetime.utcnow() - timedelta(minutes=6)).isoformat(),
+                "task_queue_status": {
+                    "workflow_pollers": 1,
+                    "activity_pollers": 1,
+                    "has_workflow_pollers": True,
+                    "has_activity_pollers": True,
+                },
+                "activities": [
+                    {
+                        "activity_id": "execute_test_run",
+                        "activity_type": "execute_test_run",
+                        "status": "started",
+                        "attempt_count": 1,
+                        "started_at": (datetime.utcnow() - timedelta(minutes=6)).isoformat(),
+                        "last_worker_identity": "worker-a",
+                    }
+                ],
+            }
+
+        run_id = f"temporal-stale-{uuid4()}"
+        monkeypatch.setattr(main_module, "BROWSER_POOL", _Pool())
+        monkeypatch.setattr(temporal_client, "get_test_run_temporal_diagnostics", fake_temporal_diagnostics)
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="temporal-stale.md",
+                    status="running",
+                    created_at=datetime.utcnow(),
+                    current_stage="planning",
+                    stage_started_at=datetime.utcnow() - timedelta(minutes=7),
+                    temporal_workflow_id=f"test-run-{run_id}",
+                    temporal_run_id="temporal-run-id",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "execution.log").write_text("planner waiting\n")
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["diagnostics"]["temporal"]["workflow_status"] == "WORKFLOW_EXECUTION_STATUS_RUNNING"
+            assert data["health"]["last_temporal_event_age_seconds"] >= 300
+            assert data["health"]["temporal_started_activities"][0]["activity_type"] == "execute_test_run"
+            assert "Temporal activity execute_test_run is started" in "\n".join(data["health"]["warnings"])
         finally:
             shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
             with Session(engine) as session:

@@ -28,7 +28,6 @@ class AgentToolProfile:
 
 BROWSER_MCP_TOOLS: tuple[str, ...] = (
     "browser_click",
-    "browser_close",
     "browser_console_messages",
     "browser_drag",
     "browser_evaluate",

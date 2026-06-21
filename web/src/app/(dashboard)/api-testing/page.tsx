@@ -4,6 +4,7 @@ import { Zap, FileCode, Play, Upload, Clock, Loader2, AlertCircle, CheckCircle, 
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useSearchParams } from 'next/navigation';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { createTabStyle } from '@/lib/styles';
 import { ApiSpec, ApiSpecsSummary, GeneratedTest, GeneratedTestsSummary, JobStatus, ApiTestRun, TabType } from './components/types';
@@ -17,7 +18,11 @@ const PAGE_SIZE = 50;
 const RUNS_PAGE_SIZE = 20;
 
 export default function ApiTestingPage() {
-    const { projectId, isLoading: projectLoading } = useRequiredProject();
+    const { projectId, isLoading: projectLoading, projects, setCurrentProject } = useRequiredProject();
+    const searchParams = useSearchParams();
+    const requestedProjectId = searchParams.get('project_id') || '';
+    const requestedSpec = searchParams.get('spec') || searchParams.get('spec_name') || '';
+    const requestedTab = searchParams.get('tab');
 
     // Tab state
     const [activeTab, setActiveTab] = useState<TabType>('specs');
@@ -252,17 +257,50 @@ export default function ApiTestingPage() {
     // ========== Effects ==========
 
     useEffect(() => {
+        if (projectLoading || !requestedProjectId || requestedProjectId === projectId) return;
+        const requestedProject = projects.find(project => project.id === requestedProjectId);
+        if (requestedProject) setCurrentProject(requestedProject);
+    }, [projectLoading, projectId, projects, requestedProjectId, setCurrentProject]);
+
+    useEffect(() => {
+        if (requestedTab === 'generated' || requestedTab === 'import' || requestedTab === 'history' || requestedTab === 'specs') {
+            setActiveTab(requestedTab);
+            setVisitedTabs(prev => { const next = new Set(prev); next.add(requestedTab); return next; });
+        }
+    }, [requestedTab]);
+
+    useEffect(() => {
         if (projectLoading || !projectId) return;
-        fetchApiSpecs();
+        if (requestedProjectId && requestedProjectId !== projectId) return;
+        fetchApiSpecs(0, false, requestedSpec || undefined);
         fetchRecentJobs();
         fetchLatestRuns();
-    }, [projectId, projectLoading, fetchApiSpecs, fetchRecentJobs, fetchLatestRuns]);
+    }, [projectId, projectLoading, requestedProjectId, requestedSpec, fetchApiSpecs, fetchRecentJobs, fetchLatestRuns]);
 
     useEffect(() => {
         if (!hasRunningJobs) return;
         const interval = setInterval(fetchRecentJobs, 5000);
         return () => clearInterval(interval);
     }, [fetchRecentJobs, hasRunningJobs]);
+
+    useEffect(() => {
+        function handleApiTestingRefresh(event: Event) {
+            const detail = (event as CustomEvent<{
+                projectId?: string;
+                specName?: string;
+                testPath?: string;
+            }>).detail || {};
+            if (detail.projectId && detail.projectId !== projectId) return;
+            if (detail.specName) setActiveTab('specs');
+            fetchApiSpecs(0, false, detail.specName || requestedSpec || undefined);
+            fetchRecentJobs();
+            fetchLatestRuns();
+            fetchGeneratedTests(0, false, detail.testPath || undefined);
+        }
+
+        window.addEventListener('quorvex:api-testing-refresh', handleApiTestingRefresh);
+        return () => window.removeEventListener('quorvex:api-testing-refresh', handleApiTestingRefresh);
+    }, [projectId, requestedSpec, fetchApiSpecs, fetchGeneratedTests, fetchLatestRuns, fetchRecentJobs]);
 
     useEffect(() => {
         setGeneratedTests([]);
@@ -406,6 +444,7 @@ export default function ApiTestingPage() {
                     specsHasMore={specsHasMore}
                     folders={specsFolders}
                     summary={specsSummary}
+                    initialSearch={requestedSpec}
                 />
             )}
 

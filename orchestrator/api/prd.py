@@ -1397,6 +1397,12 @@ async def _run_generation_task(
 
         session_dir = _generation_run_dir(generation_id)
         session_dir.mkdir(parents=True, exist_ok=True)
+        auth_context: dict[str, Any] = {
+            "storage_state_attached": False,
+            "browser_auth_session_id": None,
+            "browser_auth_session_name": None,
+            "use_project_default_browser_auth": bool(use_project_default_browser_auth),
+        }
         if live_browser_requested:
             storage_state_path = None
             if browser_auth_session_id or use_project_default_browser_auth:
@@ -1410,6 +1416,15 @@ async def _run_generation_task(
                             use_default=use_project_default_browser_auth,
                         )
                     storage_state_path = resolved.storage_state_path if resolved else None
+                    if resolved:
+                        auth_context.update(
+                            {
+                                "storage_state_attached": True,
+                                "browser_auth_session_id": resolved.session_id,
+                                "browser_auth_session_name": resolved.session_name,
+                                "project_default_used": bool(use_project_default_browser_auth),
+                            }
+                        )
                 except BrowserAuthSessionError as exc:
                     raise RuntimeError(f"{exc}. Refresh browser auth session.") from exc
             runtime = _prepare_prd_generation_mcp_workspace(
@@ -1582,9 +1597,17 @@ async def _run_generation_task(
                             render_as="markdown",
                             decrypt_sensitive=True,
                         )
+                        missing = resolved.get("missing") or []
+                        if missing:
+                            raise RuntimeError(
+                                "missing refs: "
+                                + ", ".join(str(item.get("ref") or item) for item in missing)
+                            )
                         test_data_markdown = resolved.get("markdown") or ""
                 except Exception as exc:
-                    logger.warning("Failed to resolve PRD generation test data refs for %s: %s", generation_id, exc)
+                    raise RuntimeError(
+                        f"Unable to resolve PRD test_data_refs before generation: {exc}"
+                    ) from exc
 
             path = await planner.generate_spec_for_feature(
                 feature_name=feature_name,
@@ -1592,6 +1615,7 @@ async def _run_generation_task(
                 target_url=target_url,
                 login_url=login_url,
                 credentials=credentials,
+                auth_context=auth_context,
                 additional_context=test_data_markdown,
             )
 

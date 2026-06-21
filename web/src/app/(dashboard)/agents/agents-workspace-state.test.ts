@@ -166,6 +166,42 @@ describe('agents run validation', () => {
         })).toBe('Select or create a custom agent first.');
     });
 
+    it('requires a target URL for custom agents with browser tools', () => {
+        expect(validateAgentRunInput({
+            selectedAgent: 'custom',
+            selectedDefinitionId: 'browser-agent',
+            url: '   ',
+            authType: 'none',
+            sessionId: '',
+            testData: '',
+            customAgentHasBrowserTools: true,
+        })).toBe('Target URL is required for custom agents with browser tools.');
+    });
+
+    it('accepts a target URL for custom agents with browser tools', () => {
+        expect(validateAgentRunInput({
+            selectedAgent: 'custom',
+            selectedDefinitionId: 'browser-agent',
+            url: 'https://example.com/dashboard',
+            authType: 'none',
+            sessionId: '',
+            testData: '',
+            customAgentHasBrowserTools: true,
+        })).toBeNull();
+    });
+
+    it('allows custom agents without browser tools to run without a URL', () => {
+        expect(validateAgentRunInput({
+            selectedAgent: 'custom',
+            selectedDefinitionId: 'text-agent',
+            url: '',
+            authType: 'none',
+            sessionId: '',
+            testData: '',
+            customAgentHasBrowserTools: false,
+        })).toBeNull();
+    });
+
     it('requires selected session auth and valid JSON test data', () => {
         expect(validateAgentRunInput({
             selectedAgent: 'exploratory',

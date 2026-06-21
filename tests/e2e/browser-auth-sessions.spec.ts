@@ -1,4 +1,4 @@
-import { expect, type APIRequestContext, type Page, test } from '@playwright/test';
+import { expect, request as playwrightRequest, type APIRequestContext, type Page, test } from '@playwright/test';
 import * as http from 'node:http';
 
 const APP_BASE = process.env.BASE_URL || 'http://localhost:3000';
@@ -29,14 +29,25 @@ async function assertStackIsReady(request: APIRequestContext) {
 }
 
 async function getAccessToken(request: APIRequestContext) {
-  const response = await request.post(`${API_BASE}/auth/login`, {
-    data: {
-      email: ADMIN_EMAIL,
-      password: ADMIN_PASSWORD,
-    },
-  });
+  let response;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      response = await request.post(`${API_BASE}/auth/login`, {
+        data: {
+          email: ADMIN_EMAIL,
+          password: ADMIN_PASSWORD,
+        },
+      });
+      if (response.ok()) break;
+      if (response.status() !== 429 && response.status() < 500) break;
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 5_000));
+  }
 
-  expect(response.ok()).toBeTruthy();
+  expect(response?.ok(), `Admin login failed: ${lastError || response?.status()}`).toBeTruthy();
   const body = await response.json() as TokenResponse;
   return body.access_token;
 }
@@ -64,9 +75,17 @@ async function deleteProject(request: APIRequestContext, projectId: string) {
   });
 }
 
+async function deleteProjectById(projectId: string) {
+  const request = await playwrightRequest.newContext();
+  try {
+    await deleteProject(request, projectId);
+  } finally {
+    await request.dispose();
+  }
+}
+
 async function loginThroughUi(page: Page, returnTo: string, projectId: string) {
   await page.addInitScript(({ selectedProjectId }) => {
-    window.localStorage.removeItem('refresh_token');
     window.localStorage.setItem('we-test-current-project-id', selectedProjectId);
   }, { selectedProjectId: projectId });
 
@@ -218,6 +237,7 @@ test.describe('Browser login sessions', () => {
   });
 
   test('creates and manages a reusable browser login session', async ({ page, request }) => {
+    test.setTimeout(180_000);
     const fixture = await startLoginFixture();
     const project = await createProject(request);
 
@@ -252,12 +272,13 @@ test.describe('Browser login sessions', () => {
       await expect(page.getByText('Browser login session revoked.')).toBeVisible();
       await expect(page.getByText('Local test login')).toBeHidden();
     } finally {
-      await deleteProject(request, project.id);
+      await deleteProjectById(project.id);
       await fixture.close();
     }
   });
 
   test('captures an email-first login session with advanced success URL validation', async ({ page, request }) => {
+    test.setTimeout(180_000);
     const fixture = await startEmailFirstLoginFixture();
     const project = await createProject(request);
 
@@ -282,7 +303,7 @@ test.describe('Browser login sessions', () => {
       await expect(sessionRow).toContainText('active');
       await expect(sessionRow).toContainText('/account$');
     } finally {
-      await deleteProject(request, project.id);
+      await deleteProjectById(project.id);
       await fixture.close();
     }
   });

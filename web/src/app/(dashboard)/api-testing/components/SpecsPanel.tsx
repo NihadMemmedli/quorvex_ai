@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Loader2, Zap } from 'lucide-react';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { ApiSpec, ApiSpecsSummary, ApiSpecSortOption, ApiSpecStatusFilter, JobStatus, ApiTestRun } from './types';
@@ -37,6 +37,7 @@ interface SpecsPanelProps {
     // New enriched data from backend
     folders: string[];
     summary: ApiSpecsSummary | null;
+    initialSearch?: string;
 }
 
 const PAGE_SIZE_DEFAULT = 50;
@@ -61,9 +62,10 @@ export default function SpecsPanel({
     specsTotal,
     folders,
     summary,
+    initialSearch,
 }: SpecsPanelProps) {
     // Local filter/sort state
-    const [search, setSearch] = useState('');
+    const [search, setSearch] = useState(initialSearch || '');
     const [statusFilter, setStatusFilter] = useState<ApiSpecStatusFilter>('all');
     const [sortBy, setSortBy] = useState<ApiSpecSortOption>('name');
     const [folder, setFolder] = useState('');
@@ -71,6 +73,13 @@ export default function SpecsPanel({
     const [selectedSpecs, setSelectedSpecs] = useState<Set<string>>(new Set());
     const [currentPage, setCurrentPage] = useState(1);
     const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
+
+    useEffect(() => {
+        if (!initialSearch || initialSearch === search) return;
+        setSearch(initialSearch);
+        setCurrentPage(1);
+        setSelectedSpecs(new Set());
+    }, [initialSearch, search]);
 
     // Compute all unique tags from specs
     const allTags = useMemo(() => {

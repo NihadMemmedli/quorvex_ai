@@ -1,5 +1,5 @@
 'use client';
-import React, { useRef, useCallback, useState } from 'react';
+import React, { useRef, useCallback, useEffect, useState } from 'react';
 import { Plus, Search, RefreshCw } from 'lucide-react';
 import { ApiSpecSortOption, ApiSpecStatusFilter } from './types';
 
@@ -65,6 +65,10 @@ export default function ApiSpecsToolbar({
 }: ApiSpecsToolbarProps) {
     const [localSearch, setLocalSearch] = useState(search);
     const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        setLocalSearch(search);
+    }, [search]);
 
     const handleSearchInput = useCallback((value: string) => {
         setLocalSearch(value);

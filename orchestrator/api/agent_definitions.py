@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from importlib import import_module
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -16,6 +17,11 @@ from .middleware.auth import get_current_user_optional
 from .models_db import AgentDefinition, AgentRun
 
 router = APIRouter()
+
+
+def _is_valid_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 class AgentDefinitionRequest(BaseModel):
@@ -213,6 +219,13 @@ async def run_agent_definition(
         raise HTTPException(status_code=400, detail="Prompt is required")
 
     allowed_tools, selected_tools = rt._resolve_agent_tools(definition.tool_ids, session)
+    target_url = (request.url or "").strip()
+    has_browser_tools = rt._custom_agent_uses_browser_tools(allowed_tools)
+    if has_browser_tools and not _is_valid_http_url(target_url):
+        raise HTTPException(
+            status_code=400,
+            detail="Custom agents with browser tools require a valid http(s) Target URL.",
+        )
 
     resource_manager = await rt.get_resource_manager()
     agent_status = resource_manager.get_agent_status()
@@ -234,7 +247,7 @@ async def run_agent_definition(
         "agent_definition_id": definition.id,
         "agent_name": definition.name,
         "prompt": request.prompt.strip(),
-        "url": request.url,
+        "url": target_url or None,
         "project_id": run_project_id,
         "custom_config": request.config or {},
         "test_data_refs": run_test_data_refs,
@@ -256,7 +269,7 @@ async def run_agent_definition(
         "selected_tools": selected_tools,
     }
     runtime = normalize_agent_runtime(run_config.get("runtime"))
-    browser_metadata = rt.browser_runtime_status() if rt._agent_run_has_browser_tools("custom", run_config) else {}
+    browser_metadata = rt.browser_runtime_status() if has_browser_tools else {}
     run = AgentRun(
         id=run_id,
         agent_type="custom",
@@ -270,7 +283,7 @@ async def run_agent_definition(
         "phase": "queued",
         "status": initial_status,
         "runtime": runtime,
-        "has_browser_tools": rt._agent_run_has_browser_tools("custom", run_config),
+        "has_browser_tools": has_browser_tools,
         "message": "Custom agent run is queued for Temporal.",
         "updated_at": datetime.utcnow().isoformat(),
     }

@@ -709,6 +709,27 @@ function pretty(value: string) {
   return value.replace(/_/g, ' ');
 }
 
+function errorMessageFromPayload(data: unknown, fallback: string) {
+  if (!data || typeof data !== 'object') return fallback;
+  const payload = data as { detail?: unknown; error?: unknown; message?: unknown };
+  const detail = payload.detail ?? payload.error ?? payload.message;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map(item => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object' && 'msg' in item && typeof item.msg === 'string') return item.msg;
+        return JSON.stringify(item);
+      })
+      .join(' ');
+  }
+  if (detail && typeof detail === 'object') {
+    if ('msg' in detail && typeof detail.msg === 'string') return detail.msg;
+    return JSON.stringify(detail);
+  }
+  return fallback;
+}
+
 function toolLabel(toolName?: string | null) {
   if (!toolName) return 'Waiting';
   const short = toolName.includes('__') ? toolName.split('__').pop() || toolName : toolName;
@@ -1278,6 +1299,10 @@ export default function WorkflowPage() {
     () => currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '',
     [currentProject?.id],
   );
+  const requiredProjectParam = useMemo(
+    () => `?project_id=${encodeURIComponent(currentProject?.id || 'default')}`,
+    [currentProject?.id],
+  );
   const draftKey = useMemo(
     () => workflowDraftStorageKey(currentProject?.id, selectedDefinitionId),
     [currentProject?.id, selectedDefinitionId],
@@ -1511,7 +1536,7 @@ export default function WorkflowPage() {
     const params = buildAuditSearchParams({ run_id: runId });
     const res = await fetch(`${API_BASE}/workflows/events?${params.toString()}`);
     const data = await res.json().catch(() => []);
-    if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow audit trail');
+    if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to load workflow audit trail'));
     const events = Array.isArray(data) ? data : [];
     setRunEventsById(prev => ({ ...prev, [runId]: events }));
     return events as WorkflowEvent[];
@@ -1520,23 +1545,23 @@ export default function WorkflowPage() {
   const getRunDiagnostics = useCallback(async (runId: string) => {
     setRunDiagnosticsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/diagnostics${projectParam}`);
+      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/diagnostics${requiredProjectParam}`);
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow diagnostics');
+      if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to load workflow diagnostics'));
       setRunDiagnosticsById(prev => ({ ...prev, [runId]: data }));
       return data as WorkflowDiagnostics;
     } finally {
       setRunDiagnosticsLoading(false);
     }
-  }, [projectParam]);
+  }, [requiredProjectParam]);
 
   const getRunDebug = useCallback(async (runId: string, options?: { includeTemporal?: boolean }) => {
     const includeTemporal = options?.includeTemporal ?? true;
     const params = new URLSearchParams({ include_temporal: includeTemporal ? 'true' : 'false' });
-    if (currentProject?.id) params.set('project_id', currentProject.id);
+    params.set('project_id', currentProject?.id || 'default');
     const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/debug?${params.toString()}`);
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow debug details');
+    if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to load workflow debug details'));
     const debug = data as WorkflowRunDebug;
     setRunDebugById(prev => ({ ...prev, [runId]: debug }));
     if (debug.run) setSelectedRunDetails(debug.run);
@@ -2054,7 +2079,7 @@ export default function WorkflowPage() {
         body: JSON.stringify({ name, description, project_id: currentProject?.id || 'default', steps }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || data.error || 'Failed to validate workflow');
+      if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to validate workflow'));
       const next = createEmptyValidation();
       const stepErrors = data.step_errors || {};
       Object.entries(stepErrors).forEach(([indexKey, rawErrors]) => {
@@ -2159,7 +2184,7 @@ export default function WorkflowPage() {
         body: JSON.stringify({ name, description, project_id: currentProject?.id || 'default', steps }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || data.error || 'Failed to save workflow');
+      if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to save workflow'));
       clearDraft(savedDraftKey);
       setSelectedDefinitionId(data.id);
       await load(false);
@@ -2174,14 +2199,14 @@ export default function WorkflowPage() {
   async function startWorkflow(definitionId: string, startStepKey?: string) {
     if (!ensureTemporalReady()) return;
     setError(null);
-    const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definitionId)}/runs${projectParam}`, {
+    const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definitionId)}/runs${requiredProjectParam}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ inputs: {}, triggered_by: 'ui', start_step_key: startStepKey }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to start workflow');
+      setError(errorMessageFromPayload(data, 'Failed to start workflow'));
       return;
     }
     if (data.run_id) {
@@ -2263,7 +2288,7 @@ export default function WorkflowPage() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to schedule workflow');
+      setError(errorMessageFromPayload(data, 'Failed to schedule workflow'));
       toast.error('Failed to schedule workflow');
       return;
     }
@@ -2278,7 +2303,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}/run-now${projectParam}`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to run workflow schedule');
+      setError(errorMessageFromPayload(data, 'Failed to run workflow schedule'));
       toast.error('Failed to run workflow schedule');
       return;
     }
@@ -2295,7 +2320,7 @@ export default function WorkflowPage() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || `Failed to ${nextEnabled ? 'resume' : 'pause'} workflow schedule`);
+      setError(errorMessageFromPayload(data, `Failed to ${nextEnabled ? 'resume' : 'pause'} workflow schedule`));
       toast.error('Failed to update schedule');
       return;
     }
@@ -2308,7 +2333,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}${projectParam}`, { method: 'DELETE' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to delete workflow schedule');
+      setError(errorMessageFromPayload(data, 'Failed to delete workflow schedule'));
       toast.error('Failed to delete schedule');
       return;
     }
@@ -2326,7 +2351,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/${action}${projectParam}`, { method: 'POST' });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      setError(data.detail || data.error || `Failed to ${action} workflow`);
+      setError(errorMessageFromPayload(data, `Failed to ${action} workflow`));
       return;
     }
     await load(false);
@@ -2339,7 +2364,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${step.id}/skip${projectParam}`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to skip workflow step');
+      setError(errorMessageFromPayload(data, 'Failed to skip workflow step'));
       return;
     }
     setRunStepsById(prev => {
@@ -2356,7 +2381,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(scheduleId)}/executions${projectParam}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to load schedule executions');
+      setError(errorMessageFromPayload(data, 'Failed to load schedule executions'));
       return;
     }
     setScheduleExecutions(prev => ({ ...prev, [scheduleId]: Array.isArray(data) ? data : [] }));
@@ -2367,7 +2392,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/events?${params.toString()}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to load schedule audit trail');
+      setError(errorMessageFromPayload(data, 'Failed to load schedule audit trail'));
       return;
     }
     setScheduleEventsById(prev => ({ ...prev, [scheduleId]: Array.isArray(data) ? data : [] }));
@@ -2377,7 +2402,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definitionId)}/revisions${projectParam}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to load workflow revisions');
+      setError(errorMessageFromPayload(data, 'Failed to load workflow revisions'));
       return [];
     }
     const revisions = Array.isArray(data) ? data : [];
@@ -2394,7 +2419,7 @@ export default function WorkflowPage() {
     const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definition.id)}/revisions/${version}/rollback-preview${projectParam}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to preview rollback');
+      setError(errorMessageFromPayload(data, 'Failed to preview rollback'));
       return;
     }
     setRollbackPreview(data as WorkflowRollbackPreview);
@@ -2409,7 +2434,7 @@ export default function WorkflowPage() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to rollback workflow');
+      setError(errorMessageFromPayload(data, 'Failed to rollback workflow'));
       return;
     }
     setRollbackPreview(null);
@@ -2445,7 +2470,7 @@ export default function WorkflowPage() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to duplicate workflow');
+      setError(errorMessageFromPayload(data, 'Failed to duplicate workflow'));
       return;
     }
     await load(false);
@@ -2454,12 +2479,12 @@ export default function WorkflowPage() {
 
   async function archiveWorkflow(definition: WorkflowDefinition) {
     setError(null);
-    const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definition.id)}${projectParam}`, {
+    const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definition.id)}${requiredProjectParam}`, {
       method: 'DELETE',
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(data.detail || data.error || 'Failed to archive workflow');
+      setError(errorMessageFromPayload(data, 'Failed to archive workflow'));
       return;
     }
     if (selectedDefinitionId === definition.id) resetBuilder();
@@ -2473,7 +2498,7 @@ export default function WorkflowPage() {
     try {
       const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definition.id)}/export${projectParam}`);
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || data.error || 'Failed to export workflow');
+      if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to export workflow'));
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -2500,7 +2525,7 @@ export default function WorkflowPage() {
         body: JSON.stringify({ project_id: currentProject?.id || 'default', workflow }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || data.error || 'Failed to import workflow');
+      if (!res.ok) throw new Error(errorMessageFromPayload(data, 'Failed to import workflow'));
       await load(false);
       setActiveTab('library');
       toast.success('Workflow imported');
@@ -2513,10 +2538,10 @@ export default function WorkflowPage() {
 
   async function getRunSteps(runId: string, options?: { force?: boolean }) {
     if (!options?.force && runStepsById[runId]) return runStepsById[runId];
-    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/steps${projectParam}`);
+    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/steps${requiredProjectParam}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
-      const detail = data?.detail || data?.error || 'Failed to load workflow steps';
+      const detail = errorMessageFromPayload(data, 'Failed to load workflow steps');
       setError(detail);
       throw new Error(detail);
     }
@@ -2528,10 +2553,10 @@ export default function WorkflowPage() {
   async function getRunDetail(runId: string, options?: { quiet?: boolean }) {
     if (!options?.quiet) setRunDetailLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}${projectParam}`);
+      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}${requiredProjectParam}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const detail = data?.detail || data?.error || 'Failed to load workflow run';
+        const detail = errorMessageFromPayload(data, 'Failed to load workflow run');
         setError(detail);
         throw new Error(detail);
       }
@@ -2558,7 +2583,7 @@ export default function WorkflowPage() {
       const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${failedStep.id}/retry${projectParam}`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.detail || data.error || 'Failed to retry workflow step');
+        setError(errorMessageFromPayload(data, 'Failed to retry workflow step'));
         return;
       }
       setRunStepsById(prev => {

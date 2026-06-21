@@ -134,9 +134,10 @@ def _report_source_result(item_id: str = "F-001", page: str = "https://example.t
     }
 
 
-def test_custom_agent_browser_tool_detection_only_matches_playwright_mcp_tools():
+def test_custom_agent_browser_tool_detection_matches_playwright_mcp_and_browser_aliases():
     assert _custom_agent_uses_browser_tools(["mcp__playwright-test__browser_click"]) is True
     assert _custom_agent_uses_browser_tools(["mcp__playwright__browser_navigate"]) is True
+    assert _custom_agent_uses_browser_tools(["browser_navigate"]) is True
     assert _custom_agent_uses_browser_tools(["Read", "Write", "mcp__appium-mcp__tap"]) is False
     assert _custom_agent_uses_browser_tools([]) is False
 

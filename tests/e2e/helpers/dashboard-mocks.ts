@@ -378,6 +378,119 @@ function mockJsonFor(path: string, method: string): unknown {
 
   if (path.startsWith('/autopilot/sessions')) return [];
   if (path.startsWith('/autopilot/start')) return { id: 'autopilot-e2e', status: 'queued', entry_urls: ['https://example.test'] };
+  if (/^\/autopilot\/[^/]+\/checklist/.test(path)) {
+    return {
+      items: [
+        {
+          id: 1,
+          session_id: 'autopilot-e2e',
+          sequence: 1000,
+          kind: 'phase',
+          phase_name: 'exploration',
+          title: 'Exploration phase',
+          detail: 'Exploring first URL',
+          status: 'running',
+          progress: 0.3,
+          items_completed: 1,
+          items_total: 3,
+          source_type: 'phase',
+          source_id: 'exploration',
+          metadata: {},
+          created_at: now,
+          updated_at: now,
+          completed_at: null,
+        },
+        {
+          id: 2,
+          session_id: 'autopilot-e2e',
+          sequence: 2000,
+          kind: 'question',
+          phase_name: 'requirements',
+          title: 'Question: review requirements',
+          detail: 'Proceed with all requirements?',
+          status: 'waiting',
+          progress: 0,
+          items_completed: 0,
+          items_total: 0,
+          source_type: 'question',
+          source_id: '12',
+          metadata: { question_id: 12 },
+          created_at: now,
+          updated_at: now,
+          completed_at: null,
+        },
+      ],
+      summary: { total: 2, pending: 0, running: 1, waiting: 1, completed: 0, failed: 0, skipped: 0 },
+    };
+  }
+  if (/^\/autopilot\/[^/]+\/live/.test(path)) {
+    return {
+      active: true,
+      phase: 'exploration',
+      activity_label: 'Exploring https://example.test',
+      status: 'running',
+      message: 'Recovered from persisted tool telemetry.',
+      exploration_session_id: 'autopilot-e2e-explore',
+      test_task_id: null,
+      run_id: null,
+      spec_name: null,
+      current_stage: null,
+      activity_kind: 'browser',
+      agent_task_id: 'agent-task-e2e',
+      last_tool: 'mcp__playwright-test__browser_click',
+      last_tool_label: 'browser click',
+      tool_calls: 7,
+      browser_tool_calls: 5,
+      interactions: 5,
+      capture_count: 2,
+      latest_capture_at: now,
+      activity_source: 'tool_artifact_recovery',
+      recent_tools: [{ name: 'mcp__playwright-test__browser_click', label: 'browser click', at: now }],
+      artifacts: [],
+      latest_image: null,
+      subagents: [],
+      items_total: 0,
+      items_completed: 0,
+      requirements_generated: 0,
+      verification_status: null,
+      updated_at: now,
+      browser_runtime: 'headless_worker',
+      live_view_available: false,
+      runtime_message: 'AutoPilot browser tools are delegated to an agent worker outside the VNC display.',
+      vnc_url: null,
+      display_diagnostics: null,
+    };
+  }
+  if (/^\/autopilot\/[^/]+\/(phases|questions|spec-tasks|test-tasks)/.test(path)) return [];
+  if (/^\/autopilot\/[^/]+$/.test(path)) {
+    return {
+      id: path.split('/').pop() || 'autopilot-e2e',
+      project_id: 'default',
+      entry_urls: ['https://example.test'],
+      status: 'running',
+      current_phase: 'exploration',
+      current_phase_progress: 0.3,
+      overall_progress: 0.1,
+      phases_completed: [],
+      total_pages_discovered: 0,
+      total_flows_discovered: 0,
+      total_requirements_generated: 0,
+      total_specs_generated: 0,
+      total_tests_generated: 0,
+      total_tests_passed: 0,
+      total_tests_failed: 0,
+      coverage_percentage: 0,
+      error_message: null,
+      created_at: now,
+      started_at: now,
+      completed_at: null,
+      instructions: null,
+      config: {},
+      can_resume: false,
+      resume_reason: null,
+      failed_phase: null,
+    };
+  }
   if (path.startsWith('/autopilot')) return { id: 'autopilot-e2e', status: 'completed', phases: [], questions: [], tasks: [] };
 
   if (path.startsWith('/exploration')) return [];
@@ -651,6 +764,6 @@ export async function installDashboardApiMocks(page: Page, state = createMockSta
 }
 
 export async function expectPageReady(page: Page, heading: string | RegExp) {
-  await expect(page.locator('main').first()).toBeVisible();
+  await expect(page.locator('main').first()).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible({ timeout: 20_000 });
 }

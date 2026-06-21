@@ -987,6 +987,72 @@ def test_explorer_identifies_browser_budget_stop():
     assert not _AppExplorer._is_budget_stop("Agent timed out")
 
 
+@pytest.mark.asyncio
+async def test_explorer_agent_uses_session_dir_name_for_autopilot_metadata(
+    tmp_path, monkeypatch
+):
+    captured_kwargs = {}
+
+    class FakeAgentRunner:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        async def run(self, _prompt):
+            return SimpleNamespace(
+                success=True,
+                output="explorer output",
+                error=None,
+                duration_seconds=0.1,
+                tool_calls=[],
+                messages_received=1,
+                text_blocks_received=1,
+                timed_out=False,
+            )
+
+    session_dir = tmp_path / "explore_2026-06-20_12-34-56"
+    session_dir.mkdir()
+    explorer = object.__new__(_AppExplorer)
+    explorer.on_tool_use = None
+    explorer.on_progress = None
+    explorer.on_task_enqueued = None
+    explorer.owner_type = "autopilot"
+    explorer.owner_id = "autopilot-session-7"
+    explorer.owner_label = "Auto Pilot session 7"
+    explorer._last_agent_stats = {}
+
+    monkeypatch.setattr(
+        "orchestrator.workflows.app_explorer.write_playwright_mcp_config",
+        lambda **_kwargs: {
+            "browser_runtime": "stubbed",
+            "live_view_available": False,
+            "mcp_command": "stub-playwright",
+            "mcp_config_path": str(session_dir / ".mcp.json"),
+        },
+    )
+    monkeypatch.setattr(
+        "orchestrator.workflows.app_explorer.copy_claude_project_config",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "orchestrator.workflows.app_explorer.AgentRunner",
+        FakeAgentRunner,
+    )
+
+    output = await explorer._run_explorer_agent(
+        "Explore the app.",
+        session_dir,
+        _ExplorationConfig(entry_url="https://example.com"),
+    )
+
+    assert output == "explorer output"
+    assert captured_kwargs["autopilot_stable_key"] == (
+        "explore:explore_2026-06-20_12-34-56"
+    )
+    assert captured_kwargs["autopilot_source_id"] == "explore_2026-06-20_12-34-56"
+    assert captured_kwargs["autopilot_retry_enabled"] is True
+    assert captured_kwargs["autopilot_session_id"] == "autopilot-session-7"
+
+
 def test_explorer_parses_transition_with_string_action_element():
     explorer = _AppExplorer(project_id="test")
 

@@ -51,6 +51,16 @@ import { useProject } from '@/contexts/ProjectContext';
 import { getProjectContext } from '@/lib/chat-api';
 import { fetchWithAuth } from '@/contexts/AuthContext';
 import { API_BASE } from '@/lib/api';
+import {
+  buildApiTestingPageLinkForTool,
+  getApiTestingArtifactContext,
+  isApiTestingTool,
+} from '@/lib/ai/api-testing-links';
+import {
+  buildAssistantArtifactPageLinkForTool,
+  getAssistantArtifactContext,
+  isAssistantArtifactTool,
+} from '@/lib/ai/assistant-artifact-links';
 
 interface MentionEntity {
   type: string;
@@ -2673,6 +2683,27 @@ function buildToolResultSummary(toolName: string, data: Record<string, unknown>)
   addRow(rows, 'Phase', currentPhase ? compactLabel(currentPhase) : undefined);
   addRow(rows, 'Progress', progress !== undefined ? `${Math.round(progress)}%` : undefined);
 
+  if (isApiTestingTool(toolName)) {
+    const artifact = getApiTestingArtifactContext(toolName, data);
+    addRow(rows, 'Project', artifact.projectId);
+    addRow(rows, 'Spec', artifact.specName);
+    addRow(rows, 'Spec Path', artifact.specPath);
+    addRow(rows, 'Generated Test', artifact.testPath);
+  }
+  if (isAssistantArtifactTool(toolName)) {
+    const artifact = getAssistantArtifactContext(toolName, data);
+    addRow(rows, 'Project', artifact.projectId);
+    addRow(rows, 'Job', artifact.jobId);
+    addRow(rows, 'Run', artifact.runId);
+    addRow(rows, 'Spec', artifact.specName);
+    addRow(rows, 'Spec Path', artifact.specPath);
+    addRow(rows, 'Script', artifact.scriptPath);
+    addRow(rows, 'Finding', artifact.findingId);
+    addRow(rows, 'Session', artifact.sessionId);
+    addRow(rows, 'Flow', artifact.flowId);
+    addRow(rows, 'Requirement', artifact.requirementId);
+  }
+
   const scalarRows: Array<[string, string[]]> = [
     ['Created', ['created', 'created_count', 'specs_created', 'tests_created', 'generated_count']],
     ['Updated', ['updated', 'updated_count']],
@@ -2718,7 +2749,9 @@ function buildToolResultSummary(toolName: string, data: Record<string, unknown>)
     message: message ? truncateText(message) : undefined,
     rows: rows.slice(0, 8),
     nextActions: getStateAwareFollowUps(toolName, data),
-    pageLink: toolPageMap[toolName],
+    pageLink: buildApiTestingPageLinkForTool(toolName, data)
+      || buildAssistantArtifactPageLinkForTool(toolName, data)
+      || toolPageMap[toolName],
   };
 }
 

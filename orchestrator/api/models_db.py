@@ -4682,6 +4682,90 @@ class AutoPilotQuestion(SQLModel, table=True):
         self.suggested_answers_json = json.dumps(value)
 
 
+class AutoPilotChecklistItem(SQLModel, table=True):
+    """Persisted live checklist row for an AutoPilot session."""
+
+    __tablename__ = "autopilot_checklist_items"
+    __table_args__ = (
+        Index("ix_autopilot_checklist_session_sequence", "session_id", "sequence"),
+        Index("ix_autopilot_checklist_session_status", "session_id", "status"),
+        Index("ix_autopilot_checklist_session_phase", "session_id", "phase_name"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: str = Field(foreign_key="autopilot_sessions.id", index=True)
+    sequence: int = Field(default=0, index=True)
+    kind: str = Field(default="task", index=True)
+    phase_name: str | None = Field(default=None, index=True)
+    title: str
+    detail: str | None = None
+    status: str = Field(default="pending", index=True)
+    progress: float = 0.0
+    items_completed: int = 0
+    items_total: int = 0
+    source_type: str | None = Field(default=None, index=True)
+    source_id: str | None = Field(default=None, index=True)
+    metadata_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    completed_at: datetime | None = None
+
+    @property
+    def metadata_dict(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @metadata_dict.setter
+    def metadata_dict(self, value: dict[str, Any] | None):
+        self.metadata_json = json.dumps(value or {})
+
+
+class AutoPilotAgentAttempt(SQLModel, table=True):
+    """Durable retry/resume state for one AutoPilot agent attempt."""
+
+    __tablename__ = "autopilot_agent_attempts"
+    __table_args__ = (
+        UniqueConstraint("session_id", "stable_key", "attempt_number", name="uq_autopilot_agent_attempt"),
+        Index("ix_autopilot_agent_attempts_session_key", "session_id", "stable_key"),
+        Index("ix_autopilot_agent_attempts_session_status", "session_id", "status"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: f"apatt-{uuid.uuid4().hex[:12]}", primary_key=True)
+    session_id: str = Field(foreign_key="autopilot_sessions.id", index=True)
+    stable_key: str = Field(index=True)
+    source_type: str | None = Field(default=None, index=True)
+    source_id: str | None = Field(default=None, index=True)
+    agent_kind: str = Field(default="agent", index=True)
+    attempt_number: int = Field(default=1, index=True)
+    claude_session_id: str | None = Field(default=None, index=True)
+    session_dir: str | None = None
+    status: str = Field(default="running", index=True)
+    error_type: str | None = Field(default=None, index=True)
+    retry_eligible: bool = Field(default=False, index=True)
+    metadata_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    completed_at: datetime | None = None
+
+    @property
+    def metadata_dict(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @metadata_dict.setter
+    def metadata_dict(self, value: dict[str, Any] | None):
+        self.metadata_json = json.dumps(value or {}, default=str)
+
+
 class AutoPilotSpecTask(SQLModel, table=True):
     """Individual spec generation task within Auto Pilot."""
 
@@ -4697,8 +4781,21 @@ class AutoPilotSpecTask(SQLModel, table=True):
     spec_name: str | None = None
     spec_path: str | None = None
     error_message: str | None = None
+    evidence_metadata_json: str = Field(default="{}", sa_column=Column(Text))
     created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
+
+    @property
+    def evidence_metadata(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.evidence_metadata_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @evidence_metadata.setter
+    def evidence_metadata(self, value: dict[str, Any] | None):
+        self.evidence_metadata_json = json.dumps(value or {})
 
 
 class AutoPilotTestTask(SQLModel, table=True):

@@ -29,11 +29,6 @@ from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
 
-# Use run-specific config directory if set (for parallel execution isolation)
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
-
 from orchestrator.ai.prompt_registry import (
     attach_prompt_metadata,
     build_prompt_metadata,
@@ -116,6 +111,7 @@ class NativePlanner:
         target_url: str | None = None,
         login_url: str | None = None,
         credentials: dict[str, str] | None = None,
+        auth_context: dict[str, Any] | None = None,
         additional_context: str | None = None,
     ) -> Path:
         """
@@ -163,6 +159,7 @@ class NativePlanner:
             target_url=target_url,
             login_url=login_url,
             credentials=credentials,
+            auth_context=auth_context,
             output_path=str(output_path),
         )
 
@@ -210,11 +207,11 @@ class NativePlanner:
             login_section = ""
             if credentials:
                 actual_login_url = login_url or target_url
-                username = credentials.get("username", "")
-                password = credentials.get("password", "")
                 # Get environment variable names if provided
                 username_var = credentials.get("username_var", "LOGIN_USERNAME")
                 password_var = credentials.get("password_var", "LOGIN_PASSWORD")
+                username = credentials.get("username") or os.environ.get(username_var, "")
+                password = credentials.get("password") or os.environ.get(password_var, "")
                 test_data_ref = credentials.get("test_data_ref")
                 ref_instruction = ""
                 if test_data_ref:
@@ -323,9 +320,12 @@ Return exactly one independently runnable TC section for "{feature_name}":
 - `### TC-XXX: [Scenario Name]`
 - `**Description:** ...`
 - `**Preconditions:** ...`
-- `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
-- `**Expected Result:**` concrete assertions or observable outcomes
+- `**Steps:**` numbered action steps with an absolute starting URL and ACTUAL SELECTORS if discovered
+- `**Expected Result:**` concrete assertions or observable outcomes with exact text, URL, or count expectations
 - `**Test Data:**` preserve required placeholders, URLs, and `@testdata` refs
+- Preserve the exact auth fixture ref when one is supplied; never replace it with vague "valid user" language
+- Do not leave unresolved placeholders like `{{{{trip_id}}}}` or `{{trip_id}}` unless the steps explain exactly how to derive the value from a visible link, fixture, or prior response
+- Treat password, 2FA, security, billing, or destructive account changes as non-mutating reachability checks unless a disposable test account is explicitly configured
 
 Then add:
 - `## Draft Playwright Script`
@@ -356,6 +356,15 @@ Return a split-ready plan with TC-XXX sections. Every TC must be independently r
 - `**Description:** ...`
 - `**Preconditions:** ...`
 - `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
+- `**Expected Result:**` concrete assertions with exact visible text, URLs, or counts where possible
+- `**Test Data:**` include absolute starting URL, auth fixture refs, and derivation rules for any dynamic IDs
+
+Spec contract rules:
+- Every TC must start from an absolute URL, not "the dashboard" or a relative route.
+- Preserve exact auth fixture references such as `@testdata "..."`; generated specs must name the same fixture.
+- Do not use unresolved placeholders like `{{{{trip_id}}}}` or `{{trip_id}}` unless steps derive the value from a visible link, fixture, or previous response and later assert the same derived value.
+- For stateful flows, derive IDs from visible links or fixtures, then assert that same ID after navigation.
+- Risky security/account changes must be non-mutating reachability checks unless disposable test accounts are explicitly configured.
 - `**Expected Result:**` concrete assertions or observable outcomes
 - `**Test Data:**` optional placeholders and URLs
 
@@ -508,6 +517,20 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 getattr(self, "_planner_retry_continue_conversation", False)
                 and not getattr(self, "_planner_retry_session_id", None)
             ),
+            preserve_browser_on_failure=self.owner_type == "autopilot",
+            autopilot_retry_enabled=(
+                bool(getattr(self, "autopilot_retry_enabled", False))
+                or self.owner_type == "autopilot"
+            ),
+            autopilot_session_id=getattr(self, "autopilot_session_id", None)
+            or self.owner_id,
+            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
+            autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_planner"),
+            autopilot_source_type=getattr(self, "autopilot_source_type", None),
+            autopilot_source_id=getattr(self, "autopilot_source_id", None),
+            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
+            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
+            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
             tool_permission_guard=(
                 self._build_live_plan_permission_guard(target_url)
                 if target_url
@@ -556,6 +579,8 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         self.last_draft_script_path = None
         require_draft_script = bool(target_url)
         retry_session_id: str | None = None
+        unproductive_retry_used = False
+        force_fresh_retry = False
 
         for attempt_number in range(1, max_attempts + 1):
             if attempt_number > 1:
@@ -567,9 +592,9 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     max_attempts,
                 )
 
-            self._planner_retry_session_id = retry_session_id
+            self._planner_retry_session_id = None if force_fresh_retry else retry_session_id
             self._planner_retry_continue_conversation = (
-                attempt_number > 1 and not retry_session_id
+                attempt_number > 1 and not retry_session_id and not force_fresh_retry
             )
             try:
                 agent_result = await self._query_planner_agent(
@@ -582,6 +607,36 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 getattr(agent_result, "session_id", None) or retry_session_id
             )
             try:
+                if self._is_unproductive_stream_failure(agent_result):
+                    saved_plan_path = self._recover_saved_plan(expected_output_path)
+                    if saved_plan_path:
+                        logger.info(
+                            "Recovering saved planner artifact after unproductive SDK stream: %s",
+                            saved_plan_path,
+                        )
+                        return await self._finalize_or_repair_plan_artifact(
+                            plan_path=saved_plan_path,
+                            expected_output_path=expected_output_path,
+                            require_draft_script=require_draft_script,
+                            subject_type=subject_type,
+                            subject_name=subject_name,
+                            agent_result=agent_result,
+                        )
+                    raise self._build_runtime_failure_error(
+                        subject_type=subject_type,
+                        subject_name=subject_name,
+                        agent_result=agent_result,
+                        expected_output_path=expected_output_path,
+                    )
+
+                if self._is_runtime_zero_output_failure(agent_result, require_live_browser=bool(target_url)):
+                    raise self._build_runtime_failure_error(
+                        subject_type=subject_type,
+                        subject_name=subject_name,
+                        agent_result=agent_result,
+                        expected_output_path=expected_output_path,
+                    )
+
                 live_sequence_error: SpecGenerationError | None = None
                 if target_url:
                     try:
@@ -601,7 +656,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                         agent_result=agent_result,
                     )
                     if live_sequence_error:
-                        self._record_live_sequence_warning(
+                        self._handle_live_sequence_artifact(
                             error=live_sequence_error,
                             expected_output_path=expected_output_path,
                             generated_plan_path=finalized_path,
@@ -624,7 +679,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                         agent_result=agent_result,
                     )
                     if live_sequence_error:
-                        self._record_live_sequence_warning(
+                        self._handle_live_sequence_artifact(
                             error=live_sequence_error,
                             expected_output_path=expected_output_path,
                             generated_plan_path=finalized_path,
@@ -645,7 +700,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                         require_draft_script=require_draft_script,
                     )
                     if live_sequence_error:
-                        self._record_live_sequence_warning(
+                        self._handle_live_sequence_artifact(
                             error=live_sequence_error,
                             expected_output_path=expected_output_path,
                             generated_plan_path=finalized_path,
@@ -668,8 +723,20 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 )
             except SpecGenerationError as exc:
                 last_error = exc
+                is_unproductive = (
+                    exc.diagnostics.get("exception_type") == "unproductive_stream"
+                    or exc.diagnostics.get("failure_category") == "unproductive_stream"
+                )
+                if is_unproductive and unproductive_retry_used:
+                    raise
                 if attempt_number >= max_attempts:
                     raise
+                if is_unproductive:
+                    unproductive_retry_used = True
+                    retry_session_id = None
+                    force_fresh_retry = True
+                else:
+                    force_fresh_retry = False
                 current_prompt = self._build_planner_retry_prompt(
                     original_prompt=prompt,
                     subject_type=subject_type,
@@ -702,6 +769,24 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 expected_output_path,
                 exc,
             )
+
+    def _handle_live_sequence_artifact(
+        self,
+        *,
+        error: SpecGenerationError,
+        expected_output_path: Path,
+        generated_plan_path: Path,
+    ) -> None:
+        """Reject live-browser artifacts that violated mandatory navigate/snapshot order."""
+        if os.environ.get("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING") == "1":
+            self._record_live_sequence_warning(
+                error=error,
+                expected_output_path=expected_output_path,
+                generated_plan_path=generated_plan_path,
+            )
+            return
+        self._discard_rejected_plan_artifact(expected_output_path)
+        raise error
 
     def _record_live_sequence_warning(
         self,
@@ -1014,13 +1099,47 @@ Original task follows. Obey it, but correct the failure above.
         return None
 
     @classmethod
+    def _tool_call_verified_current_url(cls, tool_call: Any) -> str | None:
+        tool_input = getattr(tool_call, "input", None)
+        if isinstance(tool_input, dict):
+            for key in (
+                "current_url",
+                "currentUrl",
+                "page_url",
+                "pageUrl",
+                "verified_url",
+                "verifiedUrl",
+                "url",
+            ):
+                value = tool_input.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+
+        result_preview = str(getattr(tool_call, "result_preview", "") or "")
+        if not result_preview:
+            return None
+        patterns = (
+            r"(?im)^\s*(?:page\s+url|current\s+url|url)\s*[:=]\s*(https?://[^\s\]\)\"'`]+)",
+            r"(?im)\b(?:page\s+url|current\s+url|url)\b[^\n]*?(https?://[^\s\]\)\"'`]+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, result_preview)
+            if match:
+                return match.group(1).rstrip(".,;")
+        return None
+
+    @classmethod
     def _validate_live_plan_tool_sequence(
         cls, agent_result: Any, target_url: str
     ) -> None:
         """Reject live PRD plans that were saved without first visiting Target URL."""
+        if cls._agent_result_has_no_evidence(agent_result):
+            return
+
         expected = cls._canonical_url(target_url)
         tool_calls = list(getattr(agent_result, "tool_calls", []) or [])
         setup_seen = False
+        navigate_attempt_seen = False
         navigate_seen = False
         snapshot_seen = False
         save_seen = False
@@ -1030,11 +1149,20 @@ Original task follows. Obey it, but correct the failure above.
             if short_name == "planner_setup_page":
                 setup_seen = True
             elif short_name == "browser_navigate":
+                navigate_attempt_seen = True
                 actual = cls._canonical_url(cls._tool_call_url(tool_call))
                 if actual == expected:
                     navigate_seen = True
-            elif short_name == "browser_snapshot" and navigate_seen:
-                snapshot_seen = True
+                    snapshot_seen = False
+            elif short_name == "browser_snapshot":
+                snapshot_url = cls._canonical_url(
+                    cls._tool_call_verified_current_url(tool_call)
+                )
+                if snapshot_url == expected and (navigate_seen or navigate_attempt_seen):
+                    navigate_seen = True
+                    snapshot_seen = True
+                elif navigate_seen:
+                    snapshot_seen = True
             elif short_name in {"planner_save_plan", "save_plan"}:
                 save_seen = True
                 if not (setup_seen and navigate_seen and snapshot_seen):
@@ -1043,21 +1171,42 @@ Original task follows. Obey it, but correct the failure above.
                         diagnostics={
                             "expected_target_url": target_url,
                             "planner_setup_page_observed": setup_seen,
+                            "browser_navigate_observed": navigate_attempt_seen,
                             "target_navigation_observed": navigate_seen,
                             "browser_snapshot_after_navigation_observed": snapshot_seen,
                             "planner_save_plan_observed": True,
                         },
                     )
 
-        if not navigate_seen:
+        if not (setup_seen and navigate_seen and snapshot_seen):
+            missing = []
+            if not setup_seen:
+                missing.append("planner_setup_page")
+            if not navigate_seen:
+                missing.append("browser_navigate")
+            if not snapshot_seen:
+                missing.append("browser_snapshot")
+            missing_message = ", ".join(missing)
+            if "browser_navigate" in missing:
+                failure_message = (
+                    "Live-browser planner did not navigate to the Target URL before finishing "
+                    f"and did not complete the required setup/navigate/snapshot sequence: {missing_message}."
+                )
+            else:
+                failure_message = (
+                    "Live-browser planner did not complete the required setup/navigate/snapshot "
+                    f"sequence before finishing: {missing_message}."
+                )
             raise SpecGenerationError(
-                f"Live-browser planner did not navigate to the Target URL before finishing: {target_url}",
+                failure_message,
                 diagnostics={
                     "expected_target_url": target_url,
                     "planner_setup_page_observed": setup_seen,
-                    "target_navigation_observed": False,
+                    "browser_navigate_observed": navigate_attempt_seen,
+                    "target_navigation_observed": navigate_seen,
                     "browser_snapshot_after_navigation_observed": snapshot_seen,
                     "planner_save_plan_observed": save_seen,
+                    "missing_sequence_steps": missing,
                 },
             )
 
@@ -1065,6 +1214,37 @@ Original task follows. Obey it, but correct the failure above.
     def _looks_like_test_plan(content: str) -> bool:
         """Return true when markdown contains real test-case structure."""
         return any(marker in content for marker in ("TC-", "Test Case", "## Steps"))
+
+    @staticmethod
+    def _agent_result_has_no_evidence(agent_result: Any) -> bool:
+        return (
+            not str(getattr(agent_result, "output", "") or "").strip()
+            and not list(getattr(agent_result, "tool_calls", []) or [])
+            and int(getattr(agent_result, "messages_received", 0) or 0) == 0
+            and int(getattr(agent_result, "text_blocks_received", 0) or 0) == 0
+        )
+
+    @classmethod
+    def _is_runtime_zero_output_failure(
+        cls, agent_result: Any, *, require_live_browser: bool
+    ) -> bool:
+        if not cls._agent_result_has_no_evidence(agent_result):
+            return False
+        error_type = str(getattr(agent_result, "error_type", "") or "")
+        error = str(getattr(agent_result, "error", "") or "")
+        if require_live_browser:
+            return True
+        return bool(
+            getattr(agent_result, "timed_out", False)
+            or error
+            or error_type in {"ProcessError", "agent_process_error"}
+            or "processerror" in error.lower()
+            or "process error" in error.lower()
+        )
+
+    @staticmethod
+    def _is_unproductive_stream_failure(agent_result: Any) -> bool:
+        return str(getattr(agent_result, "error_type", "") or "") == "unproductive_stream"
 
     @staticmethod
     def _redact_sensitive_text(content: str) -> str:
@@ -1951,6 +2131,7 @@ Original task follows. Obey it, but correct the failure above.
             "agent_success": bool(getattr(agent_result, "success", False)),
             "timed_out": timed_out,
             "agent_error": agent_error,
+            "agent_error_type": getattr(agent_result, "error_type", None),
             "messages_received": int(
                 getattr(agent_result, "messages_received", 0) or 0
             ),
@@ -1958,12 +2139,18 @@ Original task follows. Obey it, but correct the failure above.
                 getattr(agent_result, "text_blocks_received", 0) or 0
             ),
             "tool_calls": len(tool_calls),
+            "output_chars": len(str(getattr(agent_result, "output", "") or "")),
+            "unproductive_stream": str(getattr(agent_result, "error_type", "") or "") == "unproductive_stream",
             "planner_save_plan_observed": planner_save_plan_observed,
             "valid_saved_plan_observed": False,
             "expected_output_path": str(expected_output_path),
         }
 
-        if timed_out:
+        if diagnostics["unproductive_stream"]:
+            diagnostics["next_action"] = (
+                "Recover a valid saved planner artifact if present; otherwise retry once with a fresh SDK session."
+            )
+        elif timed_out:
             diagnostics["next_action"] = (
                 "Retry with a longer planner timeout or reduce the feature scope."
             )
@@ -1985,6 +2172,76 @@ Original task follows. Obey it, but correct the failure above.
             )
 
         return diagnostics
+
+    def _write_runtime_error_artifact(
+        self,
+        *,
+        diagnostics: dict[str, Any],
+        expected_output_path: Path,
+    ) -> str | None:
+        base_dir = self.session_dir or expected_output_path.parent
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+            path = base_dir / "runtime_error.json"
+            path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True, default=str))
+            return str(path)
+        except OSError as exc:
+            logger.debug("Could not write planner runtime error artifact: %s", exc)
+            return None
+
+    def _build_runtime_failure_error(
+        self,
+        *,
+        subject_type: str,
+        subject_name: str,
+        agent_result: Any,
+        expected_output_path: Path,
+    ) -> SpecGenerationError:
+        diagnostics = self._agent_diagnostics(agent_result, expected_output_path)
+        diagnostics.update(
+            {
+                "status": "runtime_failed",
+                "failure_category": (
+                    "unproductive_stream"
+                    if getattr(agent_result, "error_type", None) == "unproductive_stream"
+                    else "runtime_failed"
+                ),
+                "exception_type": getattr(agent_result, "error_type", None)
+                or ("timeout" if getattr(agent_result, "timed_out", False) else None)
+                or "zero_output_agent_result",
+                "exception_message": getattr(agent_result, "error", None),
+                "sdk_session_id": getattr(agent_result, "session_id", None),
+                "worker_identity": {
+                    "pid": os.getpid(),
+                    "cwd": str(Path.cwd()),
+                    "agent_cwd": str(self.cwd) if self.cwd else None,
+                },
+                "mcp_config_path": str(Path(self.cwd) / ".mcp.json")
+                if self.cwd
+                else None,
+            }
+        )
+        artifact_path = self._write_runtime_error_artifact(
+            diagnostics=diagnostics,
+            expected_output_path=expected_output_path,
+        )
+        if artifact_path:
+            diagnostics["runtime_error_path"] = artifact_path
+        if diagnostics["exception_type"] == "unproductive_stream":
+            message = (
+                f"Failed to generate spec for {subject_type} '{subject_name}': "
+                "planner SDK stream received messages but produced no parsed text, "
+                "tool calls, or output."
+            )
+        else:
+            message = (
+                f"Failed to generate spec for {subject_type} '{subject_name}': "
+                "planner runtime failed before producing any messages, output, or tool calls."
+            )
+        return SpecGenerationError(
+            message,
+            diagnostics=diagnostics,
+        )
 
     @classmethod
     def _build_no_output_error(

@@ -30,6 +30,7 @@ interface ScenariosTabProps {
     specContents: Record<string, string>;
     latestRunsBySpec?: Record<string, LoadTestRun>;
     projectId?: string;
+    initialSpecName?: string;
 }
 
 export default function ScenariosTab({
@@ -47,6 +48,7 @@ export default function ScenariosTab({
     specContents,
     latestRunsBySpec,
     projectId,
+    initialSpecName,
 }: ScenariosTabProps) {
     const [specsSearch, setSpecsSearch] = useState('');
     const [showCreateModal, setShowCreateModal] = useState(false);
@@ -100,6 +102,13 @@ export default function ScenariosTab({
     useEffect(() => {
         fetchTrends();
     }, [fetchTrends]);
+
+    useEffect(() => {
+        if (!initialSpecName || !specs.some(spec => spec.name === initialSpecName)) return;
+        setSpecsSearch(initialSpecName);
+        setExpandedSpec(initialSpecName);
+        onLoadSpecContent(initialSpecName);
+    }, [initialSpecName, onLoadSpecContent, specs]);
 
     const handleCreate = async () => {
         if (!newSpecName.trim()) return;

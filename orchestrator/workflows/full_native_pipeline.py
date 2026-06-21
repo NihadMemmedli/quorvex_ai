@@ -41,12 +41,6 @@ from load_env import setup_claude_env
 
 setup_claude_env()
 
-# Use run-specific config directory if set (for parallel execution isolation)
-# This must happen BEFORE importing workflow classes that use Agent SDK
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
-
 from orchestrator.services.handoff_manifest import (
     init_manifest,
     load_manifest,
@@ -251,6 +245,15 @@ root_cause: one concise sentence, or "none" if passed
                 capture_memory=False,
                 force_direct_execution=True,
                 preserve_browser_on_failure=True,
+                autopilot_retry_enabled=bool(getattr(self, "autopilot_retry_enabled", False)),
+                autopilot_session_id=getattr(self, "autopilot_session_id", None),
+                autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
+                autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_debug"),
+                autopilot_source_type=getattr(self, "autopilot_source_type", None),
+                autopilot_source_id=getattr(self, "autopilot_source_id", None),
+                autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
+                autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
+                autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
             )
             result = await runner.run(prompt)
             output = result.output or ""
@@ -696,6 +699,11 @@ root_cause: one concise sentence, or "none" if passed
                     )
                 except SpecGenerationError as exc:
                     error_msg = str(exc)
+                    failure_category = (
+                        exc.diagnostics.get("failure_category")
+                        if isinstance(exc.diagnostics, dict)
+                        else None
+                    ) or "planner_validation"
                     logger.error("Native planner failed validation: %s", error_msg)
                     planner_result = getattr(self.native_planner, "last_agent_result", None)
                     record_attempt(
@@ -707,7 +715,7 @@ root_cause: one concise sentence, or "none" if passed
                         executor_mode="queue_or_direct",
                         model_tier=getattr(self.native_planner, "model_tier", None),
                         timeout_seconds=int(os.environ.get("PLANNER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
-                        error_type=getattr(planner_result, "error_type", None) or "planner_validation",
+                        error_type=getattr(planner_result, "error_type", None) or failure_category,
                         tool_call_summary={
                             "count": len(getattr(planner_result, "tool_calls", []) or []),
                             "tools": [
@@ -721,7 +729,7 @@ root_cause: one concise sentence, or "none" if passed
                     self._write_pipeline_error(
                         run_dir,
                         error_msg,
-                        "planning",
+                        "runtime_failed" if failure_category == "runtime_failed" else "planning",
                         {"planner_diagnostics": exc.diagnostics},
                     )
                     record_stage(
@@ -734,14 +742,16 @@ root_cause: one concise sentence, or "none" if passed
                     self._write_run_metrics(
                         run_dir,
                         planner_success=False,
-                        failure_category="planner_validation",
+                        failure_category=failure_category,
                     )
                     self._publish_agentic_summary(run_dir)
                     cleanup_orphaned_browsers()
                     return {
                         "success": False,
                         "error": error_msg,
-                        "stage": "planning",
+                        "stage": "runtime_failed"
+                        if failure_category == "runtime_failed"
+                        else "planning",
                         "planner_diagnostics": exc.diagnostics,
                     }
 
@@ -1933,6 +1943,15 @@ Requirements:
             inject_memory=False,
             capture_memory=False,
             env_vars=getattr(self, "test_data_env_vars", {}),
+            autopilot_retry_enabled=bool(getattr(self, "autopilot_retry_enabled", False)),
+            autopilot_session_id=getattr(self, "autopilot_session_id", None),
+            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
+            autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_repair"),
+            autopilot_source_type=getattr(self, "autopilot_source_type", None),
+            autopilot_source_id=getattr(self, "autopilot_source_id", None),
+            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
+            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
+            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
         )
         return await runner.run(prompt)
 

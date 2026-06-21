@@ -16,7 +16,7 @@ from pathlib import Path
 # Add orchestrator to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-# Store project base directory BEFORE any chdir() calls
+# Store project base directory independently of the process cwd.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,6 @@ logger = logging.getLogger(__name__)
 from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
-
-# Use run-specific config directory if set (for parallel execution isolation)
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
 
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.services.handoff_manifest import record_artifact, record_consumption

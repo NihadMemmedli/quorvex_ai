@@ -10,12 +10,81 @@ from claude_agent_sdk.types import AssistantMessage, ResultMessage, ToolResultBl
 
 import orchestrator.agents.base_agent as base_agent_module
 from orchestrator.agents.exploratory_agent import ExplorationState, ExploratoryAgent
+from orchestrator.agents.auth_handler import AuthHandler
+from orchestrator.api.exploration import ExplorationStartRequest, _build_exploratory_agent_config
 
 
 def _agent() -> ExploratoryAgent:
     agent = ExploratoryAgent()
     agent.state = ExplorationState(start_time=time.time())
     return agent
+
+
+def test_exploratory_prompt_requires_explicit_credentials_login_url():
+    agent = _agent()
+
+    with pytest.raises(ValueError, match="requires login_url"):
+        agent._build_exploration_prompt(
+            url="https://example.com",
+            instructions="Explore",
+            time_limit_minutes=5,
+            auth_config={"type": "credentials", "credentials": {"username": "user", "password": "secret"}},
+            test_data={},
+            focus_areas=[],
+            excluded_patterns=[],
+        )
+
+
+def test_exploration_config_does_not_default_credentials_login_url_to_login(monkeypatch):
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory import context_builder as context_builder_module
+
+    class DummyMemoryContextBuilder:
+        def __init__(self, service):
+            self.service = service
+
+        def build_prompt_context(self, **kwargs):
+            return ""
+
+    monkeypatch.setattr(agent_memory_module, "get_agent_memory_service", lambda: object())
+    monkeypatch.setattr(context_builder_module, "MemoryContextBuilder", DummyMemoryContextBuilder)
+
+    request = ExplorationStartRequest(
+        entry_url="https://example.com",
+        credentials={"username": "user", "password": "secret"},
+        login_url="  /sign-in  ",
+    )
+
+    config = _build_exploratory_agent_config(request, run_id="run-explicit-login")
+
+    assert config["auth"]["login_url"] == "/sign-in"
+
+
+def test_exploration_config_rejects_credentials_without_login_url():
+    request = ExplorationStartRequest(
+        entry_url="https://example.com",
+        credentials={"username": "user", "password": "secret"},
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        _build_exploratory_agent_config(request, run_id="run-missing-login")
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "requires login_url" in str(getattr(exc_info.value, "detail", exc_info.value))
+
+
+@pytest.mark.asyncio
+async def test_auth_handler_does_not_default_credentials_login_url(tmp_path):
+    handler = AuthHandler(storage_dir=tmp_path)
+
+    result = await handler.authenticate(
+        None,
+        {"type": "credentials", "credentials": {"username": "user", "password": "secret"}},
+        "https://example.com",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "Missing login URL"
 
 
 def test_process_results_fails_parse_fallback_with_zero_evidence(monkeypatch):

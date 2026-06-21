@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Compass, Plus, Play, Square, Eye, FileText, Clock, Globe, Zap, Activity, X, Loader2, Bot, Terminal, ChevronRight, CheckCircle2, AlertTriangle, RotateCcw, Lock, Settings, Download, Sparkles, ArrowRight, Info, RefreshCw, Scissors, ExternalLink, Edit, Trash2, Save, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -291,11 +292,17 @@ async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<
 
 export default function DiscoveryPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
+    const router = useRouter();
+    const searchParams = useSearchParams();
     const projectDefaultUrl = getProjectDefaultUrl(currentProject);
     const previousProjectDefaultUrlRef = useRef('');
 
     // ============ TAB STATE ============
-    const [activeTab, setActiveTab] = useState<TabType>('sessions');
+    const initialTab = (searchParams.get('tab') || 'sessions') as TabType;
+    const normalizedInitialTab = (['sessions', 'explorer'].includes(initialTab) ? initialTab : 'sessions') as TabType;
+    const [activeTab, setActiveTab] = useState<TabType>(normalizedInitialTab);
+    const openedDeepLinkFlowRef = useRef<string | null>(null);
+    const openedDeepLinkSessionRef = useRef<string | null>(null);
 
     // ============ SESSIONS TAB STATE ============
     const [sessions, setSessions] = useState<ExplorationSession[]>([]);
@@ -350,7 +357,7 @@ export default function DiscoveryPage() {
     const [instructions, setInstructions] = useState('');
     const [timeLimitMinutes, setTimeLimitMinutes] = useState(15);
     const [authType, setAuthType] = useState<AuthType>('none');
-    const [authCredentials, setAuthCredentials] = useState({ username: '', password: '', loginUrl: '/login' });
+    const [authCredentials, setAuthCredentials] = useState({ username: '', password: '', loginUrl: '' });
     const [agentSessionId, setAgentSessionId] = useState('');
     const [testData, setTestData] = useState('');
     const [focusAreas, setFocusAreas] = useState('');
@@ -384,6 +391,28 @@ export default function DiscoveryPage() {
         setEntryUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
         previousProjectDefaultUrlRef.current = projectDefaultUrl;
     }, [projectDefaultUrl]);
+
+    const updateUrlState = useCallback((updates: Record<string, string | null>) => {
+        const next = new URLSearchParams(searchParams.toString());
+        Object.entries(updates).forEach(([key, value]) => {
+            if (value) next.set(key, value);
+            else next.delete(key);
+        });
+        const query = next.toString();
+        router.replace(query ? `/exploration?${query}` : '/exploration', { scroll: false });
+    }, [router, searchParams]);
+
+    const handleTabChange = useCallback((tab: TabType) => {
+        setActiveTab(tab);
+        updateUrlState({ tab });
+    }, [updateUrlState]);
+
+    useEffect(() => {
+        const tab = searchParams.get('tab') as TabType | null;
+        if (tab && ['sessions', 'explorer'].includes(tab) && tab !== activeTab) {
+            setActiveTab(tab);
+        }
+    }, [activeTab, searchParams]);
 
     const fetchRuntimeSettings = async () => {
         try {
@@ -484,6 +513,22 @@ export default function DiscoveryPage() {
             return () => clearInterval(interval);
         }
     }, [fetchSessions, activeTab]);
+
+    useEffect(() => {
+        function handleExplorationRefresh(event: Event) {
+            const detail = (event as CustomEvent).detail || {};
+            if (detail.projectId && detail.projectId !== currentProject?.id) return;
+            if (detail.runId) {
+                setActiveTab('explorer');
+                setSelectedRunId(String(detail.runId));
+            } else {
+                setActiveTab('sessions');
+                fetchSessions();
+            }
+        }
+        window.addEventListener('quorvex:exploration-refresh', handleExplorationRefresh);
+        return () => window.removeEventListener('quorvex:exploration-refresh', handleExplorationRefresh);
+    }, [currentProject?.id, fetchSessions]);
 
     const startExploration = async () => {
         const targetUrl = trimUrlInput(entryUrl);
@@ -598,6 +643,15 @@ export default function DiscoveryPage() {
             setDetailsLoading(false);
         }
     };
+
+    useEffect(() => {
+        const sessionId = searchParams.get('sessionId');
+        if (activeTab !== 'sessions' || !sessionId || openedDeepLinkSessionRef.current === sessionId) return;
+        const session = sessions.find(item => item.id === sessionId);
+        if (!session) return;
+        openedDeepLinkSessionRef.current = sessionId;
+        viewDetails(session);
+    }, [activeTab, searchParams, sessions]);
 
     useEffect(() => {
         if (!detailModalOpen || !selectedSession) return;
@@ -1149,6 +1203,12 @@ export default function DiscoveryPage() {
         return () => { if (pollInterval.current) clearInterval(pollInterval.current); }
     }, [currentProject?.id, activeTab]);
 
+    useEffect(() => {
+        const runId = searchParams.get('runId');
+        if (activeTab !== 'explorer' || !runId || selectedRunId === runId) return;
+        setSelectedRunId(runId);
+    }, [activeTab, searchParams, selectedRunId]);
+
     const fetchRun = async (id: string) => {
         try {
             const res = await fetch(`${API_BASE}/api/agents/runs/${id}`);
@@ -1212,6 +1272,13 @@ export default function DiscoveryPage() {
             setLoadingFlowDetails(false);
         }
     };
+
+    useEffect(() => {
+        const flowId = searchParams.get('flowId');
+        if (activeTab !== 'explorer' || !flowId || !activeRun?.id || openedDeepLinkFlowRef.current === `${activeRun.id}:${flowId}`) return;
+        openedDeepLinkFlowRef.current = `${activeRun.id}:${flowId}`;
+        fetchFlowDetails(flowId);
+    }, [activeRun?.id, activeTab, searchParams]);
 
     const flowSpecPoller = useJobPoller({
         apiBase: API_BASE,
@@ -1493,11 +1560,17 @@ export default function DiscoveryPage() {
             if (authType !== 'none' && authType !== 'session') {
                 authConfig = { type: authType };
                 if (authType === 'credentials') {
+                    const loginUrl = authCredentials.loginUrl.trim();
+                    if (!loginUrl) {
+                        alert("Login URL is required for credentials authentication");
+                        setIsAgentStarting(false);
+                        return;
+                    }
                     authConfig.credentials = {
                         username: authCredentials.username,
                         password: authCredentials.password
                     };
-                    authConfig.login_url = authCredentials.loginUrl;
+                    authConfig.login_url = loginUrl;
                 }
             }
 
@@ -1680,7 +1753,7 @@ export default function DiscoveryPage() {
                 ].map(tab => (
                     <button
                         key={tab.id}
-                        onClick={() => setActiveTab(tab.id)}
+                        onClick={() => handleTabChange(tab.id)}
                         style={{
                             display: 'flex',
                             alignItems: 'center',

@@ -68,11 +68,13 @@ class AuthHandler:
         3. Click login button
         4. Verify successful login
         """
-        login_url = auth_config.get("login_url", "/login")
+        login_url = str(auth_config.get("login_url") or "").strip()
         credentials = auth_config.get("credentials", {})
         username = credentials.get("username", "")
         password = credentials.get("password", "")
 
+        if not login_url:
+            return {"success": False, "type": "credentials", "error": "Missing login URL"}
         if not username or not password:
             return {"success": False, "type": "credentials", "error": "Missing username or password"}
 

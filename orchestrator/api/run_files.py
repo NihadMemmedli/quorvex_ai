@@ -2,7 +2,7 @@ import json
 import os
 import re
 import shlex
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -47,6 +47,7 @@ REAL_BROWSER_EXECUTABLE_NAMES = {
     "firefox",
 }
 ACTIVE_RUN_STATUSES = {"queued", "pending", "running", "in_progress"}
+RUN_STALE_OUTPUT_SECONDS = 120
 
 
 def _main_runtime() -> Any | None:
@@ -236,6 +237,67 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _extract_agent_progress_from_log(execution_log: str | None) -> dict[str, Any] | None:
+    if not execution_log:
+        return None
+    progress_matches = list(
+        re.finditer(
+            r"Agent progress:\s*(\d+)\s+msgs,\s*(\d+)\s+text,\s*(\d+)\s+tools,\s*(\d+)\s+chars",
+            execution_log,
+        )
+    )
+    if not progress_matches:
+        return None
+    last = progress_matches[-1]
+    messages = int(last.group(1))
+    text_blocks = int(last.group(2))
+    tool_calls = int(last.group(3))
+    output_chars = int(last.group(4))
+    elapsed_seconds = None
+    for elapsed_match in re.finditer(rf"\b{messages}\s+messages\s+\((\d+)s elapsed\)", execution_log):
+        elapsed_seconds = int(elapsed_match.group(1))
+    try:
+        min_messages = int(os.environ.get("AGENT_UNPRODUCTIVE_STREAM_MIN_MESSAGES", "500") or "500")
+    except ValueError:
+        min_messages = 500
+    try:
+        min_seconds = int(os.environ.get("AGENT_UNPRODUCTIVE_STREAM_SECONDS", "180") or "180")
+    except ValueError:
+        min_seconds = 180
+    unproductive = (
+        messages >= min_messages
+        and (elapsed_seconds is None or elapsed_seconds >= min_seconds)
+        and text_blocks == 0
+        and tool_calls == 0
+        and output_chars == 0
+    )
+    return {
+        "source": "execution.log",
+        "phase": "streaming",
+        "status": "running",
+        "messages_received": messages,
+        "text_blocks_received": text_blocks,
+        "tool_calls": tool_calls,
+        "output_chars": output_chars,
+        "elapsed_seconds": elapsed_seconds,
+        "unproductive_stream": unproductive,
+        "unproductive_stream_min_messages": min_messages,
+        "unproductive_stream_seconds": min_seconds,
+    }
+
+
+def _has_saved_planner_artifact(run_dir: Path) -> bool:
+    if not run_dir.exists():
+        return False
+    try:
+        for path in run_dir.glob("*.md"):
+            if path.is_file() and path.read_text(errors="replace").strip():
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _pipeline_error_message(error_data: dict[str, Any] | None) -> str | None:
     if not error_data:
         return None
@@ -309,6 +371,183 @@ def _is_terminal_run_status(status: str | None) -> bool:
         "canceled",
         "stopped",
         "aborted",
+    }
+
+
+def _iso_from_timestamp(timestamp: float | None) -> str | None:
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _age_seconds(value: Any, now: datetime) -> int | None:
+    parsed = _parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds()))
+
+
+def _latest_run_artifact_at(run_dir: Path) -> str | None:
+    if not run_dir.exists():
+        return None
+    latest: float | None = None
+    ignored_names = {"execution.log", "workflow.log"}
+    for path in run_dir.glob("**/*"):
+        if not path.is_file() or path.name in ignored_names:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        latest = mtime if latest is None else max(latest, mtime)
+    return _iso_from_timestamp(latest)
+
+
+def _started_temporal_activities(temporal: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(temporal, dict):
+        return []
+    return [
+        activity
+        for activity in temporal.get("activities") or []
+        if isinstance(activity, dict) and str(activity.get("status") or "").lower() == "started"
+    ]
+
+
+def build_run_observability_health(
+    run_db: DBTestRun,
+    run_dir: Path,
+    diagnostics: dict[str, Any],
+    *,
+    stale_after_seconds: int = RUN_STALE_OUTPUT_SECONDS,
+) -> dict[str, Any]:
+    """Return cheap, structured health signals for active run debugging."""
+    now = datetime.now(timezone.utc)
+    log_path = run_dir / "execution.log"
+    last_log_at = None
+    if log_path.exists():
+        try:
+            last_log_at = _iso_from_timestamp(log_path.stat().st_mtime)
+        except OSError:
+            last_log_at = None
+
+    last_artifact_at = _latest_run_artifact_at(run_dir)
+    stage_started_at = run_db.stage_started_at.isoformat() if run_db.stage_started_at else None
+    last_log_age_seconds = _age_seconds(last_log_at, now)
+    last_artifact_age_seconds = _age_seconds(last_artifact_at, now)
+    stage_age_seconds = _age_seconds(stage_started_at, now)
+    active = str(run_db.status or "").lower() in ACTIVE_RUN_STATUSES
+
+    recent_candidates = [
+        value
+        for value in (last_log_age_seconds, last_artifact_age_seconds)
+        if value is not None
+    ]
+    has_recent_output = bool(recent_candidates and min(recent_candidates) <= stale_after_seconds)
+    warnings: list[str] = []
+
+    if active and last_log_age_seconds is None:
+        warnings.append("No execution.log has been written while this run is active.")
+    elif active and last_log_age_seconds is not None and last_log_age_seconds > stale_after_seconds:
+        warnings.append(f"No new execution.log output for {last_log_age_seconds // 60} minutes.")
+
+    temporal = diagnostics.get("temporal") if isinstance(diagnostics.get("temporal"), dict) else {}
+    history_last_event_at = temporal.get("history_last_event_at") if isinstance(temporal, dict) else None
+    history_age_seconds = _age_seconds(history_last_event_at, now)
+    started_activities = _started_temporal_activities(temporal)
+    if active and started_activities and history_age_seconds is not None and history_age_seconds > stale_after_seconds:
+        activity_names = ", ".join(
+            str(activity.get("activity_type") or activity.get("activity_id") or "activity")
+            for activity in started_activities[:3]
+        )
+        warnings.append(
+            f"Temporal activity {activity_names} is started, but workflow history has not advanced for {history_age_seconds // 60} minutes."
+        )
+
+    browser_pool = diagnostics.get("browser_pool") if isinstance(diagnostics.get("browser_pool"), dict) else {}
+    running_requests = [str(item) for item in browser_pool.get("running_requests") or []] if browser_pool else []
+    browser_slot_owner = run_db.id if run_db.id in running_requests else None
+    if active and browser_slot_owner and last_log_age_seconds is not None and last_log_age_seconds > stale_after_seconds:
+        warnings.append("Browser slot is still held by this run while planner/tool logs are stale.")
+
+    agent_progress = diagnostics.get("agent_progress") if isinstance(diagnostics.get("agent_progress"), dict) else {}
+    if active and agent_progress:
+        try:
+            messages_received = int(agent_progress.get("messages_received") or 0)
+        except (TypeError, ValueError):
+            messages_received = 0
+        try:
+            text_blocks_received = int(agent_progress.get("text_blocks_received") or 0)
+        except (TypeError, ValueError):
+            text_blocks_received = 0
+        try:
+            tool_calls = int(agent_progress.get("tool_calls") or 0)
+        except (TypeError, ValueError):
+            tool_calls = 0
+        try:
+            output_chars = int(agent_progress.get("output_chars") or 0)
+        except (TypeError, ValueError):
+            output_chars = 0
+        try:
+            elapsed_seconds = int(float(agent_progress.get("elapsed_seconds") or 0))
+        except (TypeError, ValueError):
+            elapsed_seconds = 0
+        try:
+            min_messages = int(agent_progress.get("unproductive_stream_min_messages") or 500)
+        except (TypeError, ValueError):
+            min_messages = 500
+        try:
+            min_seconds = int(agent_progress.get("unproductive_stream_seconds") or 180)
+        except (TypeError, ValueError):
+            min_seconds = 180
+        unproductive = bool(agent_progress.get("unproductive_stream")) or (
+            messages_received >= min_messages
+            and elapsed_seconds >= min_seconds
+            and text_blocks_received == 0
+            and tool_calls == 0
+            and output_chars == 0
+        )
+        if unproductive:
+            artifact_note = (
+                " Saved planner artifacts were detected."
+                if _has_saved_planner_artifact(run_dir)
+                else ""
+            )
+            warnings.append(
+                f"Planner stream received {messages_received} messages but produced no parsed text, tool calls, or output.{artifact_note}"
+            )
+
+    return {
+        "last_log_at": last_log_at,
+        "last_artifact_at": last_artifact_at,
+        "last_temporal_event_at": history_last_event_at,
+        "stage_started_at": stage_started_at,
+        "stage_age_seconds": stage_age_seconds,
+        "last_log_age_seconds": last_log_age_seconds,
+        "last_artifact_age_seconds": last_artifact_age_seconds,
+        "last_temporal_event_age_seconds": history_age_seconds,
+        "has_recent_output": has_recent_output,
+        "stuck_warning": warnings[0] if warnings else None,
+        "warnings": warnings,
+        "temporal_started_activities": started_activities,
+        "browser_slot_owner": browser_slot_owner,
+        "browser_slot_blocker": browser_pool.get("blocker") if isinstance(browser_pool, dict) else None,
+        "agent_progress": agent_progress or None,
+        "stale_after_seconds": stale_after_seconds,
     }
 
 
@@ -422,6 +661,18 @@ async def compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict
         )
 
     execution_log = _read_text_if_exists(run_dir / "execution.log") if run_dir.exists() else None
+    agent_progress = _read_json_if_exists(run_dir / "agent_progress.json") if run_dir.exists() else None
+    if not agent_progress:
+        agent_progress = _extract_agent_progress_from_log(execution_log)
+    if agent_progress:
+        diagnostics["agent_progress"] = agent_progress
+        sections.append(
+            {
+                "source": agent_progress.get("source") or "agent_progress.json",
+                "title": "Agent Progress",
+                "content": json.dumps(agent_progress, indent=2, sort_keys=True, default=str),
+            }
+        )
     if execution_log:
         sections.append({"source": "execution.log", "title": "Run Log", "content": execution_log})
     else:
@@ -442,7 +693,7 @@ async def compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict
         pool = await _browser_pool()
         browser_status = await pool.get_status()
         browser_text, browser_blocker = _format_browser_pool_status(browser_status, run_db.id)
-        diagnostics["browser_pool"] = browser_status
+        diagnostics["browser_pool"] = {**browser_status, "blocker": browser_blocker}
         suppress_browser_blocker = _is_terminal_run_status(run_db.status) and known_pipeline_error
         if browser_blocker and suppress_browser_blocker:
             browser_text = "\n".join(line for line in browser_text.splitlines() if line != browser_blocker)
@@ -490,6 +741,8 @@ async def compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict
             }
         )
 
+    health = build_run_observability_health(run_db, run_dir, diagnostics)
+
     combined_log = "\n\n".join(
         f"## {section['title']}\n{section['content']}"
         for section in sections
@@ -499,6 +752,7 @@ async def compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict
         "log": combined_log,
         "log_sections": sections,
         "diagnostics": diagnostics,
+        "health": health,
         "blocker_message": blocker_message,
     }
 

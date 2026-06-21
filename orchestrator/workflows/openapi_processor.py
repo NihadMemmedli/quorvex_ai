@@ -25,10 +25,6 @@ from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
 
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
-
 import logging
 
 from orchestrator.workflows.native_api_generator import NativeApiGenerator

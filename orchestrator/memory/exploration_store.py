@@ -1006,6 +1006,27 @@ class ExplorationStore:
             db.commit()
             return count
 
+    def clear_rtm_for_project_spec_paths(
+        self, spec_paths: list[str], project_id: str | None = None
+    ) -> int:
+        """Delete RTM entries only for the provided spec paths within a project."""
+        pid = project_id or self.project_id
+        normalized_paths = {str(path) for path in spec_paths if str(path).strip()}
+        if not normalized_paths:
+            return 0
+        with self._get_session() as db:
+            entries = db.exec(
+                select(RtmEntry).where(
+                    RtmEntry.project_id == pid,
+                    RtmEntry.test_spec_path.in_(normalized_paths),
+                )
+            ).all()
+            count = len(entries)
+            for entry in entries:
+                db.delete(entry)
+            db.commit()
+            return count
+
     def store_rtm_entry(
         self,
         requirement_id: int,

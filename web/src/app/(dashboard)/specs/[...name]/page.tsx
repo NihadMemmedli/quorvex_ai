@@ -3,7 +3,7 @@ import { useState, useEffect, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { ArrowLeft, Database, Edit, Save, Play, Code, FileText, Eye, X } from 'lucide-react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import SpecBuilder from '@/components/SpecBuilder';
 import { TestDataPicker } from '@/components/TestDataPicker';
 import CodeEditor from '@/components/CodeEditor';
@@ -120,6 +120,7 @@ const testDataPanelStyle: CSSProperties = {
 export default function SpecDetailPage() {
     const params = useParams();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const { currentProject } = useProject();
 
     const nameParam = params?.name;
@@ -138,7 +139,7 @@ export default function SpecDetailPage() {
     const [mode, setMode] = useState<'code' | 'visual'>('code');
     const [showTestDataPanel, setShowTestDataPanel] = useState(false);
 
-    const [activeTab, setActiveTab] = useState<'spec' | 'generated'>('spec');
+    const [activeTab, setActiveTab] = useState<'spec' | 'generated'>(searchParams.get('tab') === 'generated' ? 'generated' : 'spec');
     const [isAutomated, setIsAutomated] = useState(false);
     const [codePath, setCodePath] = useState<string | null>(null);
     const [generatedCode, setGeneratedCode] = useState<string | null>(null);
@@ -271,6 +272,13 @@ export default function SpecDetailPage() {
             setLoadingCode(false);
         }
     };
+
+    useEffect(() => {
+        const tab = searchParams.get('tab');
+        if ((tab === 'spec' || tab === 'generated') && tab !== activeTab) {
+            setActiveTab(tab);
+        }
+    }, [activeTab, searchParams]);
 
     useEffect(() => {
         if (activeTab === 'generated' && isAutomated) {

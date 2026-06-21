@@ -417,13 +417,16 @@ def _build_exploratory_agent_config(
     # Build auth config
     if request_body.credentials:
         creds = request_body.credentials
+        login_url = (request_body.login_url or "").strip()
+        if not login_url:
+            raise HTTPException(status_code=400, detail="Credentials authentication requires login_url")
         # Resolve env-var indirection (username_var / password_var)
         username = creds.get("username") or os.environ.get(creds.get("username_var", ""), "")
         password = creds.get("password") or os.environ.get(creds.get("password_var", ""), "")
         config["auth"] = {
             "type": "credentials",
             "credentials": {"username": username, "password": password},
-            "login_url": request_body.login_url or "/login",
+            "login_url": login_url,
         }
     else:
         config["auth"] = {"type": "none"}

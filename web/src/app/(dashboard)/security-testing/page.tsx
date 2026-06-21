@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { ShieldAlert, Play, FileCode, Clock, Bug } from 'lucide-react';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
@@ -25,11 +26,17 @@ import FindingsTab from './components/FindingsTab';
 
 export default function SecurityTestingPage() {
     const { currentProject, projectId } = useRequiredProject();
+    const router = useRouter();
+    const searchParams = useSearchParams();
     const projectDefaultUrl = getProjectDefaultUrl(currentProject);
     const previousProjectDefaultUrlRef = useRef('');
 
-    const [activeTab, setActiveTab] = useState<TabType>('scanner');
-    const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(new Set(['scanner']));
+    const initialTab = (searchParams.get('tab') || 'scanner') as TabType;
+    const normalizedInitialTab = (
+        ['scanner', 'specs', 'history', 'findings'].includes(initialTab) ? initialTab : 'scanner'
+    ) as TabType;
+    const [activeTab, setActiveTab] = useState<TabType>(normalizedInitialTab);
+    const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(new Set(['scanner', normalizedInitialTab]));
 
     // Scanner state
     const [scanUrl, setScanUrl] = useState('');
@@ -63,6 +70,28 @@ export default function SecurityTestingPage() {
         setScanUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
         previousProjectDefaultUrlRef.current = projectDefaultUrl;
     }, [projectDefaultUrl]);
+
+    const updateUrlState = useCallback((updates: Record<string, string | null>) => {
+        const next = new URLSearchParams(searchParams.toString());
+        Object.entries(updates).forEach(([key, value]) => {
+            if (value) next.set(key, value);
+            else next.delete(key);
+        });
+        const query = next.toString();
+        router.replace(query ? `/security-testing?${query}` : '/security-testing', { scroll: false });
+    }, [router, searchParams]);
+
+    const handleTabChange = useCallback((tab: TabType) => {
+        setActiveTab(tab);
+        updateUrlState({ tab });
+    }, [updateUrlState]);
+
+    useEffect(() => {
+        const tab = searchParams.get('tab') as TabType | null;
+        if (tab && ['scanner', 'specs', 'history', 'findings'].includes(tab) && tab !== activeTab) {
+            setActiveTab(tab);
+        }
+    }, [activeTab, searchParams]);
 
     // ========== Data Fetching ==========
 
@@ -139,6 +168,27 @@ export default function SecurityTestingPage() {
         fetchCredentials();
         fetchFindingSummary();
     }, [fetchCapabilities, fetchTargets, fetchCredentials, fetchFindingSummary]);
+
+    useEffect(() => {
+        const jobId = searchParams.get('jobId');
+        if (!jobId || activeJobId === jobId) return;
+        setActiveJobId(jobId);
+        setIsScanning(true);
+    }, [activeJobId, searchParams]);
+
+    useEffect(() => {
+        function handleSecurityRefresh(event: Event) {
+            const detail = (event as CustomEvent).detail || {};
+            if (detail.projectId && detail.projectId !== projectId) return;
+            fetchSpecs();
+            fetchRuns();
+            fetchFindingSummary();
+            if (detail.specName) handleTabChange('specs');
+            else if (detail.findingId || detail.runId) handleTabChange('findings');
+        }
+        window.addEventListener('quorvex:security-refresh', handleSecurityRefresh);
+        return () => window.removeEventListener('quorvex:security-refresh', handleSecurityRefresh);
+    }, [fetchFindingSummary, fetchRuns, fetchSpecs, handleTabChange, projectId]);
 
     // Track visited tabs
     useEffect(() => {
@@ -264,22 +314,22 @@ export default function SecurityTestingPage() {
 
             {/* Tabs */}
             <div className="animate-in stagger-3" style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: '1.5rem' }}>
-                <button onClick={() => setActiveTab('scanner')} style={createTabStyle(activeTab, 'scanner')}>
+                <button onClick={() => handleTabChange('scanner')} style={createTabStyle(activeTab, 'scanner')}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <Play size={16} /> Scanner
                     </span>
                 </button>
-                <button onClick={() => setActiveTab('specs')} style={createTabStyle(activeTab, 'specs')}>
+                <button onClick={() => handleTabChange('specs')} style={createTabStyle(activeTab, 'specs')}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <FileCode size={16} /> Specs
                     </span>
                 </button>
-                <button onClick={() => setActiveTab('history')} style={createTabStyle(activeTab, 'history')}>
+                <button onClick={() => handleTabChange('history')} style={createTabStyle(activeTab, 'history')}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <Clock size={16} /> History
                     </span>
                 </button>
-                <button onClick={() => setActiveTab('findings')} style={createTabStyle(activeTab, 'findings')}>
+                <button onClick={() => handleTabChange('findings')} style={createTabStyle(activeTab, 'findings')}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <Bug size={16} /> Findings
                         {findingSummary && findingSummary.total > 0 && (
@@ -326,6 +376,7 @@ export default function SecurityTestingPage() {
                     projectId={projectId}
                     specs={specs}
                     fetchSpecs={fetchSpecs}
+                    initialSpecName={searchParams.get('specName') || undefined}
                 />
             )}
 
@@ -336,6 +387,7 @@ export default function SecurityTestingPage() {
                     fetchRuns={fetchRuns}
                     onStatusChange={updateFindingStatus}
                     onStopScan={stopScan}
+                    initialRunId={searchParams.get('runId') || undefined}
                 />
             )}
 
@@ -344,6 +396,8 @@ export default function SecurityTestingPage() {
                     projectId={projectId}
                     runs={runs}
                     onStatusChange={updateFindingStatus}
+                    initialRunId={searchParams.get('runId') || undefined}
+                    initialFindingId={searchParams.get('findingId') || undefined}
                 />
             )}
         </PageLayout>

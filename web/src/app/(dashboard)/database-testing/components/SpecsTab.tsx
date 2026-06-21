@@ -32,9 +32,10 @@ interface SpecsTabProps {
     onRefreshSpecs: () => void;
     onRefreshRuns: () => void;
     preferredConnectionId?: string;
+    initialSpecName?: string;
 }
 
-export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs, onRefreshRuns, preferredConnectionId }: SpecsTabProps) {
+export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs, onRefreshRuns, preferredConnectionId, initialSpecName }: SpecsTabProps) {
     const [selectedSpec, setSelectedSpec] = useState<DbSpec | null>(null);
     const [specContent, setSpecContent] = useState('');
     const [isCreatingSpec, setIsCreatingSpec] = useState(false);
@@ -189,6 +190,13 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
             }
         } catch (e) { console.error('Load spec failed:', e); }
     };
+
+    useEffect(() => {
+        if (!initialSpecName) return;
+        const spec = specs.find(item => item.name === initialSpecName || item.path === initialSpecName || item.path.endsWith(initialSpecName));
+        if (!spec || selectedSpec?.name === spec.name) return;
+        loadSpecContent(spec);
+    }, [initialSpecName, selectedSpec?.name, specs]);
 
     const runSpec = async (specName: string) => {
         if (!specConnId) { alert('Select a connection first'); return; }

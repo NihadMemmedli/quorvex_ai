@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
     Play, FileCode, Loader2, ChevronDown, ChevronRight,
     RefreshCw, Download,
@@ -19,6 +19,7 @@ interface ScriptsTabProps {
     onRunScript: (scriptPath: string, vus: string, duration: string) => Promise<void>;
     onLoadScriptContent: (name: string) => Promise<void>;
     scriptContents: Record<string, string>;
+    initialScriptPath?: string;
 }
 
 export default function ScriptsTab({
@@ -31,10 +32,19 @@ export default function ScriptsTab({
     onRunScript,
     onLoadScriptContent,
     scriptContents,
+    initialScriptPath,
 }: ScriptsTabProps) {
     const [expandedScript, setExpandedScript] = useState<string | null>(null);
     const [runVUs, setRunVUs] = useState('');
     const [runDuration, setRunDuration] = useState('');
+
+    useEffect(() => {
+        if (!initialScriptPath) return;
+        const match = scripts.find(script => script.path === initialScriptPath || script.name === initialScriptPath || script.path.endsWith(initialScriptPath));
+        if (!match) return;
+        setExpandedScript(match.name);
+        onLoadScriptContent(match.name);
+    }, [initialScriptPath, onLoadScriptContent, scripts]);
 
     return (
         <div>

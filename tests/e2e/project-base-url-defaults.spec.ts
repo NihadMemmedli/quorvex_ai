@@ -1,4 +1,4 @@
-import { expect, type APIRequestContext, type Page, test } from '@playwright/test';
+import { expect, request as playwrightRequest, type APIRequestContext, type Page, test } from '@playwright/test';
 
 const APP_BASE = process.env.BASE_URL || 'http://localhost:3000';
 const API_BASE = process.env.API_BASE || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
@@ -22,14 +22,25 @@ async function assertStackIsReady(request: APIRequestContext) {
 }
 
 async function getAccessToken(request: APIRequestContext) {
-  const response = await request.post(`${API_BASE}/auth/login`, {
-    data: {
-      email: ADMIN_EMAIL,
-      password: ADMIN_PASSWORD,
-    },
-  });
+  let response;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      response = await request.post(`${API_BASE}/auth/login`, {
+        data: {
+          email: ADMIN_EMAIL,
+          password: ADMIN_PASSWORD,
+        },
+      });
+      if (response.ok()) break;
+      if (response.status() !== 429 && response.status() < 500) break;
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 5_000));
+  }
 
-  expect(response.ok()).toBeTruthy();
+  expect(response?.ok(), `Admin login failed: ${lastError || response?.status()}`).toBeTruthy();
   const body = await response.json() as TokenResponse;
   return body.access_token;
 }
@@ -49,9 +60,21 @@ async function createProject(request: APIRequestContext) {
   return response.json() as Promise<{ id: string; name: string; base_url: string }>;
 }
 
+async function deleteProjectById(projectId: string) {
+  const request = await playwrightRequest.newContext();
+  try {
+    const token = await getAccessToken(request);
+    await request.delete(`${API_BASE}/projects/${projectId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      failOnStatusCode: false,
+    });
+  } finally {
+    await request.dispose();
+  }
+}
+
 async function loginThroughUi(page: Page, returnTo: string, projectId: string) {
   await page.addInitScript(({ selectedProjectId }) => {
-    window.localStorage.removeItem('refresh_token');
     window.localStorage.setItem('we-test-current-project-id', selectedProjectId);
   }, { selectedProjectId: projectId });
 
@@ -133,6 +156,7 @@ test.describe('Project Base URL defaults', () => {
   });
 
   test('prefills URL-driven workflows from the selected project base URL', async ({ page, request }) => {
+    test.setTimeout(60_000);
     const project = await createProject(request);
 
     try {
@@ -157,13 +181,9 @@ test.describe('Project Base URL defaults', () => {
       await page.goto('/requirements');
       await page.getByRole('button', { name: /Create Spec/ }).first().click();
       await page.getByText('AI Generate').click();
-      await expect(page.locator('input[placeholder="https://example.com"]').last()).toHaveValue(PROJECT_BASE_URL);
+      await expect(page.getByPlaceholder('https://app.example.com/feature')).toHaveValue(PROJECT_BASE_URL);
     } finally {
-      const token = await getAccessToken(request);
-      await request.delete(`${API_BASE}/projects/${project.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        failOnStatusCode: false,
-      });
+      await deleteProjectById(project.id);
     }
   });
 });

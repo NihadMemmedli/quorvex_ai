@@ -45,6 +45,8 @@ from orchestrator.api import autopilot as autopilot_api
 from orchestrator.api import db as db_module
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
+    AutoPilotChecklistItem,
+    AutoPilotAgentAttempt,
     AutoPilotPhase,
     AutoPilotQuestion,
     AutoPilotSession,
@@ -78,7 +80,7 @@ def _ensure_tables() -> None:
 
 def _cleanup_session(session_id: str) -> None:
     with Session(engine) as session:
-        for model in (AutoPilotQuestion, AutoPilotTestTask, AutoPilotSpecTask, AutoPilotPhase):
+        for model in (AutoPilotAgentAttempt, AutoPilotChecklistItem, AutoPilotQuestion, AutoPilotTestTask, AutoPilotSpecTask, AutoPilotPhase):
             for row in session.exec(select(model).where(model.session_id == session_id)).all():
                 session.delete(row)
         ap_session = session.get(AutoPilotSession, session_id)
@@ -130,6 +132,327 @@ def test_custom_workflow_worker_registers_autopilot_workflow_and_activities():
     assert "execute_autopilot_pipeline" in contract["activities"]
     assert "set_autopilot_control_status" in contract["activities"]
     assert "finalize_autopilot_workflow" in contract["activities"]
+
+
+def test_autopilot_phase_checklist_row_updates_in_place():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+    pipeline = AutoPilotPipeline(session_id=session_id, project_id="default")
+
+    try:
+        phase_id = pipeline._create_phase_record("exploration")
+        with Session(engine) as session:
+            rows = session.exec(
+                select(AutoPilotChecklistItem).where(AutoPilotChecklistItem.session_id == session_id)
+            ).all()
+            assert len(rows) == 1
+            assert rows[0].source_type == "phase"
+            assert rows[0].source_id == "exploration"
+            assert rows[0].status == "running"
+
+        pipeline._update_phase_step(phase_id, "Exploring first URL", items_total=2, items_completed=1)
+
+        with Session(engine) as session:
+            rows = session.exec(
+                select(AutoPilotChecklistItem).where(AutoPilotChecklistItem.session_id == session_id)
+            ).all()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row.detail == "Exploring first URL"
+            assert row.items_total == 2
+            assert row.items_completed == 1
+            assert row.progress == 0.5
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_agent_retry_resumes_transient_failure(monkeypatch, tmp_path):
+    from orchestrator.services.autopilot_agent_reliability import run_agent_with_retries
+    from orchestrator.utils.agent_runner import AgentResult, AgentRunner
+
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+    monkeypatch.setenv("AUTOPILOT_AGENT_RETRY_BASE_SECONDS", "0")
+    calls: list[str | None] = []
+
+    async def fake_inner_run(self, prompt, timeout_override=None):
+        calls.append(self.resume_session_id)
+        if len(calls) == 1:
+            return AgentResult(
+                success=False,
+                error="provider overloaded",
+                error_type="provider_overloaded",
+                api_error_status=503,
+                session_id="sdk-session-1",
+            )
+        return AgentResult(success=True, output="ok", session_id="sdk-session-2")
+
+    monkeypatch.setattr(AgentRunner, "run", fake_inner_run)
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        owner_type="autopilot",
+        owner_id=session_id,
+        session_dir=tmp_path,
+        autopilot_session_id=session_id,
+        autopilot_agent_kind="test_generation",
+        autopilot_source_type="test_task",
+        autopilot_source_id="7",
+        autopilot_checklist_title="Generate test: sample",
+        autopilot_phase_name="test_generation",
+        autopilot_checklist_kind="test_task",
+    )
+
+    try:
+        result = await run_agent_with_retries(runner, "prompt")
+        assert result.success is True
+        assert calls == [None, "sdk-session-1"]
+        with Session(engine) as session:
+            attempts = session.exec(
+                select(AutoPilotAgentAttempt)
+                .where(AutoPilotAgentAttempt.session_id == session_id)
+                .order_by(AutoPilotAgentAttempt.attempt_number)
+            ).all()
+            assert [attempt.status for attempt in attempts] == ["retrying", "succeeded"]
+            row = session.exec(
+                select(AutoPilotChecklistItem)
+                .where(AutoPilotChecklistItem.session_id == session_id)
+                .where(AutoPilotChecklistItem.source_type == "test_task")
+                .where(AutoPilotChecklistItem.source_id == "7")
+            ).first()
+            assert row is not None
+            assert row.metadata_dict["attempt"] == 2
+            assert row.metadata_dict["sdk_session_id"] == "sdk-session-2"
+        assert (tmp_path / "agent-state.json").exists()
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_agent_invalid_resume_uses_one_fresh_retry(monkeypatch, tmp_path):
+    from orchestrator.services.autopilot_agent_reliability import run_agent_with_retries
+    from orchestrator.utils.agent_runner import AgentResult, AgentRunner
+
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+    monkeypatch.setenv("AUTOPILOT_AGENT_RETRY_BASE_SECONDS", "0")
+    calls: list[str | None] = []
+
+    async def fake_inner_run(self, prompt, timeout_override=None):
+        calls.append(self.resume_session_id)
+        if len(calls) == 1:
+            return AgentResult(
+                success=False,
+                error="No conversation found for session ID",
+                error_type="invalid_session_resume",
+            )
+        return AgentResult(success=True, output="ok", session_id="fresh-session")
+
+    monkeypatch.setattr(AgentRunner, "run", fake_inner_run)
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        owner_type="autopilot",
+        owner_id=session_id,
+        session_dir=tmp_path,
+        resume_session_id="stale-session",
+        autopilot_session_id=session_id,
+        autopilot_agent_kind="requirements",
+        autopilot_source_type="requirements",
+        autopilot_source_id="explore-1",
+        autopilot_checklist_title="Generate requirements from explore-1",
+        autopilot_phase_name="requirements",
+        autopilot_checklist_kind="requirements",
+    )
+
+    try:
+        result = await run_agent_with_retries(runner, "prompt")
+        assert result.success is True
+        assert calls == ["stale-session", None]
+        with Session(engine) as session:
+            attempts = session.exec(
+                select(AutoPilotAgentAttempt)
+                .where(AutoPilotAgentAttempt.session_id == session_id)
+                .order_by(AutoPilotAgentAttempt.attempt_number)
+            ).all()
+            assert [attempt.status for attempt in attempts] == ["resume_invalid", "succeeded"]
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_agent_browser_close_permission_denial_does_not_retry(monkeypatch, tmp_path):
+    from orchestrator.services.autopilot_agent_reliability import run_agent_with_retries
+    from orchestrator.utils.agent_runner import AgentResult, AgentRunner
+
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+    calls = 0
+
+    async def fake_inner_run(self, prompt, timeout_override=None):
+        nonlocal calls
+        calls += 1
+        return AgentResult(
+            success=False,
+            error="permission denied for browser_close",
+            error_type="PermissionDenied",
+        )
+
+    monkeypatch.setattr(AgentRunner, "run", fake_inner_run)
+    runner = AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_close"],
+        tools=["mcp__playwright-test__browser_close"],
+        owner_type="autopilot",
+        owner_id=session_id,
+        session_dir=tmp_path,
+        autopilot_session_id=session_id,
+        autopilot_agent_kind="exploration",
+        autopilot_source_type="exploration_session",
+        autopilot_source_id="explore-1",
+        autopilot_checklist_title="Exploring https://example.com",
+        autopilot_phase_name="exploration",
+        autopilot_checklist_kind="exploration",
+    )
+
+    try:
+        result = await run_agent_with_retries(runner, "prompt")
+        assert result.success is False
+        assert calls == 1
+        assert "browser_close" not in runner.allowed_tools
+        assert "mcp__playwright-test__browser_close" in runner.disallowed_tools
+        with Session(engine) as session:
+            attempt = session.exec(
+                select(AutoPilotAgentAttempt).where(AutoPilotAgentAttempt.session_id == session_id)
+            ).one()
+            assert attempt.status == "not_retryable"
+            assert attempt.retry_eligible is False
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_autopilot_checklist_endpoint_returns_summary():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+    from orchestrator.services.autopilot_checklist import upsert_checklist_item
+
+    upsert_checklist_item(
+        session_id=session_id,
+        source_type="phase",
+        source_id="exploration",
+        title="Exploration phase",
+        kind="phase",
+        phase_name="exploration",
+        status="running",
+        detail="Exploring",
+    )
+    upsert_checklist_item(
+        session_id=session_id,
+        source_type="question",
+        source_id="1",
+        title="Question: review exploration",
+        kind="question",
+        phase_name="exploration",
+        status="waiting",
+        detail="Proceed?",
+    )
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+
+    try:
+        with TestClient(app) as client:
+            response = client.get(f"/autopilot/{session_id}/checklist")
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert [item["title"] for item in data["items"]] == [
+            "Exploration phase",
+            "Question: review exploration",
+        ]
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["running"] == 1
+        assert data["summary"]["waiting"] == 1
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_answer_question_endpoint_marks_checklist_answered():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="awaiting_input")
+    with Session(engine) as session:
+        question = AutoPilotQuestion(
+            session_id=session_id,
+            phase_name="requirements",
+            question_type="review_requirements",
+            question_text="Proceed?",
+            default_answer="Proceed",
+            status="pending",
+        )
+        session.add(question)
+        session.commit()
+        session.refresh(question)
+        question_id = question.id
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                f"/autopilot/{session_id}/answer",
+                json={"question_id": question_id, "answer_text": "Proceed with all requirements"},
+            )
+        assert response.status_code == 200, response.text
+        with Session(engine) as session:
+            row = session.exec(
+                select(AutoPilotChecklistItem)
+                .where(AutoPilotChecklistItem.session_id == session_id)
+                .where(AutoPilotChecklistItem.source_type == "question")
+                .where(AutoPilotChecklistItem.source_id == str(question_id))
+            ).first()
+            assert row is not None
+            assert row.status == "answered"
+            assert row.detail == "Proceed with all requirements"
+            assert row.completed_at is not None
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_autopilot_checklist_stream_emits_rows_and_complete():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="completed")
+    from orchestrator.services.autopilot_checklist import upsert_checklist_item
+
+    upsert_checklist_item(
+        session_id=session_id,
+        source_type="phase",
+        source_id="reporting",
+        title="Reporting phase",
+        kind="phase",
+        phase_name="reporting",
+        status="completed",
+        detail="Report generated",
+    )
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+
+    try:
+        with TestClient(app) as client:
+            with client.stream("GET", f"/autopilot/{session_id}/checklist/stream") as response:
+                assert response.status_code == 200
+                lines = []
+                for line in response.iter_lines():
+                    if line:
+                        lines.append(line)
+                    if any(str(item).startswith("event: complete") for item in lines):
+                        break
+        joined = "\n".join(str(line) for line in lines)
+        assert "event: checklist" in joined
+        assert "Reporting phase" in joined
+        assert "event: complete" in joined
+    finally:
+        _cleanup_session(session_id)
 
 
 def test_start_autopilot_endpoint_returns_success_after_temporal_commit(monkeypatch):
@@ -370,6 +693,25 @@ def test_test_generation_parallelism_clamps_only_for_vnc_runtime():
         4,
         {"browser_runtime": "headless_worker", "live_view_available": False},
     ) == 4
+
+
+def test_zero_output_process_error_is_retryable_infrastructure_failure():
+    from orchestrator.services.autopilot_agent_reliability import classify_retry
+    from orchestrator.utils.agent_runner import AgentResult
+
+    retryable, error_type = classify_retry(
+        AgentResult(
+            success=False,
+            output="",
+            error="ProcessError: process exited before producing output",
+            error_type="ProcessError",
+            messages_received=0,
+            tool_calls=[],
+        )
+    )
+
+    assert retryable is True
+    assert error_type == "agent_process_error"
 
 
 def test_autopilot_temporal_control_updates_session_status():
@@ -1113,11 +1455,11 @@ def test_autopilot_live_progress_tracks_browser_artifacts_as_captures():
     merged = autopilot_api._merge_artifact_live_progress(live, artifacts)
 
     assert merged["tool_calls"] == 0
-    assert merged["browser_tool_calls"] == 0
-    assert merged["interactions"] == 0
+    assert merged["browser_tool_calls"] == 2
+    assert merged["interactions"] == 2
     assert merged["capture_count"] == 2
     assert merged["latest_capture_at"] == now.isoformat()
-    assert merged["activity_source"] == "artifact_fallback"
+    assert merged["activity_source"] == "capture_activity_fallback"
     assert merged["last_tool"] is None
     assert merged["last_tool_label"] is None
     assert merged["recent_tools"] == []
@@ -1155,6 +1497,100 @@ def test_autopilot_live_progress_preserves_real_tool_telemetry():
     assert merged["last_tool"] == "mcp__playwright-test__browser_click"
     assert merged["last_tool_label"] == "browser click"
     assert merged["message"] == "Clicking target."
+
+
+def test_autopilot_live_progress_recovers_from_tool_calls_json(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    explore_id = "autopilot-test-explore"
+    session_dir = runs_dir / "explorations" / explore_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "tool_calls.json").write_text(
+        json.dumps(
+            [
+                {"name": "mcp__playwright-test__browser_navigate", "timestamp": "2026-01-01T00:00:00"},
+                {"name": "mcp__playwright-test__browser_click", "timestamp": "2026-01-01T00:00:01"},
+                {"name": "read_file", "timestamp": "2026-01-01T00:00:02"},
+            ]
+        )
+    )
+    monkeypatch.setattr(autopilot_api, "RUNS_DIR", runs_dir)
+
+    merged = autopilot_api._recover_live_tool_progress(
+        {
+            "tool_calls": 0,
+            "browser_tool_calls": 0,
+            "interactions": 0,
+            "exploration_session_id": explore_id,
+        },
+        exploration_session_id=explore_id,
+    )
+
+    assert merged["tool_calls"] == 3
+    assert merged["browser_tool_calls"] == 2
+    assert merged["interactions"] == 2
+    assert merged["last_tool"] == "read_file"
+    assert merged["last_tool_label"] == "read file"
+    assert merged["recent_tools"][-1]["name"] == "read_file"
+    assert merged["activity_source"] == "tool_artifact_recovery"
+
+
+def test_autopilot_live_progress_recovers_from_exploration_agent_stats(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    explore_id = "autopilot-test-summary"
+    session_dir = runs_dir / "explorations" / explore_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "agentStats": {
+                    "tool_calls": 6,
+                    "browser_tool_calls": 5,
+                    "successful_browser_tool_calls": 4,
+                    "duration_seconds": 12,
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(autopilot_api, "RUNS_DIR", runs_dir)
+
+    merged = autopilot_api._recover_live_tool_progress(
+        {"tool_calls": 0, "browser_tool_calls": 0, "interactions": 0},
+        exploration_session_id=explore_id,
+    )
+
+    assert merged["tool_calls"] == 6
+    assert merged["browser_tool_calls"] == 5
+    assert merged["interactions"] == 5
+    assert merged["activity_source"] == "tool_artifact_recovery"
+
+
+def test_autopilot_live_progress_keeps_queue_progress_over_artifacts(tmp_path, monkeypatch):
+    runs_dir = tmp_path / "runs"
+    explore_id = "autopilot-test-queue-wins"
+    session_dir = runs_dir / "explorations" / explore_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "agent_summary.json").write_text(
+        json.dumps({"tool_calls": 2, "browser_tool_calls": 2, "last_tool": "mcp__playwright-test__browser_click"})
+    )
+    monkeypatch.setattr(autopilot_api, "RUNS_DIR", runs_dir)
+
+    merged = autopilot_api._recover_live_tool_progress(
+        {
+            "tool_calls": 9,
+            "browser_tool_calls": 8,
+            "interactions": 8,
+            "last_tool": "mcp__playwright-test__browser_type",
+            "last_tool_label": "browser type",
+            "activity_source": "agent_queue_progress",
+        },
+        exploration_session_id=explore_id,
+    )
+
+    assert merged["tool_calls"] == 9
+    assert merged["browser_tool_calls"] == 8
+    assert merged["interactions"] == 8
+    assert merged["last_tool"] == "mcp__playwright-test__browser_type"
+    assert merged["activity_source"] == "agent_queue_progress"
 
 
 def test_autopilot_pipeline_live_state_persists_real_progress():
@@ -1214,6 +1650,31 @@ def test_autopilot_pipeline_record_tool_use_persists_recent_tool():
     assert live["last_tool_label"] == "browser type"
     assert live["activity_source"] == "real_tool_progress"
     assert live["recent_tools"][-1]["name"] == "mcp__playwright-test__browser_type"
+
+    _cleanup_session(session_id)
+
+
+def test_autopilot_pipeline_record_tool_use_increments_without_progress_counts():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+    pipeline = AutoPilotPipeline(session_id=session_id, project_id="default")
+
+    pipeline._record_live_tool_use(
+        "mcp__playwright-test__browser_click",
+        {"message": "Using browser click"},
+    )
+
+    with Session(engine) as session:
+        ap_session = session.get(AutoPilotSession, session_id)
+        assert ap_session is not None
+        live = ap_session.config["live_browser"]
+
+    assert live["tool_calls"] == 1
+    assert live["browser_tool_calls"] == 1
+    assert live["interactions"] == 1
+    assert live["last_tool"] == "mcp__playwright-test__browser_click"
+    assert live["last_tool_label"] == "browser click"
+    assert live["activity_source"] == "real_tool_progress"
 
     _cleanup_session(session_id)
 

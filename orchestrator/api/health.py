@@ -107,6 +107,7 @@ class StorageHealthResponse(BaseModel):
     backup: BackupHealth
     redis: RedisHealth
     alerts: list[Alert]
+    runtime: dict[str, Any] | None = None
 
 
 # =============================================================================
@@ -569,6 +570,14 @@ async def get_storage_health(
     backup = check_backup_health()
     redis = await check_redis_health()
     alerts = generate_alerts(database, minio, local_storage, backup, redis=redis)
+    try:
+        from orchestrator.services.runtime_diagnostics import (
+            autopilot_runtime_diagnostics,
+        )
+
+        runtime = autopilot_runtime_diagnostics()
+    except Exception as exc:
+        runtime = {"error": str(exc)}
 
     overall_healthy = (
         database.healthy
@@ -587,6 +596,7 @@ async def get_storage_health(
         backup=backup,
         redis=redis,
         alerts=alerts,
+        runtime=runtime,
     )
 
 

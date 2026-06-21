@@ -796,6 +796,7 @@ def test_session_jsonl_recovery_produces_valid_live_planner_sequence(tmp_path):
         "browser_snapshot",
         "planner_save_plan",
     ]
+    assert tool_calls[2].result_preview.startswith("https://example.test/checkout")
     NativePlanner._validate_live_plan_tool_sequence(
         result, "https://example.test/checkout"
     )
@@ -852,6 +853,40 @@ def test_live_plan_accepted_after_setup_target_navigation_snapshot_and_save():
                 name="mcp__playwright-test__browser_snapshot",
                 timestamp=datetime.now(),
                 input={},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+
+    NativePlanner._validate_live_plan_tool_sequence(
+        result, "https://example.test/checkout"
+    )
+
+
+def test_live_plan_accepts_target_url_from_snapshot_metadata_when_navigate_input_missing():
+    result = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_navigate",
+                timestamp=datetime.now(),
+                input={},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_snapshot",
+                timestamp=datetime.now(),
+                input={},
+                result_preview='Page URL: https://example.test/checkout\n- heading "Checkout"',
             ),
             ToolCall(
                 name="mcp__playwright-test__planner_save_plan",
@@ -1161,11 +1196,49 @@ async def test_live_plan_permission_guard_blocks_save_until_contract(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_live_plan_accepts_valid_saved_plan_with_sequence_warning(
+async def test_live_plan_rejects_valid_saved_plan_with_sequence_warning_by_default(
     tmp_path, monkeypatch
 ):
     planner = _planner(tmp_path)
-    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    monkeypatch.delenv("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING", raising=False)
+    result = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+    prompts = _patch_agent_sequence(monkeypatch, planner, [result])
+
+    with pytest.raises(SpecGenerationError, match="saved a plan before navigating"):
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert len(prompts) == 1
+    assert not (tmp_path / "run" / "checkout.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_live_plan_sequence_warning_override_accepts_valid_saved_plan(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING", "1")
     result = AgentResult(
         success=True,
         output=VALID_PLAN,
@@ -1292,7 +1365,14 @@ async def test_live_plan_repeated_contract_failure_raises_after_retry(
     invalid = AgentResult(
         success=True,
         output="",
-        tool_calls=[],
+        messages_received=1,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            )
+        ],
     )
     prompts = _patch_agent_sequence(monkeypatch, planner, [invalid, invalid])
 
@@ -1307,3 +1387,114 @@ async def test_live_plan_repeated_contract_failure_raises_after_retry(
     assert len(prompts) == 2
     assert "did not navigate" in str(exc_info.value)
     assert exc_info.value.diagnostics["target_navigation_observed"] is False
+
+
+@pytest.mark.asyncio
+async def test_zero_output_live_planner_process_error_is_runtime_failed(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    _patch_agent(
+        monkeypatch,
+        planner,
+        AgentResult(
+            success=False,
+            output="",
+            error="ProcessError: process exited before producing output",
+            error_type="agent_process_error",
+            messages_received=0,
+            text_blocks_received=0,
+            tool_calls=[],
+        ),
+    )
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert "did not navigate" not in str(exc_info.value)
+    assert "runtime failed" in str(exc_info.value)
+    assert exc_info.value.diagnostics["failure_category"] == "runtime_failed"
+    assert exc_info.value.diagnostics["messages_received"] == 0
+    assert exc_info.value.diagnostics["tool_calls"] == 0
+    runtime_error_path = Path(exc_info.value.diagnostics["runtime_error_path"])
+    assert runtime_error_path.exists()
+    assert json.loads(runtime_error_path.read_text())["failure_category"] == "runtime_failed"
+
+
+@pytest.mark.asyncio
+async def test_unproductive_stream_recovers_saved_planner_artifact(tmp_path, monkeypatch):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    output_path = tmp_path / "run" / "checkout.md"
+    output_path.write_text(VALID_PLAN)
+    _patch_agent(
+        monkeypatch,
+        planner,
+        AgentResult(
+            success=False,
+            output="",
+            error="Agent stream produced 500 messages but no parsed output",
+            error_type="unproductive_stream",
+            messages_received=500,
+            text_blocks_received=0,
+            tool_calls=[],
+        ),
+    )
+
+    result = await planner._run_planner_with_retry(
+        subject_type="flow",
+        subject_name="Checkout",
+        prompt="plan checkout",
+        target_url="https://example.test/checkout",
+        expected_output_path=output_path,
+    )
+
+    assert result == output_path
+    assert output_path.read_text() == VALID_PLAN
+
+
+@pytest.mark.asyncio
+async def test_unproductive_stream_retries_once_with_fresh_session(tmp_path, monkeypatch):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    output_path = tmp_path / "run" / "checkout.md"
+    retry_runtime: list[tuple[str | None, bool]] = []
+
+    async def fake_query(_prompt: str, target_url: str | None = None) -> AgentResult:
+        retry_runtime.append(
+            (
+                getattr(planner, "_planner_retry_session_id", None),
+                bool(getattr(planner, "_planner_retry_continue_conversation", False)),
+            )
+        )
+        if len(retry_runtime) == 1:
+            return AgentResult(
+                success=False,
+                output="",
+                error="Agent stream produced 500 messages but no parsed output",
+                error_type="unproductive_stream",
+                messages_received=500,
+                text_blocks_received=0,
+                tool_calls=[],
+                session_id="broken-sdk-session",
+            )
+        return _live_save_result(VALID_PLAN)
+
+    monkeypatch.setattr(planner, "_query_planner_agent", fake_query)
+
+    result = await planner._run_planner_with_retry(
+        subject_type="flow",
+        subject_name="Checkout",
+        prompt="plan checkout",
+        target_url="https://example.test/checkout",
+        expected_output_path=output_path,
+    )
+
+    assert result == output_path
+    assert retry_runtime == [(None, False), (None, False)]

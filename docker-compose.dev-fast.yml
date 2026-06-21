@@ -1,0 +1,20 @@
+# Fast local-development override.
+#
+# This file is intentionally additive and is used only by `make dev-fast` and
+# `make dev-fast-build`. The existing `make dev` compatibility path remains
+# unchanged.
+
+services:
+  frontend:
+    image: ${QUORVEX_FRONTEND_DEV_IMAGE:-quorvex-frontend:dev}
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    command: ["npm", "run", "dev"]
+    environment:
+      NODE_ENV: development
+      NEXT_TELEMETRY_DISABLED: "1"
+      WATCHPACK_POLLING: "true"
+      NODE_OPTIONS: "--max-old-space-size=2048"
+      INTERNAL_API_URL: http://backend:8001
+

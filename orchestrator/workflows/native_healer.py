@@ -42,11 +42,6 @@ from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
 
-# Use run-specific config directory if set (for parallel execution isolation)
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
-
 from orchestrator.ai.prompt_registry import (
     attach_prompt_metadata,
     build_prompt_metadata,
@@ -328,6 +323,15 @@ Rules:
             resume_session_id=None,
             continue_conversation=False,
             force_direct_execution=True,
+            autopilot_retry_enabled=bool(getattr(self, "autopilot_retry_enabled", False)),
+            autopilot_session_id=getattr(self, "autopilot_session_id", None),
+            autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
+            autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_healer_schema_retry"),
+            autopilot_source_type=getattr(self, "autopilot_source_type", None),
+            autopilot_source_id=getattr(self, "autopilot_source_id", None),
+            autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
+            autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
+            autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
         )
         return await runner.run(prompt)
 
@@ -740,6 +744,15 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 env_vars=self.env_vars,
                 cwd=self.cwd,
                 preserve_browser_on_failure=True,
+                autopilot_retry_enabled=bool(getattr(self, "autopilot_retry_enabled", False)),
+                autopilot_session_id=getattr(self, "autopilot_session_id", None),
+                autopilot_stable_key=getattr(self, "autopilot_stable_key", None),
+                autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation_healer"),
+                autopilot_source_type=getattr(self, "autopilot_source_type", None),
+                autopilot_source_id=getattr(self, "autopilot_source_id", None),
+                autopilot_checklist_title=getattr(self, "autopilot_checklist_title", None),
+                autopilot_phase_name=getattr(self, "autopilot_phase_name", None),
+                autopilot_checklist_kind=getattr(self, "autopilot_checklist_kind", None),
             )
             result = await runner.run(prompt)
             self.last_agent_result = result

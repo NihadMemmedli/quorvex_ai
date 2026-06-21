@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { formatDate, formatDuration } from '@/lib/formatting';
 import { cardStyle } from '@/lib/styles';
@@ -15,9 +15,10 @@ interface HistoryTabProps {
     fetchRuns: () => Promise<void>;
     onStatusChange: (id: number, status: string, notes?: string) => void;
     onStopScan: (runId: string) => void;
+    initialRunId?: string;
 }
 
-export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange, onStopScan }: HistoryTabProps) {
+export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange, onStopScan, initialRunId }: HistoryTabProps) {
     const [selectedRun, setSelectedRun] = useState<SecurityScanRun | null>(null);
     const [runFindings, setRunFindings] = useState<SecurityFinding[]>([]);
     const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
@@ -29,6 +30,14 @@ export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange,
             if (res.ok) setRunFindings(await res.json());
         } catch (e) { console.error('Failed to fetch run findings:', e); }
     };
+
+    useEffect(() => {
+        if (!initialRunId || selectedRun?.id === initialRunId) return;
+        const run = runs.find(item => item.id === initialRunId);
+        if (!run) return;
+        setSelectedRun(run);
+        fetchRunFindings(run.id);
+    }, [initialRunId, runs, selectedRun?.id]);
 
     return (
         <div style={cardStyle}>

@@ -41,4 +41,18 @@ describe('assistant action registry', () => {
     expect(body.config.prompt).toBe('update selectors');
     expect(body.config.autonomy_mode).toBe('propose_diff_only');
   });
+
+  it('scopes chat-created API specs to the approved project', () => {
+    const config = getAssistantActionConfig('createAndGenerateApiTest');
+
+    expect(config?.getPath({}, 'project-a')).toBe('/api-testing/create-and-generate');
+    expect(config?.getBody?.({
+      specName: 'products-api-demo',
+      content: '# Products API Test',
+    }, 'project-a')).toEqual({
+      name: 'products-api-demo',
+      content: '# Products API Test',
+      project_id: 'project-a',
+    });
+  });
 });

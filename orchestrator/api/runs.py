@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -291,6 +291,7 @@ async def get_run(
             "agentic_summary": run_db.agentic_summary,
             "browser_auth": run_db.browser_auth,
             "current_stage": run_db.current_stage,
+            "stage_started_at": run_db.stage_started_at.isoformat() if run_db.stage_started_at else None,
             "stage_message": run_db.stage_message,
             "error_message": run_db.error_message,
             "healing_attempt": run_db.healing_attempt,
@@ -325,6 +326,7 @@ async def get_run(
         "agentic_summary": run_db.agentic_summary,
         "browser_auth": run_db.browser_auth,
         "current_stage": run_db.current_stage,
+        "stage_started_at": run_db.stage_started_at.isoformat() if run_db.stage_started_at else None,
         "stage_message": run_db.stage_message,
         "error_message": run_db.error_message or pipeline_error_message,
         "healing_attempt": run_db.healing_attempt,
@@ -568,6 +570,95 @@ async def stream_run_log(id: str, session: Session = Depends(get_session)):
             pass
         finally:
             logger.debug(f"Log stream ended for run {id}")
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/runs/{id}/events/stream")
+async def stream_run_events(id: str, request: Request, session: Session = Depends(get_session)):
+    """Stream typed run status and diagnostic frames separately from raw log bytes."""
+    run = session.get(DBTestRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def generate():
+        last_status_payload: str | None = None
+        last_health_payload: str | None = None
+        idle_ticks = 0
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            try:
+                with Session(engine) as check_session:
+                    current_run = check_session.get(DBTestRun, id)
+                    if not current_run:
+                        yield f"event: error\ndata: {json.dumps({'message': 'Run not found'})}\n\n"
+                        break
+
+                    run_dir = _runs_dir() / id
+                    payload = await run_files.compose_test_run_log_payload(current_run, run_dir)
+                    status_payload = {
+                        "run_id": id,
+                        "status": current_run.status,
+                        "current_stage": current_run.current_stage,
+                        "stage_started_at": current_run.stage_started_at.isoformat()
+                        if current_run.stage_started_at
+                        else None,
+                        "stage_message": current_run.stage_message,
+                        "temporal_workflow_id": current_run.temporal_workflow_id,
+                        "temporal_run_id": current_run.temporal_run_id,
+                    }
+                    health_payload = {
+                        "run_id": id,
+                        "health": payload.get("health") or {},
+                        "diagnostics": {
+                            "temporal": (payload.get("diagnostics") or {}).get("temporal"),
+                            "browser_pool": (payload.get("diagnostics") or {}).get("browser_pool"),
+                            "agent_progress": (payload.get("diagnostics") or {}).get("agent_progress"),
+                        },
+                        "blocker_message": payload.get("blocker_message"),
+                    }
+
+                    serialized_status = json.dumps(status_payload, sort_keys=True)
+                    serialized_health = json.dumps(health_payload, sort_keys=True)
+                    emitted = False
+                    if serialized_status != last_status_payload:
+                        yield f"event: status\ndata: {serialized_status}\n\n"
+                        last_status_payload = serialized_status
+                        emitted = True
+                    if serialized_health != last_health_payload:
+                        yield f"event: diagnostic\ndata: {serialized_health}\n\n"
+                        last_health_payload = serialized_health
+                        emitted = True
+
+                    if emitted:
+                        idle_ticks = 0
+                    else:
+                        idle_ticks += 1
+                        if idle_ticks >= 5:
+                            yield f": heartbeat {datetime.utcnow().isoformat()}\n\n"
+                            idle_ticks = 0
+
+                    if current_run.status in ["passed", "failed", "stopped", "cancelled", "error"]:
+                        yield f"event: complete\ndata: {json.dumps({'run_id': id, 'status': current_run.status})}\n\n"
+                        break
+
+            except Exception as e:
+                logger.error(f"Error streaming diagnostics for {id}: {e}")
+                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+                break
+
+            await asyncio.sleep(3)
 
     return StreamingResponse(
         generate(),

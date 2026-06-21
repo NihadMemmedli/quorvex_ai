@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
@@ -35,6 +36,7 @@ from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
 from .models_db import (
     AutoPilotPhase,
+    AutoPilotChecklistItem,
     AutoPilotQuestion,
     AutoPilotSession,
     AutoPilotSpecTask,
@@ -193,6 +195,45 @@ class AutoPilotQuestionResponse(BaseModel):
     answered_at: datetime | None
     auto_continue_at: datetime | None
     created_at: datetime
+
+
+class AutoPilotChecklistItemResponse(BaseModel):
+    id: int
+    session_id: str
+    sequence: int
+    kind: str
+    phase_name: str | None
+    title: str
+    detail: str | None
+    status: str
+    progress: float
+    items_completed: int
+    items_total: int
+    source_type: str | None
+    source_id: str | None
+    metadata: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+class AutoPilotChecklistSummaryResponse(BaseModel):
+    total: int = 0
+    pending: int = 0
+    running: int = 0
+    waiting: int = 0
+    completed: int = 0
+    failed: int = 0
+    runtime_failed: int = 0
+    runtime_stale: int = 0
+    spec_not_automatable: int = 0
+    planner_contract_failed: int = 0
+    skipped: int = 0
+
+
+class AutoPilotChecklistResponse(BaseModel):
+    items: list[AutoPilotChecklistItemResponse]
+    summary: AutoPilotChecklistSummaryResponse
 
 
 class AnswerQuestionRequest(BaseModel):
@@ -882,6 +923,17 @@ def _safe_read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _safe_read_json_value(path: Path) -> Any:
+    """Read any JSON artifact shape, returning None when it is absent or invalid."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        logger.debug(f"Unable to read JSON artifact {path}: {exc}")
+        return None
+
+
 def _fallback_task_run_dir(task: AutoPilotTestTask) -> Path | None:
     if task.run_id:
         return RUNS_DIR / task.run_id
@@ -935,22 +987,12 @@ def _collect_live_artifacts(
         ".webm": "video",
         ".mp4": "video",
     }
-    runs_roots = [RUNS_DIR, Path("/app/runs")]
-    session_dirs: list[tuple[Path, Path]] = []
-    for root in runs_roots:
-        if exploration_session_id:
-            session_dirs.extend(
-                [
-                    (root, root / exploration_session_id),
-                    (root, root / "explorations" / exploration_session_id),
-                ]
-            )
-        if run_id:
-            session_dirs.append((root, root / run_id))
-
     artifacts: list[AutoPilotLiveArtifactResponse] = []
     seen: set[str] = set()
-    for root, session_dir in session_dirs:
+    for root, session_dir in _live_artifact_dirs(
+        exploration_session_id=exploration_session_id,
+        run_id=run_id,
+    ):
         if not session_dir.exists():
             continue
         for path in session_dir.glob("**/*"):
@@ -985,6 +1027,34 @@ def _collect_live_artifacts(
             item.name,
         ),
     )
+
+
+def _live_artifact_dirs(
+    *,
+    exploration_session_id: str | None = None,
+    run_id: str | None = None,
+) -> list[tuple[Path, Path]]:
+    runs_roots = [RUNS_DIR, Path("/app/runs")]
+    session_dirs: list[tuple[Path, Path]] = []
+    seen: set[str] = set()
+    for root in runs_roots:
+        candidates: list[Path] = []
+        if exploration_session_id:
+            candidates.extend(
+                [
+                    root / exploration_session_id,
+                    root / "explorations" / exploration_session_id,
+                ]
+            )
+        if run_id:
+            candidates.append(root / run_id)
+        for session_dir in candidates:
+            key = str(session_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            session_dirs.append((root, session_dir))
+    return session_dirs
 
 
 def _collect_autopilot_artifacts(
@@ -1137,11 +1207,170 @@ def _short_tool_label(tool_name: str | None) -> str:
     return tool_name.replace("_", " ")
 
 
+def _is_browser_tool_name(tool_name: str | None) -> bool:
+    name = str(tool_name or "")
+    short_name = name.rsplit("__", 1)[-1] if "__" in name else name
+    return "__browser_" in name or short_name.startswith("browser_")
+
+
+def _tool_name_from_record(record: Any) -> str:
+    if not isinstance(record, dict):
+        return ""
+    for key in ("name", "tool_name", "tool"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    short_name = record.get("short_name")
+    return str(short_name) if short_name else ""
+
+
+def _telemetry_from_tool_calls_artifact(path: Path) -> dict[str, Any]:
+    raw = _safe_read_json_value(path)
+    if isinstance(raw, dict):
+        records = raw.get("tool_call_records") or raw.get("tool_calls") or raw.get("calls") or []
+    else:
+        records = raw
+    if not isinstance(records, list):
+        return {}
+
+    tool_names = [_tool_name_from_record(record) for record in records]
+    tool_names = [name for name in tool_names if name]
+    if not records and not tool_names:
+        return {}
+
+    browser_count = sum(1 for name in tool_names if _is_browser_tool_name(name))
+    last_tool = tool_names[-1] if tool_names else ""
+    recent_tools: list[dict[str, Any]] = []
+    for record, name in zip(records[-12:], tool_names[-12:], strict=False):
+        at = record.get("at") or record.get("timestamp") or record.get("started_at") if isinstance(record, dict) else None
+        recent_tools.append(
+            {
+                "name": name,
+                "label": _short_tool_label(name),
+                "at": at or datetime.utcnow().isoformat(),
+                "source": "tool_calls_json",
+                "artifact": str(path),
+            }
+        )
+
+    return {
+        "tool_calls": len(records),
+        "browser_tool_calls": browser_count,
+        "interactions": browser_count or len(records),
+        "last_tool": last_tool,
+        "last_tool_label": _short_tool_label(last_tool),
+        "recent_tools": recent_tools,
+        "activity_source": "tool_artifact_recovery",
+    }
+
+
+def _telemetry_from_summary_artifact(path: Path) -> dict[str, Any]:
+    raw = _safe_read_json_value(path)
+    if not isinstance(raw, dict):
+        return {}
+    summary = raw.get("agentStats") if isinstance(raw.get("agentStats"), dict) else raw
+    if not isinstance(summary, dict):
+        return {}
+
+    telemetry = {
+        "tool_calls": _safe_int(summary.get("tool_calls")),
+        "browser_tool_calls": _safe_int(
+            summary.get("browser_tool_calls"),
+            _safe_int(summary.get("successful_browser_tool_calls")),
+        ),
+        "interactions": _safe_int(summary.get("interactions")),
+    }
+    if telemetry["interactions"] <= 0:
+        telemetry["interactions"] = telemetry["browser_tool_calls"] or telemetry["tool_calls"]
+
+    last_tool = str(summary.get("last_tool") or "")
+    tool_names = summary.get("tool_names")
+    if not last_tool and isinstance(tool_names, list) and tool_names:
+        last_tool = str(tool_names[-1] or "")
+    if last_tool:
+        telemetry["last_tool"] = last_tool
+        telemetry["last_tool_label"] = str(summary.get("last_tool_label") or _short_tool_label(last_tool))
+
+    recent_tools = summary.get("recent_tools")
+    if isinstance(recent_tools, list):
+        telemetry["recent_tools"] = recent_tools[-12:]
+    if any(_safe_int(telemetry.get(key)) > 0 for key in ("tool_calls", "browser_tool_calls", "interactions")) or last_tool:
+        telemetry["activity_source"] = "tool_artifact_recovery"
+        return telemetry
+    return {}
+
+
+def _merge_recovered_tool_telemetry(live: dict[str, Any], recovered: dict[str, Any]) -> dict[str, Any]:
+    if not recovered:
+        return live
+    merged = dict(live)
+    increased = False
+    for key in ("tool_calls", "browser_tool_calls", "interactions"):
+        existing = _safe_int(merged.get(key))
+        candidate = _safe_int(recovered.get(key))
+        if candidate > existing:
+            merged[key] = candidate
+            increased = True
+
+    recovered_tool_calls = _safe_int(recovered.get("tool_calls"))
+    existing_tool_calls = _safe_int(merged.get("tool_calls"))
+    if recovered.get("last_tool") and (
+        not merged.get("last_tool")
+        or recovered_tool_calls >= existing_tool_calls
+    ):
+        merged["last_tool"] = recovered["last_tool"]
+        merged["last_tool_label"] = recovered.get("last_tool_label") or _short_tool_label(recovered["last_tool"])
+        increased = True
+
+    recovered_recent = recovered.get("recent_tools")
+    if isinstance(recovered_recent, list) and recovered_recent:
+        existing_recent = list(merged.get("recent_tools") or [])
+        existing_names = [item.get("name") for item in existing_recent if isinstance(item, dict)]
+        for item in recovered_recent:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") and item.get("name") == (existing_names[-1] if existing_names else None):
+                continue
+            existing_recent.append(item)
+            existing_names.append(item.get("name"))
+        merged["recent_tools"] = existing_recent[-12:]
+        increased = True
+
+    if increased and merged.get("activity_source") not in {"real_tool_progress", "agent_queue_progress"}:
+        merged["activity_source"] = recovered.get("activity_source") or "tool_artifact_recovery"
+    return merged
+
+
+def _recover_live_tool_progress(
+    live: dict[str, Any],
+    *,
+    exploration_session_id: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Recover live counters from persisted agent artifacts without lowering real telemetry."""
+    merged = dict(live)
+    for _, session_dir in _live_artifact_dirs(
+        exploration_session_id=exploration_session_id,
+        run_id=run_id,
+    ):
+        if not session_dir.exists():
+            continue
+        for artifact_name in ("tool_calls.json", "agent_summary.json", "summary.json"):
+            path = session_dir / artifact_name
+            recovered = (
+                _telemetry_from_tool_calls_artifact(path)
+                if artifact_name == "tool_calls.json"
+                else _telemetry_from_summary_artifact(path)
+            )
+            merged = _merge_recovered_tool_telemetry(merged, recovered)
+    return merged
+
+
 def _merge_artifact_live_progress(
     live: dict[str, Any],
     artifacts: list[AutoPilotLiveArtifactResponse],
 ) -> dict[str, Any]:
-    """Attach browser capture evidence without treating captures as tool telemetry."""
+    """Attach browser capture evidence with a conservative activity fallback."""
     if not artifacts:
         return live
 
@@ -1158,11 +1387,13 @@ def _merge_artifact_live_progress(
     if latest_at:
         merged["latest_capture_at"] = latest_at
 
-    has_real_tool_progress = any(
+    has_tool_progress = any(
         _safe_int(merged.get(key)) > 0 for key in ("tool_calls", "browser_tool_calls", "interactions")
     ) or bool(merged.get("last_tool"))
-    if not has_real_tool_progress:
-        merged["activity_source"] = "artifact_fallback"
+    if not has_tool_progress:
+        merged["browser_tool_calls"] = max(_safe_int(merged.get("browser_tool_calls")), image_count)
+        merged["interactions"] = max(_safe_int(merged.get("interactions")), image_count)
+        merged["activity_source"] = "capture_activity_fallback"
 
     live_updated_at = _parse_live_timestamp(merged.get("updated_at"))
     if latest.modified_at and (not live_updated_at or latest.modified_at > live_updated_at):
@@ -1445,6 +1676,70 @@ def _question_to_response(q: AutoPilotQuestion) -> AutoPilotQuestionResponse:
     )
 
 
+def _checklist_item_to_response(item: AutoPilotChecklistItem) -> AutoPilotChecklistItemResponse:
+    return AutoPilotChecklistItemResponse(
+        id=item.id,
+        session_id=item.session_id,
+        sequence=item.sequence,
+        kind=item.kind,
+        phase_name=item.phase_name,
+        title=item.title,
+        detail=item.detail,
+        status=item.status,
+        progress=item.progress,
+        items_completed=item.items_completed,
+        items_total=item.items_total,
+        source_type=item.source_type,
+        source_id=item.source_id,
+        metadata=item.metadata_dict,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        completed_at=item.completed_at,
+    )
+
+
+def _checklist_summary(items: list[AutoPilotChecklistItemResponse]) -> AutoPilotChecklistSummaryResponse:
+    summary = AutoPilotChecklistSummaryResponse(total=len(items))
+    direct_statuses = {
+        "pending",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "runtime_failed",
+        "runtime_stale",
+        "spec_not_automatable",
+        "planner_contract_failed",
+        "skipped",
+    }
+    for item in items:
+        if item.status in direct_statuses:
+            setattr(summary, item.status, getattr(summary, item.status) + 1)
+        elif item.status in {"queued", "tool_use", "generating"}:
+            summary.running += 1
+        elif item.status in {"passed", "answered", "auto_continued"}:
+            summary.completed += 1
+        elif item.status in {"error", "cancelled"}:
+            summary.failed += 1
+    return summary
+
+
+def _load_checklist_response(db: Session, session_id: str) -> AutoPilotChecklistResponse:
+    try:
+        from orchestrator.services.autopilot_agent_reliability import reconcile_autopilot_agent_attempts
+
+        reconcile_autopilot_agent_attempts(session_id)
+    except Exception as exc:
+        logger.debug("Unable to reconcile AutoPilot agent attempts for %s: %s", session_id, exc)
+    stmt = (
+        select(AutoPilotChecklistItem)
+        .where(AutoPilotChecklistItem.session_id == session_id)
+        .order_by(AutoPilotChecklistItem.sequence, AutoPilotChecklistItem.id)
+    )
+    items = [_checklist_item_to_response(item) for item in db.exec(stmt).all()]
+    return AutoPilotChecklistResponse(items=items, summary=_checklist_summary(items))
+
+
 def _spec_task_to_response(t: AutoPilotSpecTask) -> SpecTaskResponse:
     """Convert a DB spec task model to the API response model."""
     return SpecTaskResponse(
@@ -1657,7 +1952,21 @@ def _reset_resumable_state(db: Session, ap_session: AutoPilotSession, failed_pha
         stmt = (
             select(AutoPilotTestTask)
             .where(AutoPilotTestTask.session_id == ap_session.id)
-            .where(AutoPilotTestTask.status.in_(["pending", "running", "paused", "failed", "error"]))
+            .where(
+                AutoPilotTestTask.status.in_(
+                    [
+                        "pending",
+                        "running",
+                        "paused",
+                        "failed",
+                        "error",
+                        "runtime_failed",
+                        "runtime_stale",
+                        "spec_not_automatable",
+                        "planner_contract_failed",
+                    ]
+                )
+            )
         )
         for task in db.exec(stmt).all():
             task.status = "pending"
@@ -1981,6 +2290,11 @@ async def get_live_browser_state(
         if task and task.session_id == session_id:
             run_id = task.run_id
 
+    live = _recover_live_tool_progress(
+        live,
+        exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
+        run_id=str(run_id) if run_id else None,
+    )
     artifacts = _collect_live_artifacts(
         exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
         run_id=str(run_id) if run_id else None,
@@ -2040,6 +2354,11 @@ async def get_session_evidence(
         task = session.get(AutoPilotTestTask, numeric_test_task_id)
         if task and task.session_id == session_id and task.run_id and task.run_id not in run_ids:
             run_ids.append(task.run_id)
+    live = _recover_live_tool_progress(
+        live,
+        exploration_session_id=str(live.get("exploration_session_id")) if live.get("exploration_session_id") else None,
+        run_id=str(run_ids[0]) if run_ids else None,
+    )
 
     tasks = session.exec(select(AutoPilotTestTask).where(AutoPilotTestTask.session_id == session_id)).all()
     for task in tasks:
@@ -2184,6 +2503,62 @@ async def get_session_questions(
     return [_question_to_response(q) for q in questions]
 
 
+@router.get("/{session_id}/checklist", response_model=AutoPilotChecklistResponse)
+async def get_session_checklist(
+    session_id: str,
+    session: Session = Depends(get_session),
+):
+    """Get persisted live checklist rows for an AutoPilot session."""
+    ap_session = session.get(AutoPilotSession, session_id)
+    if not ap_session:
+        raise HTTPException(status_code=404, detail="Auto Pilot session not found")
+    return _load_checklist_response(session, session_id)
+
+
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@router.get("/{session_id}/checklist/stream")
+async def stream_session_checklist(
+    session_id: str,
+):
+    """Stream persisted checklist row changes while an AutoPilot session is active."""
+    terminal_statuses = {"completed", "failed", "cancelled"}
+
+    async def event_generator():
+        seen: dict[int, str] = {}
+        heartbeat_counter = 0
+        while True:
+            with Session(engine) as db:
+                ap_session = db.get(AutoPilotSession, session_id)
+                if not ap_session:
+                    yield _sse_event("error", {"detail": "Auto Pilot session not found"})
+                    return
+                payload = _load_checklist_response(db, session_id)
+                changed = []
+                for item in payload.items:
+                    updated = item.updated_at.isoformat()
+                    if seen.get(item.id) != updated:
+                        seen[item.id] = updated
+                        changed.append(item)
+
+                for item in changed:
+                    yield _sse_event("checklist", item.model_dump(mode="json"))
+
+                if ap_session.status in terminal_statuses:
+                    yield _sse_event("complete", {"session_id": session_id, "status": ap_session.status})
+                    return
+
+            heartbeat_counter += 1
+            if heartbeat_counter >= 10:
+                heartbeat_counter = 0
+                yield _sse_event("heartbeat", {"session_id": session_id, "ts": datetime.utcnow().isoformat()})
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @router.post("/{session_id}/answer", response_model=dict)
 async def answer_question(
     session_id: str,
@@ -2224,6 +2599,22 @@ async def answer_question(
     question.status = "answered"
     session.add(question)
     session.commit()
+    try:
+        from orchestrator.services.autopilot_checklist import complete_checklist_item
+
+        complete_checklist_item(
+            session_id=session_id,
+            source_type="question",
+            source_id=str(question.id),
+            title=f"Question: {question.question_type.replace('_', ' ')}",
+            kind="question",
+            phase_name=question.phase_name,
+            detail=body.answer_text,
+            status="answered",
+            metadata={"answer_text": body.answer_text},
+        )
+    except Exception as exc:
+        logger.debug("Unable to update AutoPilot question checklist row: %s", exc)
 
     # Notify running pipeline if it exists
     entry = _running_pipelines.get(session_id)

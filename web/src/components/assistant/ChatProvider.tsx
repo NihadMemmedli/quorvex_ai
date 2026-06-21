@@ -18,6 +18,20 @@ import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import {
+  buildApiTestingPageLink,
+  getApiTestingArtifactContext,
+  isApiTestingTool,
+  type ApiTestingArtifactContext,
+} from '@/lib/ai/api-testing-links';
+import {
+  buildAssistantArtifactPageLink,
+  buildAssistantArtifactPageLinkForTool,
+  getAssistantArtifactContext,
+  getAssistantArtifactDomain,
+  isAssistantArtifactTool,
+  type AssistantArtifactContext,
+} from '@/lib/ai/assistant-artifact-links';
+import {
   Conversation,
   ChatMessageRecord,
   listConversations,
@@ -243,6 +257,7 @@ interface TrackedChatJob {
   statusPath: string;
   pagePath: string;
   projectId?: string;
+  artifact?: ApiTestingArtifactContext | AssistantArtifactContext;
   conversationId?: string | null;
   createdAt: number;
   startedMessageSent?: boolean;
@@ -299,7 +314,10 @@ const SECURITY_JOB_TOOLS = new Set([
   'analyzeSecurityRun',
 ]);
 
-const DATABASE_JOB_TOOLS = new Set(['generateDatabaseSpec']);
+const DATABASE_JOB_TOOLS = new Set(['generateDatabaseSpec', 'suggestDbFixes']);
+const EXPLORATION_SPEC_JOB_TOOLS = new Set(['generateApiSpecsFromExploration', 'generateApiTestsFromExploration']);
+const EXPLORER_FLOW_JOB_TOOLS = new Set(['generateExplorerFlowSpec', 'generateExplorerFlowTest']);
+const REQUIREMENTS_JOB_TOOLS = new Set(['generateRequirements', 'bulkGenerateRequirementSpecs']);
 const PRD_GENERATION_TOOLS = new Set(['generatePrdPlan', 'generatePrdTest', 'healPrdTest']);
 const REGRESSION_BATCH_TOOLS = new Set(['runRegressionBatch', 'rerunFailedTests', 'runPrAdvisorRecommendedTests']);
 const TEST_RUN_TOOLS = new Set(['runTestSpec', 'retryFailedRun', 'healFailedRun', 'runPrdTest']);
@@ -323,6 +341,85 @@ function projectQuery(projectId?: string) {
 
 function projectStatusPath(path: string, projectId?: string) {
   return projectId ? withProjectQuery(path, projectId) : path;
+}
+
+function emitApiTestingRefresh(job: TrackedChatJob, snapshot?: JobSnapshot) {
+  if (typeof window === 'undefined' || job.kind !== 'api-job') return;
+  const artifact = {
+    ...job.artifact,
+    ...getApiTestingArtifactContext(job.toolName, snapshot?.data, undefined, job.projectId),
+  };
+  window.dispatchEvent(new CustomEvent('quorvex:api-testing-refresh', {
+    detail: {
+      jobId: job.id,
+      projectId: artifact.projectId || job.projectId,
+      specName: artifact.specName,
+      specPath: artifact.specPath,
+      testPath: artifact.testPath,
+    },
+  }));
+}
+
+function getTrackedArtifactContext(job: TrackedChatJob, snapshot?: JobSnapshot): ApiTestingArtifactContext | AssistantArtifactContext {
+  if (isApiTestingTool(job.toolName)) {
+    return {
+      ...job.artifact,
+      ...getApiTestingArtifactContext(job.toolName, snapshot?.data, undefined, job.projectId),
+    };
+  }
+  if (isAssistantArtifactTool(job.toolName)) {
+    return {
+      ...job.artifact,
+      ...getAssistantArtifactContext(job.toolName, snapshot?.data, undefined, job.projectId),
+    };
+  }
+  return job.artifact || {};
+}
+
+function buildTrackedJobPagePath(job: TrackedChatJob, snapshot?: JobSnapshot): string {
+  if (isApiTestingTool(job.toolName)) {
+    return buildApiTestingPageLink(getTrackedArtifactContext(job, snapshot) as ApiTestingArtifactContext);
+  }
+  const pagePath = buildAssistantArtifactPageLink(job.toolName, getTrackedArtifactContext(job, snapshot) as AssistantArtifactContext);
+  return pagePath || job.pagePath;
+}
+
+function emitDomainRefresh(job: TrackedChatJob, snapshot?: JobSnapshot) {
+  emitApiTestingRefresh(job, snapshot);
+  if (typeof window === 'undefined' || !isAssistantArtifactTool(job.toolName)) return;
+  const domain = getAssistantArtifactDomain(job.toolName);
+  const artifact = getTrackedArtifactContext(job, snapshot) as AssistantArtifactContext;
+  window.dispatchEvent(new CustomEvent(`quorvex:${domain}-refresh`, {
+    detail: {
+      jobId: job.id,
+      projectId: artifact.projectId || job.projectId,
+      runId: artifact.runId,
+      specName: artifact.specName,
+      specPath: artifact.specPath,
+      scriptPath: artifact.scriptPath,
+      findingId: artifact.findingId,
+      sessionId: artifact.sessionId,
+      flowId: artifact.flowId,
+      requirementId: artifact.requirementId,
+    },
+  }));
+}
+
+function formatArtifactLines(job: TrackedChatJob, snapshot?: JobSnapshot): string[] {
+  const artifact = getTrackedArtifactContext(job, snapshot) as AssistantArtifactContext & ApiTestingArtifactContext;
+  const lines: string[] = [];
+  if (artifact.projectId) lines.push(`Project: ${artifact.projectId}`);
+  if (artifact.jobId) lines.push(`Job: ${artifact.jobId}`);
+  if (artifact.runId) lines.push(`Run: ${artifact.runId}`);
+  if (artifact.specName) lines.push(`Spec: ${artifact.specName}`);
+  if (artifact.specPath) lines.push(`Spec path: ${artifact.specPath}`);
+  if (artifact.scriptPath) lines.push(`Script: ${artifact.scriptPath}`);
+  if (artifact.testPath) lines.push(`Generated test: ${artifact.testPath}`);
+  if (artifact.findingId) lines.push(`Finding: ${artifact.findingId}`);
+  if (artifact.sessionId) lines.push(`Session: ${artifact.sessionId}`);
+  if (artifact.flowId) lines.push(`Flow: ${artifact.flowId}`);
+  if (artifact.requirementId) lines.push(`Requirement: ${artifact.requirementId}`);
+  return lines;
 }
 
 function makeTrackedJob(
@@ -362,22 +459,39 @@ function makeTrackedJob(
     kind = 'api-job';
     id = stringValue(data, ['job_id', 'jobId']);
     statusPath = projectStatusPath(`/api-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
-    pagePath = '/api-testing';
+    pagePath = buildApiTestingPageLink(getApiTestingArtifactContext(toolName, data, args, projectId));
   } else if (LOAD_JOB_TOOLS.has(toolName)) {
     kind = 'load-job';
     id = stringValue(data, ['job_id', 'jobId']);
     statusPath = projectStatusPath(`/load-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
-    pagePath = '/load-testing';
+    pagePath = buildAssistantArtifactPageLinkForTool(toolName, data, args, projectId) || '/load-testing';
   } else if (SECURITY_JOB_TOOLS.has(toolName)) {
     kind = 'security-job';
     id = stringValue(data, ['job_id', 'jobId']);
     statusPath = projectStatusPath(`/security-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
-    pagePath = '/security-testing';
+    pagePath = buildAssistantArtifactPageLinkForTool(toolName, data, args, projectId) || '/security-testing';
   } else if (DATABASE_JOB_TOOLS.has(toolName)) {
     kind = 'database-job';
     id = stringValue(data, ['job_id', 'jobId']);
     statusPath = projectStatusPath(`/database-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
-    pagePath = '/database-testing';
+    pagePath = buildAssistantArtifactPageLinkForTool(toolName, data, args, projectId) || '/database-testing';
+  } else if (EXPLORATION_SPEC_JOB_TOOLS.has(toolName)) {
+    kind = 'exploration';
+    id = stringValue(data, ['job_id', 'jobId']);
+    statusPath = `/exploration/spec-gen-jobs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`;
+    pagePath = buildAssistantArtifactPageLinkForTool(toolName, data, args, projectId) || '/exploration';
+  } else if (EXPLORER_FLOW_JOB_TOOLS.has(toolName)) {
+    kind = 'agent';
+    id = stringValue(data, ['job_id', 'jobId']);
+    statusPath = `/api/agents/exploratory/flow-spec-jobs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`;
+    pagePath = buildAssistantArtifactPageLinkForTool(toolName, data, args, projectId) || '/exploration';
+  } else if (REQUIREMENTS_JOB_TOOLS.has(toolName)) {
+    kind = 'prd-generation';
+    id = stringValue(data, ['job_id', 'jobId']);
+    statusPath = toolName === 'bulkGenerateRequirementSpecs'
+      ? `/requirements/bulk-generate-jobs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`
+      : `/requirements/generate-jobs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`;
+    pagePath = buildAssistantArtifactPageLinkForTool(toolName, data, args, projectId) || '/requirements';
   } else if (PRD_GENERATION_TOOLS.has(toolName)) {
     kind = 'prd-generation';
     id = stringValue(data, ['generation_id', 'generationId', 'id']);
@@ -411,6 +525,11 @@ function makeTrackedJob(
     statusPath,
     pagePath,
     projectId,
+    artifact: isApiTestingTool(toolName)
+      ? getApiTestingArtifactContext(toolName, data, args, projectId)
+      : isAssistantArtifactTool(toolName)
+        ? getAssistantArtifactContext(toolName, data, args, projectId)
+        : undefined,
     conversationId,
     createdAt: Date.now(),
     startedMessageSent,
@@ -512,6 +631,7 @@ function formatAutoPilotTerminal(job: TrackedChatJob, snapshot: JobSnapshot) {
 function buildJobMessage(job: TrackedChatJob, snapshot: JobSnapshot): { key: string; text: string; terminal?: boolean; toast?: string } | null {
   const status = snapshot.status;
   const terminal = TERMINAL_STATUSES.has(status);
+  const pagePath = buildTrackedJobPagePath(job, snapshot);
 
   if (job.kind === 'autopilot') {
     const pendingQuestion = (snapshot.questions || []).find((question) => normalizeStatus(question.status) === 'pending');
@@ -570,8 +690,9 @@ function buildJobMessage(job: TrackedChatJob, snapshot: JobSnapshot): { key: str
         `${job.label} ${statusLabel(status)}.`,
         `ID: ${job.id}`,
         snapshot.message ? `\n${snapshot.message}` : '',
+        ...formatArtifactLines(job, snapshot),
         '',
-        `[Open in dashboard](${job.pagePath})`,
+        `[Open in dashboard](${pagePath})`,
       ].filter(Boolean).join('\n'),
     };
   }
@@ -584,8 +705,9 @@ function buildJobMessage(job: TrackedChatJob, snapshot: JobSnapshot): { key: str
         `${job.label} is ${statusLabel(status)}${snapshot.phase ? ` (${snapshot.phase})` : ''}.`,
         `ID: ${job.id}`,
         snapshot.message ? `\n${snapshot.message}` : '',
+        ...formatArtifactLines(job, snapshot),
         '',
-        `[Open in dashboard](${job.pagePath})`,
+        `[Open in dashboard](${pagePath})`,
       ].filter(Boolean).join('\n'),
     };
   }
@@ -730,11 +852,13 @@ function ChatJobWatcher({
       }
 
       if (!job.startedMessageSent) {
+        const pagePath = buildTrackedJobPagePath(job);
         const text = [
           `I started ${job.label} and I am watching it from this chat.`,
           `ID: ${job.id}`,
+          ...formatArtifactLines(job),
           '',
-          `[Open in dashboard](${job.pagePath})`,
+          `[Open in dashboard](${pagePath})`,
         ].join('\n');
         await appendFollowup(job, text, `${job.label} started`);
         onJobPatch(job.key, {
@@ -768,6 +892,7 @@ function ChatJobWatcher({
 
         onJobPatch(job.key, patch);
         if (message?.terminal || TERMINAL_STATUSES.has(snapshot.status)) {
+          emitDomainRefresh(job, snapshot);
           onJobComplete(job.key);
         }
       } catch (error) {
@@ -781,7 +906,7 @@ function ChatJobWatcher({
             '',
             error instanceof Error ? error.message : 'The status endpoint returned an error.',
             '',
-            `[Open in dashboard](${job.pagePath})`,
+            `[Open in dashboard](${buildTrackedJobPagePath(job)})`,
           ].join('\n');
           await appendFollowup(job, text, `${job.label} status unavailable`);
           onJobPatch(job.key, { lastMessageKey: 'poll-error' });
@@ -1081,6 +1206,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       if (prev.some((existing) => existing.key === job.key)) return prev;
       return [...prev, job];
     });
+    emitDomainRefresh(job);
     return true;
   }, [conversationId, currentProject?.id]);
 

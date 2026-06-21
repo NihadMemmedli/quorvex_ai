@@ -176,9 +176,21 @@ class PrAdvisorPage {
 
   async analyzePullRequest(prNumber: string) {
     const prInput = this.page.getByPlaceholder('#');
-    await prInput.fill(prNumber);
+    await prInput.evaluate((element, value) => {
+      const input = element as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, prNumber);
     await expect(prInput).toHaveValue(prNumber);
+    const responsePromise = this.page.waitForResponse(response =>
+      response.url().includes('/github/default/pr-advisor/analyze') &&
+      response.request().method() === 'POST',
+    );
     await this.page.getByRole('button', { name: /^Analyze$/ }).click();
+    const response = await responsePromise;
+    expect(response.ok(), `Expected PR analysis request to succeed, got ${response.status()}`).toBe(true);
   }
 }
 

@@ -584,6 +584,10 @@ async def execute_agent_background(
                         "like live-step-001.png, live-step-002.png, etc. so the UI can show your current state."
                     )
                 if target_url:
+                    if has_browser_tools:
+                        prompt_parts.append(
+                            f"Start by calling browser_navigate for this target URL before inspecting the page: {target_url}"
+                        )
                     prompt_parts.append(f"Target URL: {target_url}")
                 if custom_config:
                     prompt_parts.append(f"Additional config JSON:\n{json.dumps(custom_config, indent=2)}")

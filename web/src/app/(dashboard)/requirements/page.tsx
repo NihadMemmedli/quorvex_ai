@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { CheckSquare, Search, ChevronDown, ChevronRight, Edit, Trash2, Plus, X, AlertCircle, GitBranch, FileText, AlertTriangle, CheckCircle, Loader2, Sparkles, Merge, SlidersHorizontal } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
+import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import GenerateSpecModal from '@/components/GenerateSpecModal';
 import { API_BASE } from '@/lib/api';
@@ -208,6 +209,7 @@ const formatFilterLabel = (value: string) => {
 
 export default function RequirementsPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
+    const searchParams = useSearchParams();
 
     // Requirements tab state
     const [requirements, setRequirements] = useState<Requirement[]>([]);
@@ -336,9 +338,39 @@ export default function RequirementsPage() {
         fetchData(0, false);
     }, [fetchData]);
 
+    useEffect(() => {
+        function handleRequirementsRefresh(event: Event) {
+            const detail = (event as CustomEvent).detail || {};
+            if (detail.projectId && detail.projectId !== currentProject?.id) return;
+            fetchData(0, false);
+        }
+        window.addEventListener('quorvex:requirements-refresh', handleRequirementsRefresh);
+        return () => window.removeEventListener('quorvex:requirements-refresh', handleRequirementsRefresh);
+    }, [currentProject?.id, fetchData]);
+
     // Requirements are now filtered server-side, so we just use them directly
     // Note: All filtering is done via API query params for pagination support
     const filteredRequirements = requirements;
+
+    useEffect(() => {
+        const requirementId = searchParams.get('requirementId');
+        const sourceSessionId = searchParams.get('sourceSessionId');
+        setExpandedReqs(prev => {
+            const next = new Set(prev);
+            if (requirementId) {
+                const parsed = Number(requirementId);
+                if (Number.isFinite(parsed) && requirements.some(req => req.id === parsed)) {
+                    next.add(parsed);
+                }
+            }
+            if (sourceSessionId) {
+                requirements
+                    .filter(req => req.source_session_id === sourceSessionId)
+                    .forEach(req => next.add(req.id));
+            }
+            return next.size === prev.size ? prev : next;
+        });
+    }, [requirements, searchParams]);
 
     const toggleExpanded = (id: number) => {
         const next = new Set(expandedReqs);
@@ -1296,6 +1328,7 @@ export default function RequirementsPage() {
                                             </span>
 
                                             <div style={{ display: 'flex', gap: '0.375rem', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap' }} onClick={e => e.stopPropagation()}>
+                                                <CreateSpecDropdown req={req} />
                                                 <button
                                                     className="btn btn-sm"
                                                     onClick={() => openTruthReview(req, 'confirm')}

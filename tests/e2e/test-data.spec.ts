@@ -214,20 +214,34 @@ async function fillJsonEditor(page: Page, content: string) {
   }, content);
 }
 
+function authUsersDataset(overrides: Partial<Dataset> = {}): Dataset {
+  return {
+    id: 'dataset-1',
+    project_id: PROJECT.id,
+    key: 'auth-users',
+    name: 'Auth Users',
+    description: '',
+    tags: [],
+    status: 'active',
+    format: 'json',
+    item_count: 0,
+    ...overrides,
+  };
+}
+
 test.describe('Test data', () => {
   test.describe.configure({ mode: 'serial' });
 
   test('creates, reloads, edits, and deletes an item from the default editor values', async ({ page }) => {
     await authenticate(page);
     await routeCoreApi(page);
-    await routeTestDataApi(page);
+    await routeTestDataApi(page, {
+      datasets: [authUsersDataset()],
+      items: [],
+    });
 
     await page.goto('/test-data');
     await expect(page.getByRole('heading', { name: 'Test Data' })).toBeVisible();
-
-    await page.getByTestId('test-data-dataset-key').fill('auth-users');
-    await page.getByTestId('test-data-dataset-name').fill('Auth Users');
-    await page.getByTestId('test-data-create-dataset').click();
 
     await expect(page.getByTestId('test-data-dataset-card').filter({ hasText: 'Auth Users' })).toBeVisible();
     await expect(page.getByTestId('test-data-item-key')).toHaveValue('valid-admin');
@@ -260,14 +274,14 @@ test.describe('Test data', () => {
   test('optionally protects password fields from the item editor', async ({ page }) => {
     await authenticate(page);
     await routeCoreApi(page);
-    await routeTestDataApi(page);
+    await routeTestDataApi(page, {
+      datasets: [authUsersDataset()],
+      items: [],
+    });
 
     await page.goto('/test-data');
     await expect(page.getByRole('heading', { name: 'Test Data' })).toBeVisible();
 
-    await page.getByTestId('test-data-dataset-key').fill('auth-users');
-    await page.getByTestId('test-data-dataset-name').fill('Auth Users');
-    await page.getByTestId('test-data-create-dataset').click();
     await expect(page.getByTestId('test-data-dataset-card').filter({ hasText: 'Auth Users' })).toBeVisible();
 
     await page.getByTestId('test-data-password-sensitive').click();

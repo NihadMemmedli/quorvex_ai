@@ -16,9 +16,10 @@ interface AnalyzerTabProps {
     projectId: string;
     onSpecsSaved: () => void;
     preferredConnectionId?: string;
+    initialRunId?: string;
 }
 
-export default function AnalyzerTab({ connections, projectId, onSpecsSaved, preferredConnectionId }: AnalyzerTabProps) {
+export default function AnalyzerTab({ connections, projectId, onSpecsSaved, preferredConnectionId, initialRunId }: AnalyzerTabProps) {
     const [analyzerConnId, setAnalyzerConnId] = useState('');
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analyzeJobId, setAnalyzeJobId] = useState<string | null>(null);
@@ -59,6 +60,34 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
         const preferred = preferredConnectionId && connections.find(c => c.id === preferredConnectionId);
         setAnalyzerConnId((preferred || connections[0]).id);
     }, [analyzerConnId, connections, preferredConnectionId]);
+
+    useEffect(() => {
+        if (!initialRunId || analyzeRunId === initialRunId) return;
+        const runId = initialRunId;
+        let cancelled = false;
+
+        async function loadAnalysisRun() {
+            setAnalyzeRunId(runId);
+            setAnalyzeJobStatus({ job_id: '', status: 'completed', run_id: runId });
+            try {
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/runs/${runId}/schema`, projectId)}`, {
+                    headers: getAuthHeaders(),
+                });
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                const sf = data.schema_findings;
+                const findings = sf?.findings || (Array.isArray(sf) ? sf : []);
+                setSchemaFindings(Array.isArray(findings) ? findings as SchemaFinding[] : []);
+                if (typeof sf?.summary === 'string') setAnalysisSummary(sf.summary);
+                if (typeof sf?.health_score === 'number') setAnalysisHealthScore(sf.health_score);
+            } catch (e) {
+                console.error('Failed to load analyzer run:', e);
+            }
+        }
+
+        loadAnalysisRun();
+        return () => { cancelled = true; };
+    }, [analyzeRunId, initialRunId, projectId]);
 
     // Poll active jobs
     useEffect(() => {

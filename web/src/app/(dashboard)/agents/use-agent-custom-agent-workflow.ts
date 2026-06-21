@@ -223,6 +223,16 @@ export function useAgentCustomAgentWorkflow(options: {
         return acc;
     }, {}), [toolCatalog]);
     const toolById = useMemo(() => new Map(toolCatalog.map(tool => [tool.id, tool])), [toolCatalog]);
+    const selectedDefinitionHasBrowserTools = useMemo(() => {
+        if (!selectedDefinition) return false;
+        return (selectedDefinition.tool_ids || []).some(toolId => {
+            const tool = toolById.get(toolId);
+            return toolId.startsWith('browser_')
+                || tool?.category === 'Browser'
+                || (tool?.tool_name || '').includes('__browser_')
+                || (tool?.tool_name || '').startsWith('browser_');
+        });
+    }, [selectedDefinition, toolById]);
 
     const resetDefinitionForm = useCallback(() => {
         setDefinitionForm(defaultDefinitionForm(agentRuntime));
@@ -360,13 +370,17 @@ export function useAgentCustomAgentWorkflow(options: {
     }, [archiveDefinitionRecord, fetchAgentDefinitionsFresh, selectDefinition, selectedDefinitionId, setWorkspaceStatus]);
 
     const handleRun = useCallback(async (submittedTargetUrl?: string) => {
+        const targetUrl = (submittedTargetUrl || '').trim() || url.trim() || targetUrlRef.current.trim() || (typeof document !== 'undefined'
+            ? ((document.getElementById('agents-target-url') as HTMLInputElement | null)?.value || '').trim()
+            : '');
         const validationError = validateAgentRunInput({
             selectedAgent: 'custom',
             selectedDefinitionId,
-            url,
+            url: targetUrl,
             authType,
             sessionId,
             testData: '',
+            customAgentHasBrowserTools: selectedDefinitionHasBrowserTools,
         });
         setRunFormError(validationError);
         if (validationError) {
@@ -386,9 +400,6 @@ export function useAgentCustomAgentWorkflow(options: {
                 return;
             }
 
-            const targetUrl = (submittedTargetUrl || '').trim() || url.trim() || targetUrlRef.current.trim() || (typeof document !== 'undefined'
-                ? ((document.getElementById('agents-target-url') as HTMLInputElement | null)?.value || '').trim()
-                : '');
             const testDataRefsList = testDataRefs ? testDataRefs.split(',').map(s => s.trim()).filter(Boolean) : [];
 
             const selectedRuntime = selectedDefinition?.runtime || agentRuntime;
@@ -416,7 +427,7 @@ export function useAgentCustomAgentWorkflow(options: {
         } finally {
             setIsStarting(false);
         }
-    }, [agentRuntime, authType, fetchHistoryRef, instructions, projectId, selectRun, selectedDefinition?.runtime, selectedDefinitionId, sessionId, sessions, setWorkspaceStatus, testDataRefs, url]);
+    }, [agentRuntime, authType, fetchHistoryRef, instructions, projectId, selectRun, selectedDefinition?.runtime, selectedDefinitionHasBrowserTools, selectedDefinitionId, sessionId, sessions, setWorkspaceStatus, testDataRefs, url]);
 
     const controlAgentRun = useCallback(async (action: 'pause' | 'resume' | 'cancel') => {
         if (!activeRun) return;

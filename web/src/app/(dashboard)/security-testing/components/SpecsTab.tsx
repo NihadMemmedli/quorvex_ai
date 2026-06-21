@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { Plus, Trash2, Edit2, Save, FileText } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -103,9 +103,10 @@ interface SpecsTabProps {
     projectId: string;
     specs: SecuritySpec[];
     fetchSpecs: () => Promise<void>;
+    initialSpecName?: string;
 }
 
-export default function SpecsTab({ projectId, specs, fetchSpecs }: SpecsTabProps) {
+export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName }: SpecsTabProps) {
     const [selectedSpec, setSelectedSpec] = useState<SecuritySpec | null>(null);
     const [specContent, setSpecContent] = useState('');
     const [isCreatingSpec, setIsCreatingSpec] = useState(false);
@@ -134,6 +135,13 @@ export default function SpecsTab({ projectId, specs, fetchSpecs }: SpecsTabProps
             }
         } catch (e) { console.error('Load spec failed:', e); }
     };
+
+    useEffect(() => {
+        if (!initialSpecName) return;
+        const spec = specs.find(item => item.name === initialSpecName || item.path === initialSpecName || item.path.endsWith(initialSpecName));
+        if (!spec || selectedSpec?.name === spec.name) return;
+        loadSpecContent(spec);
+    }, [initialSpecName, selectedSpec?.name, specs]);
 
     const createSpec = async () => {
         if (!newSpecName.trim() || !newSpecContent.trim()) return;

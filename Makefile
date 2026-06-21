@@ -1,4 +1,4 @@
-.PHONY: setup setup-skills start restart restart-agent-worker dev run run-skill clean help docker-up docker-down docker-build check-env logs stop \
+.PHONY: setup setup-skills start restart restart-agent-worker dev dev-fast dev-fast-build run run-skill clean help docker-up docker-down docker-build check-env logs stop \
         autopilot-stable-up autopilot-stable-down autopilot-dev-up autopilot-status autopilot-logs \
         prod prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev prod-dev-build prod-env-bootstrap \
         backup backup-full backup-status restore-list restore restore-from-minio \
@@ -6,7 +6,7 @@
         workers-up workers-down workers-scale workers-status workers-logs workers-build \
         swarm-up swarm-down swarm-scale swarm-status \
         k8s-deploy k8s-delete k8s-status k8s-scale k8s-logs \
-        db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed youtube-demo-seed \
+        db-migrate db-upgrade db-downgrade db-history alembic-upgrade alembic-history db-stamp db-demo-seed youtube-demo-seed \
         docker-prune volume-sizes db-vacuum health-check deploy-check company-rehearsal release-preflight server-upgrade release-to-server upgrade deps-lock \
         load-test agent-runtime-ready agent-temporal-smoke-up agent-temporal-smoke agent-temporal-smoke-logs \
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status dev-k6-workers-up dev-k6-workers-down dev-k6-workers-logs \
@@ -24,6 +24,8 @@ help:
 	@echo "    make setup          - Install dependencies and setup environment"
 	@echo "    make setup-skills   - Install Playwright skill dependencies"
 	@echo "    make dev            - Start full Docker dev stack with local code mounts"
+	@echo "    make dev-fast       - Start Docker dev stack without rebuilding images"
+	@echo "    make dev-fast-build - Build only images needed by make dev-fast"
 	@echo "    make start          - Start company/server runtime for external-nginx deployment"
 	@echo "    make stop           - Stop local dev and server-runtime Compose stacks"
 	@echo "    make restart        - Restart the company/server runtime"
@@ -113,6 +115,8 @@ help:
 	@echo "    make db-upgrade       - Run pending migrations"
 	@echo "    make db-downgrade     - Roll back one migration"
 	@echo "    make db-history       - Show migration history"
+	@echo "    make alembic-upgrade  - Alias for db-upgrade"
+	@echo "    make alembic-history  - Alias for db-history"
 	@echo "    make db-stamp R=...   - Stamp DB at revision (for existing DBs)"
 	@echo "    make db-demo-seed     - Seed Database Testing demo content"
 	@echo "    make youtube-demo-seed - Seed Quorvex Demo Shop YouTube walkthrough data"
@@ -195,10 +199,13 @@ run-skill:
 
 # Docker compose command for dev. Override if needed, e.g. DOCKER_COMPOSE=docker-compose.
 DOCKER_COMPOSE ?= docker compose
+ALEMBIC_RUNNER ?= python -m orchestrator.scripts.alembic_runner
+LOCAL_ALEMBIC = if [ -f venv/bin/activate ]; then source venv/bin/activate; fi; $(ALEMBIC_RUNNER)
 
 # Common production docker-compose commands
 PROD_COMPOSE = docker compose --env-file .env.prod -f docker-compose.prod.yml
 APP_COMPOSE = $(PROD_COMPOSE) -f docker-compose.dev-override.yml
+FAST_DEV_COMPOSE = $(APP_COMPOSE) -f docker-compose.dev-fast.yml
 AUTOPILOT_STABLE_COMPOSE = $(PROD_COMPOSE) -f docker-compose.autopilot-stable.yml
 BUILDX_CONFIG ?= /tmp/quorvex-buildx
 RUNTIME_PROFILES = --profile standard
@@ -259,6 +266,50 @@ dev:
 	@echo "  MinIO Console: http://localhost:9001"
 	@echo ""
 	@echo "View logs: make logs"
+
+dev-fast:
+	@$(MAKE) prod-env-bootstrap
+	@if ! docker image inspect "$${QUORVEX_FRONTEND_DEV_IMAGE:-quorvex-frontend:dev}" >/dev/null 2>&1; then \
+		echo "Missing fast-dev frontend image: $${QUORVEX_FRONTEND_DEV_IMAGE:-quorvex-frontend:dev}"; \
+		echo "Run 'make dev-fast-build' once, then rerun 'make dev-fast'."; \
+		exit 2; \
+	fi
+	@echo "Starting fast Docker development stack without rebuilding images..."
+	@echo ""
+	@echo "This target is additive and leaves 'make dev' unchanged."
+	@echo "It uses docker-compose.dev-fast.yml and refuses implicit image builds."
+	@echo "Run 'make dev-fast-build' after dependency, lockfile, or Dockerfile changes."
+	@echo ""
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(FAST_DEV_COMPOSE) $(RUNTIME_PROFILES) up -d --no-build db redis minio
+	@python3 scripts/reconcile_prod_postgres.py
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(FAST_DEV_COMPOSE) $(RUNTIME_PROFILES) up -d --no-build
+	@$(MAKE) agent-runtime-ready
+	@echo ""
+	@echo "Fast Docker dev stack started:"
+	@echo "  Dashboard:     http://localhost:3000"
+	@echo "  API:           http://localhost:8001"
+	@echo "  API Docs:      http://localhost:8001/docs"
+	@echo "  VNC WebSocket: http://localhost:6080/websockify"
+	@echo "  MinIO Console: http://localhost:9001"
+	@echo ""
+	@echo "View logs: make logs"
+
+dev-fast-build:
+	@$(MAKE) prod-env-bootstrap
+	@echo "Building fast-dev frontend image..."
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(FAST_DEV_COMPOSE) --progress=plain $(RUNTIME_PROFILES) build frontend
+	@if [ "$(BACKEND)" = "1" ]; then \
+		echo "BACKEND=1 set; rebuilding backend images for fast dev..."; \
+		COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(FAST_DEV_COMPOSE) --progress=plain $(RUNTIME_PROFILES) build backend autonomous-mission-worker custom-workflow-worker; \
+	elif ! docker image inspect "$${QUORVEX_BACKEND_IMAGE:-quorvex-backend:prod}" >/dev/null 2>&1 || \
+	     ! docker image inspect "$${QUORVEX_BACKEND_SLIM_IMAGE:-quorvex-backend-slim:prod}" >/dev/null 2>&1; then \
+		echo "Backend image missing; building backend images once..."; \
+		COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(FAST_DEV_COMPOSE) --progress=plain $(RUNTIME_PROFILES) build backend autonomous-mission-worker custom-workflow-worker; \
+	else \
+		echo "Backend images already exist; skipping heavy backend rebuild."; \
+		echo "Use 'make dev-fast-build BACKEND=1' after Python, root package, or backend Dockerfile dependency changes."; \
+	fi
+	@echo "Fast-dev images are ready. Start with: make dev-fast"
 
 run:
 	@if [ -z "$(SPEC)" ]; then \
@@ -932,28 +983,32 @@ db-migrate:
 		exit 1; \
 	fi
 	@echo "Generating new Alembic migration..."
-	@$(PROD_COMPOSE) exec backend alembic revision --autogenerate -m "$(M)" 2>/dev/null || \
-		(source venv/bin/activate 2>/dev/null && alembic revision --autogenerate -m "$(M)")
+	@$(PROD_COMPOSE) exec backend $(ALEMBIC_RUNNER) revision --autogenerate -m "$(M)" 2>/dev/null || \
+		($(LOCAL_ALEMBIC) revision --autogenerate -m "$(M)")
 	@echo ""
 	@echo "Migration generated. Review it in orchestrator/migrations/versions/"
 	@echo "Then run: make db-upgrade"
 
 db-upgrade:
 	@echo "Running pending Alembic migrations..."
-	@$(PROD_COMPOSE) exec backend alembic upgrade head 2>/dev/null || \
-		(source venv/bin/activate 2>/dev/null && alembic upgrade head)
+	@$(PROD_COMPOSE) exec backend $(ALEMBIC_RUNNER) upgrade head 2>/dev/null || \
+		($(LOCAL_ALEMBIC) upgrade head)
 	@echo "Migrations complete."
 
 db-downgrade:
 	@echo "Rolling back one Alembic migration..."
-	@$(PROD_COMPOSE) exec backend alembic downgrade -1 2>/dev/null || \
-		(source venv/bin/activate 2>/dev/null && alembic downgrade -1)
+	@$(PROD_COMPOSE) exec backend $(ALEMBIC_RUNNER) downgrade -1 2>/dev/null || \
+		($(LOCAL_ALEMBIC) downgrade -1)
 	@echo "Rollback complete. Run 'make db-history' to verify."
 
 db-history:
 	@echo "=== Alembic Migration History ==="
-	@$(PROD_COMPOSE) exec backend alembic history --verbose 2>/dev/null || \
-		(source venv/bin/activate 2>/dev/null && alembic history --verbose)
+	@$(PROD_COMPOSE) exec backend $(ALEMBIC_RUNNER) history --verbose 2>/dev/null || \
+		($(LOCAL_ALEMBIC) history --verbose)
+
+alembic-upgrade: db-upgrade
+
+alembic-history: db-history
 
 db-stamp:
 	@if [ -z "$(R)" ]; then \
@@ -965,8 +1020,8 @@ db-stamp:
 		exit 1; \
 	fi
 	@echo "Stamping database at revision $(R)..."
-	@$(PROD_COMPOSE) exec backend alembic stamp $(R) 2>/dev/null || \
-		(source venv/bin/activate 2>/dev/null && alembic stamp $(R))
+	@$(PROD_COMPOSE) exec backend $(ALEMBIC_RUNNER) stamp $(R) 2>/dev/null || \
+		($(LOCAL_ALEMBIC) stamp $(R))
 	@echo "Database stamped at revision $(R)."
 
 db-demo-seed:

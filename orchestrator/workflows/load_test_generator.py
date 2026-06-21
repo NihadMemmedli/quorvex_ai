@@ -18,18 +18,13 @@ from pathlib import Path
 # Add orchestrator to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-# Store project base directory BEFORE any chdir() calls
+# Store project base directory independently of the process cwd.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # Load Claude credentials and SDK
 from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
-
-# Use run-specific config directory if set (for parallel execution isolation)
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
 
 import logging
 

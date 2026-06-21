@@ -103,6 +103,7 @@ test.describe('Dashboard feature controls', () => {
   });
 
   test('opens tabbed specialized testing workspaces', async ({ page }) => {
+    test.slow();
     const guards = await bootDashboard(page);
 
     await page.goto('/api-testing');

@@ -47,6 +47,7 @@ export interface AgentRunValidationInput {
     authType: string;
     sessionId: string;
     testData: string;
+    customAgentHasBrowserTools?: boolean;
 }
 
 export const DEFAULT_AGENT_WORKSPACE_QUERY: AgentWorkspaceQueryState = {
@@ -188,6 +189,20 @@ export function getAgentHistoryCounts(runs: AgentHistoryRunLike[]) {
 export function validateAgentRunInput(input: AgentRunValidationInput): string | null {
     if (input.selectedAgent === 'custom' && !input.selectedDefinitionId) {
         return 'Select or create a custom agent first.';
+    }
+    if (input.selectedAgent === 'custom' && input.customAgentHasBrowserTools) {
+        const targetUrl = input.url.trim();
+        if (!targetUrl) {
+            return 'Target URL is required for custom agents with browser tools.';
+        }
+        try {
+            const parsed = new URL(targetUrl);
+            if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) {
+                return 'Target URL must be a valid http(s) URL.';
+            }
+        } catch {
+            return 'Target URL must be a valid http(s) URL.';
+        }
     }
     if (input.selectedAgent !== 'custom' && !input.url.trim()) {
         return 'Target URL is required.';

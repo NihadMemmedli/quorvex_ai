@@ -10,9 +10,11 @@ interface FindingsTabProps {
     projectId: string;
     runs: SecurityScanRun[];
     onStatusChange: (id: number, status: string, notes?: string) => void;
+    initialRunId?: string;
+    initialFindingId?: string;
 }
 
-export default function FindingsTab({ projectId, runs, onStatusChange }: FindingsTabProps) {
+export default function FindingsTab({ projectId, runs, onStatusChange, initialRunId, initialFindingId }: FindingsTabProps) {
     const [severityFilter, setSeverityFilter] = useState<string>('all');
     const [statusFilter, setStatusFilter] = useState<string>('all');
     const [scannerFilter, setScannerFilter] = useState<string>('all');
@@ -32,14 +34,23 @@ export default function FindingsTab({ projectId, runs, onStatusChange }: Finding
                 const res = await fetch(`${API_BASE}/security-testing/findings?${params}`, { headers: getAuthHeaders() });
                 if (res.ok) {
                     const data = await res.json();
-                    setFindings(data.findings || []);
+                    const loadedFindings = data.findings || [];
+                    setFindings(initialRunId ? loadedFindings.filter((finding: SecurityFinding) => finding.scan_id === initialRunId) : loadedFindings);
                     setTotal(data.total || 0);
                 }
             } catch (e) { console.error('Load findings failed:', e); }
             setLoading(false);
         };
         loadFindings();
-    }, [projectId, runs, severityFilter, statusFilter, scannerFilter]);
+    }, [initialRunId, projectId, runs, severityFilter, statusFilter, scannerFilter]);
+
+    useEffect(() => {
+        if (!initialFindingId) return;
+        const id = Number(initialFindingId);
+        if (Number.isFinite(id) && findings.some(finding => finding.id === id)) {
+            setExpandedFinding(id);
+        }
+    }, [findings, initialFindingId]);
 
     return (
         <div style={cardStyle}>

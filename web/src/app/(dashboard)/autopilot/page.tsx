@@ -251,6 +251,41 @@ interface AutoPilotEvidence {
     diagnostics: AutoPilotEvidenceArtifact[];
 }
 
+interface AutoPilotChecklistItem {
+    id: number;
+    session_id: string;
+    sequence: number;
+    kind: string;
+    phase_name: string | null;
+    title: string;
+    detail: string | null;
+    status: string;
+    progress: number;
+    items_completed: number;
+    items_total: number;
+    source_type: string | null;
+    source_id: string | null;
+    metadata: Record<string, any>;
+    created_at: string;
+    updated_at: string;
+    completed_at: string | null;
+}
+
+interface AutoPilotChecklistSummary {
+    total: number;
+    pending: number;
+    running: number;
+    waiting: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+}
+
+interface AutoPilotChecklistResponse {
+    items: AutoPilotChecklistItem[];
+    summary: AutoPilotChecklistSummary;
+}
+
 // ============ STATUS COLORS ============
 
 const dark = {
@@ -284,12 +319,17 @@ const dark = {
 const statusColors: Record<string, { bg: string; color: string }> = {
     pending: { bg: dark.neutralSoft, color: dark.textMuted },
     running: { bg: dark.primarySoft, color: dark.primary },
+    queued: { bg: dark.primarySoft, color: dark.primary },
+    tool_use: { bg: dark.primarySoft, color: dark.primary },
     generating: { bg: dark.primarySoft, color: dark.primary },
     completed: { bg: dark.successSoft, color: dark.success },
+    answered: { bg: dark.successSoft, color: dark.success },
+    auto_continued: { bg: dark.successSoft, color: dark.success },
     passed: { bg: dark.successSoft, color: dark.success },
     failed: { bg: dark.dangerSoft, color: dark.danger },
     error: { bg: dark.dangerSoft, color: dark.danger },
     skipped: { bg: dark.warningSoft, color: dark.warning },
+    waiting: { bg: dark.warningSoft, color: dark.warning },
     awaiting_input: { bg: dark.warningSoft, color: dark.warning },
     paused: { bg: dark.warningSoft, color: dark.warning },
     cancelled: { bg: dark.neutralSoft, color: dark.textMuted },
@@ -410,6 +450,19 @@ function taskFailureReason(task: TestTask): string {
         return task.error_summary || 'Paused by user';
     }
     return '-';
+}
+
+function buildChecklistSummary(items: AutoPilotChecklistItem[]): AutoPilotChecklistSummary {
+    return items.reduce<AutoPilotChecklistSummary>((summary, item) => {
+        summary.total += 1;
+        if (item.status === 'pending') summary.pending += 1;
+        else if (['running', 'queued', 'tool_use', 'generating'].includes(item.status)) summary.running += 1;
+        else if (['waiting', 'awaiting_input'].includes(item.status)) summary.waiting += 1;
+        else if (['completed', 'passed', 'answered', 'auto_continued'].includes(item.status)) summary.completed += 1;
+        else if (['failed', 'error', 'cancelled'].includes(item.status)) summary.failed += 1;
+        else if (item.status === 'skipped') summary.skipped += 1;
+        return summary;
+    }, { total: 0, pending: 0, running: 0, waiting: 0, completed: 0, failed: 0, skipped: 0 });
 }
 
 // ============ INLINE STYLE CONSTANTS ============
@@ -554,6 +607,10 @@ const autoPilotStyles = `
         background: ${dark.panelHover} !important;
     }
 
+    .autopilot-checklist-row {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+
     @media (max-width: 900px) {
         .autopilot-start-grid,
         .autopilot-statusbar {
@@ -582,6 +639,15 @@ const autoPilotStyles = `
 
         .autopilot-phase-step {
             min-width: 116px;
+        }
+
+        .autopilot-checklist-row {
+            grid-template-columns: auto minmax(0, 1fr);
+        }
+
+        .autopilot-checklist-meta {
+            grid-column: 2;
+            white-space: normal !important;
         }
     }
 `;
@@ -943,6 +1009,9 @@ export default function AutoPilotPage() {
     const [questions, setQuestions] = useState<Question[]>([]);
     const [specTasks, setSpecTasks] = useState<SpecTask[]>([]);
     const [testTasks, setTestTasks] = useState<TestTask[]>([]);
+    const [checklistItems, setChecklistItems] = useState<AutoPilotChecklistItem[]>([]);
+    const [checklistSummary, setChecklistSummary] = useState<AutoPilotChecklistSummary | null>(null);
+    const [checklistStreamState, setChecklistStreamState] = useState<'idle' | 'streaming' | 'polling'>('idle');
     const [liveState, setLiveState] = useState<AutoPilotLiveState | null>(null);
     const [evidence, setEvidence] = useState<AutoPilotEvidence | null>(null);
     const [loading, setLoading] = useState(true);
@@ -1052,6 +1121,16 @@ export default function AutoPilotPage() {
         }
     }, [currentProject?.id, projectLoading]);
 
+    const fetchChecklist = useCallback(async (sessionId: string) => {
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+        const data = await fetchJsonWithTimeout<AutoPilotChecklistResponse>(`${API_BASE}/autopilot/${sessionId}/checklist${projectParam}`);
+        setChecklistItems(Array.isArray(data.items) ? data.items : []);
+        setChecklistSummary(data.summary || null);
+        return data;
+    }, [currentProject?.id]);
+
     const fetchSessionDetail = useCallback(async (sessionId: string) => {
         const selectedProjectId = effectiveProjectId(currentProject?.id);
         const projectParam = currentProject?.id
@@ -1066,17 +1145,23 @@ export default function AutoPilotPage() {
                 setQuestions([]);
                 setSpecTasks([]);
                 setTestTasks([]);
+                setChecklistItems([]);
+                setChecklistSummary(null);
                 setLiveState(null);
                 setEvidence(null);
                 setLoadError('Auto Pilot session belongs to another project.');
                 return;
             }
 
-            const [phasesData, questionsData, specTasksData, testTasksData, liveData] = await Promise.all([
+            const [phasesData, questionsData, specTasksData, testTasksData, checklistData, liveData] = await Promise.all([
                 fetchJsonWithTimeout<Phase[] | { phases?: Phase[] }>(`${API_BASE}/autopilot/${sessionId}/phases${projectParam}`),
                 fetchJsonWithTimeout<Question[] | { questions?: Question[] }>(`${API_BASE}/autopilot/${sessionId}/questions${projectParam}`),
                 fetchJsonWithTimeout<SpecTask[] | { tasks?: SpecTask[] }>(`${API_BASE}/autopilot/${sessionId}/spec-tasks${projectParam}`),
                 fetchJsonWithTimeout<TestTask[] | { tasks?: TestTask[] }>(`${API_BASE}/autopilot/${sessionId}/test-tasks${projectParam}`),
+                fetchJsonWithTimeout<AutoPilotChecklistResponse>(`${API_BASE}/autopilot/${sessionId}/checklist${projectParam}`).catch(err => {
+                    console.debug('Auto Pilot checklist unavailable:', err);
+                    return null;
+                }),
                 fetchJsonWithTimeout<AutoPilotLiveState>(`${API_BASE}/autopilot/${sessionId}/live${projectParam}`).catch(err => {
                     console.debug('Auto Pilot live state unavailable:', err);
                     return null;
@@ -1094,6 +1179,8 @@ export default function AutoPilotPage() {
             setQuestions(Array.isArray(questionsData) ? questionsData : questionsData.questions || []);
             setSpecTasks(Array.isArray(specTasksData) ? specTasksData : specTasksData.tasks || []);
             setTestTasks(Array.isArray(testTasksData) ? testTasksData : testTasksData.tasks || []);
+            setChecklistItems(checklistData && Array.isArray(checklistData.items) ? checklistData.items : []);
+            setChecklistSummary(checklistData?.summary || null);
             setLiveState(liveData);
             setEvidence(evidenceData);
             setLoadError(null);
@@ -1145,6 +1232,79 @@ export default function AutoPilotPage() {
         const interval = setInterval(() => fetchSessionDetail(activeSessionId), pollMs);
         return () => clearInterval(interval);
     }, [activeSessionId, sessionStatus, fetchSessionDetail, projectLoading]);
+
+    useEffect(() => {
+        if (!activeSessionId || projectLoading) {
+            setChecklistStreamState('idle');
+            return;
+        }
+        const isActive = sessionStatus === 'running' || sessionStatus === 'awaiting_input';
+        if (!isActive) {
+            setChecklistStreamState('idle');
+            return;
+        }
+
+        let cancelled = false;
+        let pollingInterval: NodeJS.Timeout | null = null;
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+
+        const startPolling = () => {
+            if (cancelled || pollingInterval) return;
+            setChecklistStreamState('polling');
+            void fetchChecklist(activeSessionId).catch(() => undefined);
+            pollingInterval = setInterval(() => {
+                void fetchChecklist(activeSessionId).catch(() => undefined);
+            }, 3000);
+        };
+
+        if (typeof EventSource === 'undefined') {
+            startPolling();
+            return () => {
+                cancelled = true;
+                if (pollingInterval) clearInterval(pollingInterval);
+            };
+        }
+
+        setChecklistStreamState('streaming');
+        const source = new EventSource(`${API_BASE}/autopilot/${activeSessionId}/checklist/stream${projectParam}`);
+
+        const upsertStreamItem = (item: AutoPilotChecklistItem) => {
+            setChecklistItems(prev => {
+                const byId = new Map(prev.map(existing => [existing.id, existing]));
+                byId.set(item.id, item);
+                const next = Array.from(byId.values()).sort((a, b) => (a.sequence - b.sequence) || (a.id - b.id));
+                setChecklistSummary(buildChecklistSummary(next));
+                return next;
+            });
+        };
+
+        source.addEventListener('checklist', event => {
+            if (cancelled) return;
+            try {
+                upsertStreamItem(JSON.parse((event as MessageEvent).data) as AutoPilotChecklistItem);
+            } catch {
+                // Ignore malformed stream frames; polling/fetch will repair state.
+            }
+        });
+
+        source.addEventListener('complete', () => {
+            source.close();
+            if (!cancelled) setChecklistStreamState('idle');
+        });
+
+        source.onerror = () => {
+            source.close();
+            startPolling();
+        };
+
+        return () => {
+            cancelled = true;
+            source.close();
+            if (pollingInterval) clearInterval(pollingInterval);
+        };
+    }, [activeSessionId, currentProject?.id, fetchChecklist, projectLoading, sessionStatus]);
 
     useEffect(() => {
         submittedQuestionIdsRef.current.clear();
@@ -1717,6 +1877,172 @@ export default function AutoPilotPage() {
         );
     };
 
+    const checklistSourceHref = (item: AutoPilotChecklistItem): string | null => {
+        const specHref = specDetailHref(item.metadata?.spec_path);
+        if (specHref) return specHref;
+        if (item.metadata?.run_id) return `/runs/${encodeURIComponent(String(item.metadata.run_id))}`;
+        return null;
+    };
+
+    const checklistStatusIcon = (status: string) => {
+        if (['completed', 'passed', 'answered', 'auto_continued'].includes(status)) {
+            return <CheckCircle2 size={16} />;
+        }
+        if (['failed', 'error', 'cancelled'].includes(status)) {
+            return <AlertTriangle size={16} />;
+        }
+        if (['running', 'queued', 'tool_use', 'generating'].includes(status)) {
+            return <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />;
+        }
+        if (['waiting', 'awaiting_input'].includes(status)) {
+            return <MessageCircle size={16} />;
+        }
+        return <Clock size={16} />;
+    };
+
+    const renderLiveChecklistPanel = () => {
+        if (!session) return null;
+        const orderedItems = checklistItems.slice().sort((a, b) => (a.sequence - b.sequence) || (a.id - b.id));
+        const summary = checklistSummary || buildChecklistSummary(orderedItems);
+
+        return (
+            <div
+                style={{ ...cardStyle, marginBottom: '1rem', padding: 0, overflow: 'hidden' }}
+                aria-label="AutoPilot live checklist"
+            >
+                <div style={{
+                    padding: '1rem 1.25rem',
+                    borderBottom: `1px solid ${dark.border}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    flexWrap: 'wrap',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
+                        <List size={18} style={{ color: dark.cyan, flex: '0 0 auto' }} />
+                        <div style={{ minWidth: 0 }}>
+                            <div style={{ color: dark.text, fontSize: '0.95rem', fontWeight: 800 }}>
+                                Agent-Filled Live Checklist
+                            </div>
+                            <div style={{ color: dark.textSecondary, fontSize: '0.8rem' }}>
+                                {summary.completed}/{summary.total} done
+                                {summary.running ? ` · ${summary.running} running` : ''}
+                                {summary.waiting ? ` · ${summary.waiting} waiting` : ''}
+                            </div>
+                        </div>
+                    </div>
+                    <span style={{
+                        color: checklistStreamState === 'streaming' ? dark.success : checklistStreamState === 'polling' ? dark.warning : dark.textMuted,
+                        fontSize: '0.76rem',
+                        fontWeight: 800,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                    }}>
+                        {checklistStreamState === 'streaming' ? 'Live stream' : checklistStreamState === 'polling' ? 'Polling fallback' : 'Persisted'}
+                    </span>
+                </div>
+
+                {orderedItems.length === 0 ? (
+                    <div style={{ padding: '1.25rem', color: dark.textMuted, fontSize: '0.86rem' }}>
+                        Checklist rows will appear as AutoPilot starts each phase and task.
+                    </div>
+                ) : (
+                    <div style={{ display: 'grid' }}>
+                        {orderedItems.map(item => {
+                            const statusStyle = getStatusStyle(item.status);
+                            const isCurrent = ['running', 'queued', 'tool_use', 'generating', 'waiting'].includes(item.status);
+                            const href = checklistSourceHref(item);
+                            const pct = progressPercent(item.progress);
+                            const showProgress = item.items_total > 0 || (pct > 0 && pct < 100);
+                            return (
+                                <div
+                                    key={item.id}
+                                    className="autopilot-checklist-row"
+                                    style={{
+                                        display: 'grid',
+                                        gap: '0.8rem',
+                                        padding: '0.85rem 1.25rem',
+                                        borderBottom: `1px solid ${dark.border}`,
+                                        background: isCurrent ? 'rgba(59, 130, 246, 0.06)' : 'transparent',
+                                    }}
+                                >
+                                    <div style={{
+                                        width: '28px',
+                                        height: '28px',
+                                        borderRadius: '8px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        background: statusStyle.bg,
+                                        color: statusStyle.color,
+                                        marginTop: '0.1rem',
+                                    }}>
+                                        {checklistStatusIcon(item.status)}
+                                    </div>
+                                    <div style={{ minWidth: 0 }}>
+                                        <div style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '0.5rem',
+                                            flexWrap: 'wrap',
+                                            marginBottom: '0.25rem',
+                                        }}>
+                                            <span style={{ color: dark.text, fontSize: '0.88rem', fontWeight: 800, overflowWrap: 'anywhere' }}>
+                                                {item.title}
+                                            </span>
+                                            <StatusBadge status={item.status} />
+                                            {item.phase_name && (
+                                                <span style={{ color: dark.textMuted, fontSize: '0.74rem', fontWeight: 700 }}>
+                                                    {PHASE_LABELS[item.phase_name] || item.phase_name}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {item.detail && (
+                                            <div style={{ color: dark.textSecondary, fontSize: '0.8rem', overflowWrap: 'anywhere', lineHeight: 1.45 }}>
+                                                {item.detail}
+                                            </div>
+                                        )}
+                                        {showProgress && (
+                                            <div style={{ marginTop: '0.55rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                                                <div style={{ flex: 1, height: '4px', background: dark.border, borderRadius: '2px', overflow: 'hidden' }}>
+                                                    <div style={{
+                                                        height: '100%',
+                                                        width: `${pct}%`,
+                                                        background: statusStyle.color,
+                                                        transition: 'width 0.4s ease',
+                                                    }} />
+                                                </div>
+                                                <span style={{ color: dark.textMuted, fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
+                                                    {item.items_total > 0 ? `${item.items_completed}/${item.items_total}` : `${Math.round(pct)}%`}
+                                                </span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="autopilot-checklist-meta" style={{
+                                        display: 'flex',
+                                        alignItems: 'flex-start',
+                                        gap: '0.6rem',
+                                        color: dark.textMuted,
+                                        fontSize: '0.75rem',
+                                        whiteSpace: 'nowrap',
+                                    }}>
+                                        <span>{formatTime(item.updated_at)}</span>
+                                        {href && (
+                                            <a href={href} style={{ color: dark.cyan, display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                                <ExternalLink size={13} />
+                                            </a>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     // -- Live Browser --
     const renderLiveBrowserPanel = () => {
         if (!session || !activeSessionId) return null;
@@ -1867,7 +2193,7 @@ export default function AutoPilotPage() {
                                 ) : (
                                     <div style={{ padding: '1rem', color: dark.textMuted, fontSize: '0.85rem' }}>
                                         {active
-                                            ? (liveState?.activity_source === 'artifact_fallback'
+                                            ? (liveState?.activity_source === 'capture_activity_fallback'
                                                 ? 'Captures are arriving. Waiting for live tool telemetry.'
                                                 : 'Waiting for worker/tool heartbeat.')
                                             : (liveState?.message || 'Waiting for browser activity.')}
@@ -3545,6 +3871,11 @@ export default function AutoPilotPage() {
                 {/* Question Panel */}
                 <div className="animate-in stagger-3">
                     {renderQuestionPanel()}
+                </div>
+
+                {/* Live Checklist */}
+                <div className="animate-in stagger-3">
+                    {renderLiveChecklistPanel()}
                 </div>
 
                 {/* Live Browser */}

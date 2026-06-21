@@ -30,13 +30,6 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Use run-specific config directory if set (for parallel execution isolation)
-# This also helps avoid root context issues in Docker when spawning Claude CLI
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.makedirs(config_dir, exist_ok=True)
-    os.chdir(config_dir)
-
 # Load Claude credentials and SDK
 from load_env import setup_claude_env
 
@@ -1026,6 +1019,8 @@ When stopping, output any missing flow records you can infer from observed page 
         self, prompt: str, session_dir: Path, config: ExplorationConfig
     ) -> str:
         """Run the exploration agent and capture output using AgentRunner."""
+        exploration_session_id = session_dir.name
+
         # Get timeout from environment or use 30 minutes default
         timeout = int(
             os.environ.get("EXPLORATION_TIMEOUT_SECONDS", get_default_timeout())
@@ -1089,6 +1084,16 @@ When stopping, output any missing flow records you can infer from observed page 
                 owner_id=self.owner_id,
                 owner_label=self.owner_label,
                 model_tier=config.model_tier or "tool_deep",
+                preserve_browser_on_failure=self.owner_type == "autopilot",
+                autopilot_retry_enabled=self.owner_type == "autopilot",
+                autopilot_session_id=self.owner_id if self.owner_type == "autopilot" else None,
+                autopilot_stable_key=f"explore:{exploration_session_id}",
+                autopilot_agent_kind="exploration",
+                autopilot_source_type="exploration_session",
+                autopilot_source_id=exploration_session_id,
+                autopilot_checklist_title=f"Exploring {config.entry_url}",
+                autopilot_phase_name="exploration",
+                autopilot_checklist_kind="exploration",
             )
 
             result = await runner.run(prompt)

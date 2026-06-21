@@ -551,6 +551,75 @@ def write_playwright_test_mcp_config(
     }
 
 
+REQUIRED_PLAYWRIGHT_TEST_MCP_TOOLS = {
+    "planner_setup_page",
+    "browser_navigate",
+    "browser_snapshot",
+    "planner_save_plan",
+    "test_debug",
+    "test_run",
+}
+
+
+def validate_playwright_test_mcp_contract(
+    mcp_config_path: Path | str,
+    *,
+    required_tools: set[str] | None = None,
+) -> dict[str, Any]:
+    """Validate that a run-local MCP config targets the Playwright Test server.
+
+    The custom `playwright run-test-mcp-server` command is the source of the
+    planner/generator tools. We cannot cheaply introspect a server without
+    launching an agent, so this validates the command shape that exposes those
+    tools and reports the expected required tool set for preflight diagnostics.
+    """
+    path = Path(mcp_config_path)
+    required = set(required_tools or REQUIRED_PLAYWRIGHT_TEST_MCP_TOOLS)
+    try:
+        config = json.loads(path.read_text())
+    except Exception as exc:
+        return {
+            "ready": False,
+            "error": f"Invalid MCP config at {path}: {exc}",
+            "mcp_config_path": str(path),
+            "required_tools": sorted(required),
+        }
+
+    servers = config.get("mcpServers") or {}
+    server = servers.get("playwright-test") if isinstance(servers, dict) else None
+    if not isinstance(server, dict):
+        return {
+            "ready": False,
+            "error": "Run-local MCP config does not define a `playwright-test` server.",
+            "mcp_config_path": str(path),
+            "required_tools": sorted(required),
+            "configured_servers": sorted(servers) if isinstance(servers, dict) else [],
+        }
+
+    args = [str(arg) for arg in (server.get("args") or [])]
+    args_text = " ".join(args)
+    if server.get("command") != "npx" or "playwright" not in args or "run-test-mcp-server" not in args:
+        return {
+            "ready": False,
+            "error": "`playwright-test` is not configured as `npx playwright run-test-mcp-server`.",
+            "mcp_config_path": str(path),
+            "required_tools": sorted(required),
+            "mcp_command": server.get("command"),
+            "mcp_args": args,
+        }
+
+    return {
+        "ready": True,
+        "mcp_config_path": str(path),
+        "server_name": "playwright-test",
+        "mcp_command": server.get("command"),
+        "mcp_args": args,
+        "required_tools": sorted(required),
+        "exposed_tools_verified_by": "playwright run-test-mcp-server command contract",
+        "args_text": args_text,
+    }
+
+
 def write_playwright_mcp_config(
     *,
     run_dir: Path,

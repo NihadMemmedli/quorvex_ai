@@ -227,6 +227,20 @@ class ToolCall:
     success: bool = True
     error: str | None = None
     input: dict[str, Any] | None = None
+    result_preview: str | None = None
+
+
+class UnproductiveAgentStreamError(RuntimeError):
+    """Raised when SDK events keep arriving without parsed output/tool activity."""
+
+    def __init__(self, progress: dict[str, Any]):
+        self.progress = dict(progress)
+        messages = self.progress.get("messages_received", 0)
+        elapsed = self.progress.get("elapsed_seconds", 0)
+        super().__init__(
+            "Agent stream produced "
+            f"{messages} messages over {elapsed:.0f}s but no parsed text, tool calls, or output."
+        )
 
 
 SENSITIVE_INPUT_KEY_PARTS = (
@@ -335,10 +349,14 @@ class AgentSdkFeaturePolicy:
 
 
 def classify_agent_error_type(error: Any, fallback: str | None = None) -> str | None:
+    if isinstance(error, UnproductiveAgentStreamError):
+        return "unproductive_stream"
     text = str(error or "")
     lowered = text.lower()
     if "no conversation found" in lowered and "session id" in lowered:
         return "invalid_session_resume"
+    if "processerror" in lowered or "process error" in lowered:
+        return "agent_process_error"
     if "heartbeat lost" in lowered:
         return "heartbeat_lost"
     if "browser" in lowered and "timeout" in lowered:
@@ -520,6 +538,15 @@ class AgentRunner:
         trace_prompt_hash: str | None = None,
         trace_agent_run_id: str | None = None,
         preserve_browser_on_failure: bool = False,
+        autopilot_retry_enabled: bool = False,
+        autopilot_session_id: str | None = None,
+        autopilot_stable_key: str | None = None,
+        autopilot_agent_kind: str | None = None,
+        autopilot_source_type: str | None = None,
+        autopilot_source_id: str | None = None,
+        autopilot_checklist_title: str | None = None,
+        autopilot_phase_name: str | None = None,
+        autopilot_checklist_kind: str | None = None,
     ):
         """
         Initialize the agent runner.
@@ -586,6 +613,12 @@ class AgentRunner:
             trace_agent_run_id: AgentRun ID to link trace records and memory injection telemetry.
             preserve_browser_on_failure: Leave child browser/MCP processes running
                 after failed or timed-out browser debug runs for post-failure inspection.
+            autopilot_retry_enabled: Enable AutoPilot-only durable retry/resume wrapper.
+            autopilot_session_id: AutoPilot session ID for attempt persistence.
+            autopilot_stable_key: Stable checklist/attempt key for this agent call.
+            autopilot_agent_kind: Compact kind label for attempt diagnostics.
+            autopilot_source_type/source_id: Existing checklist source row to update.
+            autopilot_checklist_title/phase/kind: Checklist row metadata.
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -644,6 +677,16 @@ class AgentRunner:
         self.trace_prompt_hash = trace_prompt_hash
         self.trace_agent_run_id = trace_agent_run_id or owner_id
         self.preserve_browser_on_failure = preserve_browser_on_failure
+        self.autopilot_retry_enabled = autopilot_retry_enabled
+        self.autopilot_session_id = autopilot_session_id or (owner_id if owner_type == "autopilot" else None)
+        self.autopilot_stable_key = autopilot_stable_key
+        self.autopilot_agent_kind = autopilot_agent_kind
+        self.autopilot_source_type = autopilot_source_type
+        self.autopilot_source_id = autopilot_source_id
+        self.autopilot_checklist_title = autopilot_checklist_title
+        self.autopilot_phase_name = autopilot_phase_name
+        self.autopilot_checklist_kind = autopilot_checklist_kind
+        self._autopilot_retry_inner = False
         (
             self._resolved_tool_search_env,
             self._resolved_tool_search_details,
@@ -656,6 +699,26 @@ class AgentRunner:
             self.env_vars["ENABLE_TOOL_SEARCH"] = tool_search
         self._last_memory_injected = False
         self._last_memory_context = ""
+        self.unproductive_stream_min_messages = self._env_int(
+            "AGENT_UNPRODUCTIVE_STREAM_MIN_MESSAGES",
+            500,
+            minimum=1,
+        )
+        self.unproductive_stream_seconds = self._env_int(
+            "AGENT_UNPRODUCTIVE_STREAM_SECONDS",
+            180,
+            minimum=0,
+        )
+
+    @staticmethod
+    def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except (TypeError, ValueError):
+            value = default
+        if minimum is not None:
+            value = max(minimum, value)
+        return value
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -811,12 +874,30 @@ class AgentRunner:
         return self._is_browser_mcp_run()
 
     def _emit_progress(self, progress: dict[str, Any]) -> None:
+        progress = {
+            "agent_type": self.memory_agent_type,
+            "stage": self.memory_stage,
+            "owner_type": self.owner_type,
+            "owner_id": self.owner_id,
+            **progress,
+        }
+        self._write_latest_progress(progress)
         if not self.on_progress:
             return
         try:
             self.on_progress(progress)
         except Exception as exc:
             logger.debug(f"Agent progress callback failed: {exc}")
+
+    def _write_latest_progress(self, progress: dict[str, Any]) -> None:
+        if not self.session_dir:
+            return
+        try:
+            path = Path(self.session_dir) / "agent_progress.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(progress, indent=2, sort_keys=True, default=str))
+        except Exception as exc:
+            logger.debug("Could not write latest agent progress: %s", exc)
 
     async def _check_cancelled(self) -> bool:
         if not self.is_cancelled:
@@ -1150,6 +1231,11 @@ class AgentRunner:
         Returns:
             AgentResult with success status, output, and diagnostics
         """
+        if self.autopilot_retry_enabled and not getattr(self, "_autopilot_retry_inner", False):
+            from orchestrator.services.autopilot_agent_reliability import run_agent_with_retries
+
+            return await run_agent_with_retries(self, prompt, timeout_override=timeout_override)
+
         timeout = timeout_override or self.timeout_seconds
         start_time = datetime.now()
         if await self._check_cancelled():
@@ -1268,6 +1354,56 @@ class AgentRunner:
                         ]
                     )
 
+                def _progress_snapshot(phase: str = "streaming") -> dict[str, Any]:
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    output_chars = sum(len(part) for part in result_parts)
+                    parsed_tool_count = len(tool_calls) + len(pending_tools)
+                    unproductive = (
+                        messages_received >= self.unproductive_stream_min_messages
+                        and elapsed >= self.unproductive_stream_seconds
+                        and text_blocks_received == 0
+                        and parsed_tool_count == 0
+                        and output_chars == 0
+                    )
+                    return {
+                        "phase": phase,
+                        "status": "running",
+                        "messages_received": messages_received,
+                        "text_blocks_received": text_blocks_received,
+                        "tool_calls": parsed_tool_count,
+                        "completed_tool_calls": len(tool_calls),
+                        "pending_tool_calls": len(pending_tools),
+                        "browser_tool_calls": _browser_tool_count(include_pending=True),
+                        "output_chars": output_chars,
+                        "elapsed_seconds": elapsed,
+                        "unproductive_stream": unproductive,
+                        "unproductive_stream_min_messages": self.unproductive_stream_min_messages,
+                        "unproductive_stream_seconds": self.unproductive_stream_seconds,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+
+                def _check_unproductive_stream() -> None:
+                    progress = _progress_snapshot("unproductive_stream")
+                    if not progress.get("unproductive_stream"):
+                        return
+                    logger.warning(
+                        "Agent stream is unproductive: %s messages, %s text blocks, "
+                        "%s tools, %s chars after %.1fs",
+                        progress["messages_received"],
+                        progress["text_blocks_received"],
+                        progress["tool_calls"],
+                        progress["output_chars"],
+                        progress["elapsed_seconds"],
+                    )
+                    progress["status"] = "failed"
+                    progress["error_type"] = "unproductive_stream"
+                    progress["message"] = (
+                        "Agent stream is receiving SDK events but has produced no "
+                        "parsed text, tool calls, or output."
+                    )
+                    self._emit_progress(progress)
+                    raise UnproductiveAgentStreamError(progress)
+
                 def _handle_tool_use(tool_use: ParsedToolUse) -> None:
                     nonlocal pending_tool_counter
                     tool_name = tool_use.name
@@ -1292,7 +1428,7 @@ class AgentRunner:
                             "browser_tool_calls": _browser_tool_count(include_pending=True),
                             "interactions": len(tool_calls) + len(pending_tools),
                             "last_tool": tool_name,
-                            "updated_at": datetime.utcnow().isoformat(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
                         }
                     )
 
@@ -1317,6 +1453,7 @@ class AgentRunner:
                                 success=not tool_result.is_error,
                                 error=tool_result_text(tool_result.content)[:200] if tool_result.is_error else None,
                                 input=tool_input,
+                                result_preview=tool_result_text(tool_result.content)[:1000],
                             )
                         )
                         completed_browser_calls = len(
@@ -1333,7 +1470,7 @@ class AgentRunner:
                                 "browser_tool_calls": _browser_tool_count(),
                                 "interactions": len(tool_calls),
                                 "last_tool": tool_name,
-                                "updated_at": datetime.utcnow().isoformat(),
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
                             }
                         )
                         if (
@@ -1442,6 +1579,8 @@ class AgentRunner:
                             f"Agent progress: {messages_received} msgs, {text_blocks_received} text, "
                             f"{len(tool_calls)} tools, {total_chars} chars"
                         )
+                        self._emit_progress(_progress_snapshot())
+                        _check_unproductive_stream()
 
             # Run with timeout, retrying with key rotation on 429
             rotator = get_api_key_rotator() if get_api_key_rotator else None
@@ -1516,7 +1655,7 @@ class AgentRunner:
                                     "retry_reason": "provider_overloaded",
                                     "retry_error_status": api_error_status,
                                     "retry_wait_seconds": wait_seconds,
-                                    "updated_at": datetime.utcnow().isoformat(),
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
                                 }
                             )
                             await asyncio.sleep(wait_seconds)
@@ -1743,6 +1882,25 @@ class AgentRunner:
         if self.session_dir and agent_result and not debug_output_saved:
             self._save_debug_output(agent_result.output, agent_result.tool_calls, agent_result.messages_received)
 
+        if agent_result:
+            self._emit_progress(
+                {
+                    "phase": "completed" if agent_result.success else "failed",
+                    "status": "completed" if agent_result.success else "failed",
+                    "messages_received": agent_result.messages_received,
+                    "text_blocks_received": agent_result.text_blocks_received,
+                    "tool_calls": len(agent_result.tool_calls),
+                    "completed_tool_calls": len(agent_result.tool_calls),
+                    "pending_tool_calls": 0,
+                    "output_chars": len(agent_result.output or ""),
+                    "elapsed_seconds": agent_result.duration_seconds,
+                    "unproductive_stream": agent_result.error_type == "unproductive_stream",
+                    "error_type": agent_result.error_type,
+                    "error": agent_result.error,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
         self._append_cost_log(agent_result)
         self._capture_agent_memory(original_prompt, agent_result)
         return agent_result
@@ -1830,26 +1988,27 @@ class AgentRunner:
                     continue
                 tool_name, started_at, tool_input = pending_item
                 completed.append(
-                    ToolCall(
-                        name=tool_name,
-                        timestamp=started_at,
-                        duration_ms=0.0,
-                        success=not tool_result.is_error,
-                        error=tool_result_text(tool_result.content)[:200]
-                        if tool_result.is_error
-                        else None,
-                        input=tool_input,
+                        ToolCall(
+                            name=tool_name,
+                            timestamp=started_at,
+                            duration_ms=0.0,
+                            success=not tool_result.is_error,
+                            error=tool_result_text(tool_result.content)[:200]
+                            if tool_result.is_error
+                            else None,
+                            input=tool_input,
+                            result_preview=tool_result_text(tool_result.content)[:1000],
+                        )
                     )
-                )
 
         for tool_name, started_at, tool_input in pending.values():
             completed.append(
-                ToolCall(
-                    name=tool_name,
-                    timestamp=started_at,
-                    duration_ms=None,
-                    success=True,
-                    input=tool_input,
+                    ToolCall(
+                        name=tool_name,
+                        timestamp=started_at,
+                        duration_ms=None,
+                        success=True,
+                        input=tool_input,
                 )
             )
 
@@ -2280,8 +2439,14 @@ class AgentRunner:
                         ToolCall(
                             name=str(record.get("name") or "queue_tool_call"),
                             timestamp=start_time,
-                            success=True,
+                            duration_ms=float(record["duration_ms"])
+                            if record.get("duration_ms") is not None
+                            else None,
+                            success=record.get("success") is not False,
+                            error=str(record.get("error") or "") or None,
                             input=record_input if isinstance(record_input, dict) else None,
+                            result_preview=str(record.get("result_preview") or "")[:1000]
+                            or None,
                         )
                     )
             if not synthetic_tool_calls:
@@ -2474,8 +2639,14 @@ class AgentRunner:
                 ToolCall(
                     name=str(record.get("name") or "queue_tool_call"),
                     timestamp=start_time,
-                    success=bool(record.get("success", True)),
+                    duration_ms=float(record["duration_ms"])
+                    if record.get("duration_ms") is not None
+                    else None,
+                    success=record.get("success") is not False,
+                    error=str(record.get("error") or "") or None,
                     input=record.get("input") if isinstance(record.get("input"), dict) else None,
+                    result_preview=str(record.get("result_preview") or "")[:1000]
+                    or None,
                 )
                 for record in tool_call_records
                 if isinstance(record, dict)
@@ -2559,6 +2730,7 @@ class AgentRunner:
                     "duration_ms": tc.duration_ms,
                     "success": tc.success,
                     "error": tc.error,
+                    "result_preview": tc.result_preview,
                     **build_safe_tool_input_metadata(tc.input),
                 }
                 for tc in tool_calls

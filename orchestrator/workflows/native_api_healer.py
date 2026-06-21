@@ -27,11 +27,6 @@ from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
 
-# Use run-specific config directory if set (for parallel execution isolation)
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
-
 from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
 

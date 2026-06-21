@@ -42,6 +42,20 @@ from orchestrator.ai.prompt_registry import (
 
 logger = logging.getLogger(__name__)
 
+VALID_REQUIREMENT_CATEGORIES = {
+    "authentication",
+    "authorization",
+    "navigation",
+    "crud",
+    "form_submission",
+    "search",
+    "display",
+    "integration",
+    "error_handling",
+    "other",
+}
+VALID_REQUIREMENT_PRIORITIES = {"critical", "high", "medium", "low"}
+
 
 @dataclass
 class GeneratedRequirement:
@@ -100,8 +114,15 @@ class RequirementsGenerator:
     And generates structured functional requirements.
     """
 
-    def __init__(self, project_id: str = "default"):
+    def __init__(
+        self,
+        project_id: str = "default",
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+    ):
         self.project_id = project_id
+        self.owner_type = owner_type
+        self.owner_id = owner_id
         self.store = get_exploration_store(project_id=project_id)
 
     async def generate_from_exploration(
@@ -157,6 +178,7 @@ class RequirementsGenerator:
             flows=flows,
             api_endpoints=api_endpoints,
         )
+        exploration_summary["session_id"] = exploration_session_id
 
         mode = mode if mode in {"single_agent", "multi_agent"} else "single_agent"
         browser_verification = (
@@ -618,6 +640,17 @@ Generate the requirements now:
             allowed_tools=[],  # No tools needed for analysis
             log_tools=False,
             model_tier="deep",
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            autopilot_retry_enabled=self.owner_type == "autopilot",
+            autopilot_session_id=self.owner_id if self.owner_type == "autopilot" else None,
+            autopilot_stable_key=f"requirements:{exploration_summary.get('session_id') or exploration_summary.get('source_session_id') or exploration_summary.get('entry_url') or 'unknown'}",
+            autopilot_agent_kind="requirements",
+            autopilot_source_type="requirements",
+            autopilot_source_id=str(exploration_summary.get("session_id") or exploration_summary.get("source_session_id") or exploration_summary.get("entry_url") or "unknown"),
+            autopilot_checklist_title=f"Generate requirements from {exploration_summary.get('session_id') or exploration_summary.get('source_session_id') or 'exploration'}",
+            autopilot_phase_name="requirements",
+            autopilot_checklist_kind="requirements",
         )
         result = await runner.run(prompt)
 
@@ -724,8 +757,12 @@ Generate the requirements now:
         if browser_verification == "selected":
             telemetry.verification_status = "selected_pending"
             await progress_callback("Selecting ambiguous requirements for browser verification")
-            candidates = await self._verify_selected_requirements(candidates, exploration_summary)
-            telemetry.verification_status = "selected_completed"
+            candidates, browser_evidence = await self._verify_selected_requirements(
+                candidates, exploration_summary
+            )
+            telemetry.verification_status = (
+                "selected_completed" if browser_evidence else "selected_failed"
+            )
         else:
             telemetry.verification_status = "off"
 
@@ -885,6 +922,17 @@ Return JSON only:
             allowed_tools=[],
             log_tools=False,
             model_tier="deep",
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            autopilot_retry_enabled=self.owner_type == "autopilot",
+            autopilot_session_id=self.owner_id if self.owner_type == "autopilot" else None,
+            autopilot_stable_key=f"requirements:{exploration_summary.get('session_id') or exploration_summary.get('source_session_id') or exploration_summary.get('entry_url') or 'unknown'}:{packet.get('id') or packet.get('category')}",
+            autopilot_agent_kind="requirements_specialist",
+            autopilot_source_type="requirements",
+            autopilot_source_id=str(exploration_summary.get("session_id") or exploration_summary.get("source_session_id") or exploration_summary.get("entry_url") or "unknown"),
+            autopilot_checklist_title=f"Generate requirements from {exploration_summary.get('session_id') or exploration_summary.get('source_session_id') or 'exploration'}",
+            autopilot_phase_name="requirements",
+            autopilot_checklist_kind="requirements",
         )
         result = await runner.run(prompt)
         if not result.success:
@@ -938,7 +986,7 @@ Return JSON only:
         self,
         candidates: list[GeneratedRequirement],
         exploration_summary: dict[str, Any],
-    ) -> list[GeneratedRequirement]:
+    ) -> tuple[list[GeneratedRequirement], bool]:
         """Optionally ask a browser-enabled verifier to check selected uncertain claims."""
         selected = [
             req
@@ -946,11 +994,13 @@ Return JSON only:
             if req.priority in {"critical", "high"} or req.confidence < 0.7
         ][:3]
         if not selected:
-            return candidates
+            return candidates, False
 
         prompt = f"""Verify whether these requirement claims are visible from the app entry point.
 
-Use browser tools only for the selected claims. Return JSON with title, verified boolean, confidence, and note.
+Use browser tools only for the selected claims.
+You must first call browser_navigate for the Entry URL, then browser_snapshot.
+Return JSON with title, verified boolean, confidence, and note.
 
 Entry URL: {exploration_summary.get("entry_url", "unknown")}
 Claims:
@@ -966,18 +1016,39 @@ Claims:
                 allowed_tools=[
                     "mcp__playwright-test__browser_navigate",
                     "mcp__playwright-test__browser_snapshot",
-                    "mcp__playwright-test__browser_close",
                 ],
+                disallowed_tools=["mcp__playwright-test__browser_close"],
                 log_tools=True,
                 model_tier="tool",
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                preserve_browser_on_failure=self.owner_type == "autopilot",
+                autopilot_retry_enabled=self.owner_type == "autopilot",
+                autopilot_session_id=self.owner_id if self.owner_type == "autopilot" else None,
+                autopilot_stable_key=f"requirements:{exploration_summary.get('session_id') or exploration_summary.get('source_session_id') or exploration_summary.get('entry_url') or 'unknown'}:verification",
+                autopilot_agent_kind="requirements_verification",
+                autopilot_source_type="requirements",
+                autopilot_source_id=str(exploration_summary.get("session_id") or exploration_summary.get("source_session_id") or exploration_summary.get("entry_url") or "unknown"),
+                autopilot_checklist_title=f"Verify requirements from {exploration_summary.get('session_id') or exploration_summary.get('source_session_id') or 'exploration'}",
+                autopilot_phase_name="requirements",
+                autopilot_checklist_kind="requirements",
             )
             result = await runner.run(prompt)
             if not result.success or not result.output:
-                return candidates
+                return candidates, False
+            browser_evidence = self._verification_has_browser_evidence(
+                result,
+                exploration_summary.get("entry_url"),
+            )
+            if not browser_evidence:
+                logger.warning(
+                    "Selected browser verification returned output without successful navigate+snapshot evidence"
+                )
+                return candidates, False
             verification = self._parse_verification_response(result.output)
         except Exception as exc:
             logger.warning("Selected browser verification failed: %s", exc)
-            return candidates
+            return candidates, False
 
         by_title = {self._normalize_title(item.get("title")): item for item in verification}
         for req in candidates:
@@ -990,7 +1061,56 @@ Claims:
             elif item.get("verified") is False:
                 req.confidence = min(req.confidence, self._bounded_confidence(item.get("confidence", 0.45)))
                 req.uncertainty_reason = str(item.get("note") or "Selected browser verification did not confirm this claim.")
-        return candidates
+        return candidates, True
+
+    @classmethod
+    def _verification_has_browser_evidence(
+        cls, agent_result: Any, entry_url: str | None
+    ) -> bool:
+        expected = cls._canonical_url(entry_url)
+        navigate_seen = False
+        snapshot_seen = False
+        for tool_call in list(getattr(agent_result, "tool_calls", []) or []):
+            if getattr(tool_call, "success", True) is False:
+                continue
+            short_name = cls._tool_call_short_name(tool_call)
+            if short_name == "browser_navigate":
+                actual = cls._canonical_url(cls._tool_call_url(tool_call))
+                if expected is None or actual == expected:
+                    navigate_seen = True
+                    snapshot_seen = False
+            elif short_name == "browser_snapshot" and navigate_seen:
+                snapshot_seen = True
+        return navigate_seen and snapshot_seen
+
+    @staticmethod
+    def _tool_call_short_name(tool_call: Any) -> str:
+        name = str(getattr(tool_call, "name", "") or "")
+        return name.split("__")[-1] if "__" in name else name
+
+    @staticmethod
+    def _tool_call_url(tool_call: Any) -> str | None:
+        tool_input = getattr(tool_call, "input", None)
+        if not isinstance(tool_input, dict):
+            return None
+        for key in ("url", "target_url", "targetUrl"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @staticmethod
+    def _canonical_url(value: str | None) -> str | None:
+        if not value:
+            return None
+        try:
+            parsed = urlparse(str(value).strip())
+        except Exception:
+            return str(value).strip()
+        scheme = (parsed.scheme or "http").lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip("/") or "/"
+        return f"{scheme}://{netloc}{path}"
 
     @staticmethod
     def _parse_verification_response(response_text: str) -> list[dict[str, Any]]:
@@ -1590,23 +1710,93 @@ Claims:
         for req_data in req_list:
             if not isinstance(req_data, dict):
                 continue
+            normalized = self._normalize_requirement_payload(
+                req_data, fallback_index=len(requirements) + 1
+            )
+            if normalized is None:
+                continue
             req = GeneratedRequirement(
-                req_code=req_data.get("req_code", f"REQ-{len(requirements) + 1:03d}"),
-                title=req_data.get("title", "Unnamed Requirement"),
-                description=req_data.get("description", ""),
-                category=req_data.get("category", "other"),
-                priority=req_data.get("priority", "medium"),
-                acceptance_criteria=req_data.get("acceptance_criteria", []),
-                source_flows=req_data.get("source_flows", []),
-                source_elements=req_data.get("source_elements", []),
-                source_api_endpoints=req_data.get("source_api_endpoints", []),
-                evidence_refs=req_data.get("evidence_refs", []),
-                confidence=self._bounded_confidence(req_data.get("confidence", 0.7)),
-                uncertainty_reason=req_data.get("uncertainty_reason"),
+                req_code=normalized["req_code"],
+                title=normalized["title"],
+                description=normalized["description"],
+                category=normalized["category"],
+                priority=normalized["priority"],
+                acceptance_criteria=normalized["acceptance_criteria"],
+                source_flows=normalized["source_flows"],
+                source_elements=normalized["source_elements"],
+                source_api_endpoints=normalized["source_api_endpoints"],
+                evidence_refs=normalized["evidence_refs"],
+                confidence=normalized["confidence"],
+                uncertainty_reason=normalized["uncertainty_reason"],
             )
             requirements.append(req)
 
         return requirements
+
+    def _normalize_requirement_payload(
+        self, req_data: dict[str, Any], *, fallback_index: int
+    ) -> dict[str, Any] | None:
+        """Validate and repair one model-produced requirement payload."""
+        title = str(req_data.get("title") or "").strip()
+        description = str(req_data.get("description") or "").strip()
+        if not title or title.lower() in {"unnamed requirement", "unknown"}:
+            logger.debug("Dropping requirement payload without a meaningful title")
+            return None
+        if not description:
+            logger.debug("Dropping requirement payload without a description: %s", title)
+            return None
+
+        category = str(req_data.get("category") or "other").strip().lower()
+        category = re.sub(r"[^a-z0-9_]+", "_", category).strip("_") or "other"
+        if category not in VALID_REQUIREMENT_CATEGORIES:
+            category = "other"
+
+        priority = str(req_data.get("priority") or "medium").strip().lower()
+        if priority not in VALID_REQUIREMENT_PRIORITIES:
+            priority = "medium"
+
+        acceptance_criteria = self._string_list(req_data.get("acceptance_criteria"))
+        if not acceptance_criteria:
+            acceptance_criteria = [description]
+
+        source_flows = self._string_list(req_data.get("source_flows"))
+        source_elements = self._string_list(req_data.get("source_elements"))
+        source_api_endpoints = self._string_list(req_data.get("source_api_endpoints"))
+        evidence_refs = self._string_list(req_data.get("evidence_refs"))
+        if not any([source_flows, source_elements, source_api_endpoints, evidence_refs]):
+            logger.debug(
+                "Dropping requirement payload without source links or evidence refs: %s",
+                title,
+            )
+            return None
+
+        confidence = self._bounded_confidence(req_data.get("confidence", 0.7))
+        uncertainty_reason = req_data.get("uncertainty_reason")
+        if uncertainty_reason is not None:
+            uncertainty_reason = str(uncertainty_reason).strip() or None
+
+        return {
+            "req_code": str(req_data.get("req_code") or f"REQ-{fallback_index:03d}").strip(),
+            "title": title,
+            "description": description,
+            "category": category,
+            "priority": priority,
+            "acceptance_criteria": acceptance_criteria,
+            "source_flows": source_flows,
+            "source_elements": source_elements,
+            "source_api_endpoints": source_api_endpoints,
+            "evidence_refs": evidence_refs,
+            "confidence": confidence,
+            "uncertainty_reason": uncertainty_reason,
+        }
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 async def generate_requirements_from_exploration(

@@ -40,7 +40,10 @@ def record_agent_run_event(
 
 def custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
     """Return whether selected custom-agent tools require Playwright Chromium."""
-    return any(str(tool).startswith("mcp__playwright") for tool in allowed_tools)
+    return any(
+        str(tool).startswith("mcp__playwright") or str(tool).startswith("browser_")
+        for tool in allowed_tools
+    )
 
 
 def custom_agent_browser_runs_via_queue() -> bool:

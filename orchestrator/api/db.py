@@ -32,7 +32,9 @@ from .models_db import (  # noqa: F401
     AutonomousMission,
     AutonomousMissionRun,
     AutonomousTestProposal,
+    AutoPilotAgentAttempt,
     AutoPilotPhase,
+    AutoPilotChecklistItem,
     AutoPilotQuestion,
     # Auto Pilot pipeline models
     AutoPilotSession,
@@ -365,6 +367,19 @@ def _run_migrations():
                 )
             except Exception as e:
                 logger.debug(f"Spec metadata project index migration note: {e}")
+
+        if "autopilot_spec_tasks" in inspector.get_table_names():
+            spec_task_columns = {
+                col["name"] for col in inspector.get_columns("autopilot_spec_tasks")
+            }
+            if "evidence_metadata_json" not in spec_task_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE autopilot_spec_tasks "
+                        "ADD COLUMN evidence_metadata_json TEXT NOT NULL DEFAULT '{}'"
+                    )
+                )
+                logger.info("Added column: autopilot_spec_tasks.evidence_metadata_json")
 
         # Add project_id to agentrun table
         if "agentrun" in inspector.get_table_names():
@@ -1593,6 +1608,110 @@ def _run_migrations():
             except Exception as e:
                 logger.debug(f"Index may already exist on autopilot temporal workflow id: {e}")
 
+            if "autopilot_checklist_items" not in inspector.get_table_names():
+                id_type = "SERIAL PRIMARY KEY" if db_type == "postgresql" else "INTEGER PRIMARY KEY"
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE autopilot_checklist_items (
+                            id {id_type},
+                            session_id VARCHAR NOT NULL,
+                            sequence INTEGER NOT NULL DEFAULT 0,
+                            kind VARCHAR NOT NULL DEFAULT 'task',
+                            phase_name VARCHAR,
+                            title VARCHAR NOT NULL,
+                            detail VARCHAR,
+                            status VARCHAR NOT NULL DEFAULT 'pending',
+                            progress FLOAT NOT NULL DEFAULT 0,
+                            items_completed INTEGER NOT NULL DEFAULT 0,
+                            items_total INTEGER NOT NULL DEFAULT 0,
+                            source_type VARCHAR,
+                            source_id VARCHAR,
+                            metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                            created_at {timestamp_type} NOT NULL,
+                            updated_at {timestamp_type} NOT NULL,
+                            completed_at {timestamp_type}
+                        )
+                        """
+                    )
+                )
+                logger.info("Created table: autopilot_checklist_items")
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autopilot_checklist_session_sequence "
+                        "ON autopilot_checklist_items (session_id, sequence)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autopilot_checklist_session_status "
+                        "ON autopilot_checklist_items (session_id, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autopilot_checklist_session_phase "
+                        "ON autopilot_checklist_items (session_id, phase_name)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on autopilot checklist items: {e}")
+
+            if "autopilot_agent_attempts" not in inspector.get_table_names():
+                bool_type = "BOOLEAN" if db_type == "postgresql" else "BOOLEAN"
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE TABLE autopilot_agent_attempts (
+                            id VARCHAR PRIMARY KEY,
+                            session_id VARCHAR NOT NULL,
+                            stable_key VARCHAR NOT NULL,
+                            source_type VARCHAR,
+                            source_id VARCHAR,
+                            agent_kind VARCHAR NOT NULL DEFAULT 'agent',
+                            attempt_number INTEGER NOT NULL DEFAULT 1,
+                            claude_session_id VARCHAR,
+                            session_dir VARCHAR,
+                            status VARCHAR NOT NULL DEFAULT 'running',
+                            error_type VARCHAR,
+                            retry_eligible {bool_type} NOT NULL DEFAULT 0,
+                            metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                            created_at {timestamp_type} NOT NULL,
+                            started_at {timestamp_type},
+                            updated_at {timestamp_type} NOT NULL,
+                            completed_at {timestamp_type},
+                            CONSTRAINT uq_autopilot_agent_attempt UNIQUE (session_id, stable_key, attempt_number)
+                        )
+                        """
+                    )
+                )
+                logger.info("Created table: autopilot_agent_attempts")
+            try:
+                for index_name, columns in {
+                    "ix_autopilot_agent_attempts_session_id": "session_id",
+                    "ix_autopilot_agent_attempts_stable_key": "stable_key",
+                    "ix_autopilot_agent_attempts_source_type": "source_type",
+                    "ix_autopilot_agent_attempts_source_id": "source_id",
+                    "ix_autopilot_agent_attempts_agent_kind": "agent_kind",
+                    "ix_autopilot_agent_attempts_attempt_number": "attempt_number",
+                    "ix_autopilot_agent_attempts_claude_session_id": "claude_session_id",
+                    "ix_autopilot_agent_attempts_status": "status",
+                    "ix_autopilot_agent_attempts_error_type": "error_type",
+                    "ix_autopilot_agent_attempts_retry_eligible": "retry_eligible",
+                    "ix_autopilot_agent_attempts_updated_at": "updated_at",
+                    "ix_autopilot_agent_attempts_session_key": "session_id, stable_key",
+                    "ix_autopilot_agent_attempts_session_status": "session_id, status",
+                }.items():
+                    conn.execute(
+                        text(
+                            f"CREATE INDEX IF NOT EXISTS {index_name} "
+                            f"ON autopilot_agent_attempts ({columns})"
+                        )
+                    )
+            except Exception as e:
+                logger.debug(f"Index may already exist on autopilot agent attempts: {e}")
+
         if "agentrun" in inspector.get_table_names() and "agent_run_events" not in inspector.get_table_names():
             conn.execute(
                 text(
@@ -2137,7 +2256,12 @@ def _build_alembic_config():
     from alembic.config import Config
 
     project_root = Path(__file__).resolve().parent.parent.parent
-    alembic_cfg = Config(str(project_root / "alembic.ini"))
+    alembic_ini = project_root / "alembic.ini"
+    if alembic_ini.exists():
+        alembic_cfg = Config(str(alembic_ini))
+    else:
+        alembic_cfg = Config()
+        alembic_cfg.set_main_option("script_location", str(project_root / "orchestrator" / "migrations"))
     alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
     return alembic_cfg
 

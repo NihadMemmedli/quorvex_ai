@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
     ArrowLeft, CheckCircle, Copy, Check, Image as ImageIcon, Video as VideoIcon,
     ExternalLink, Code, Layout, FileText, Eye, Globe, Chrome, Compass, Clock, XCircle, Square, Monitor,
-    Bug, Loader2, X, Edit3
+    Bug, Loader2, X, Edit3, AlertTriangle, Wrench
 } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
@@ -14,6 +14,10 @@ import { LiveBrowserView } from '@/components/LiveBrowserView';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
+import { extractLinkedAgentRunId, formatAge, resolveRunHealth } from '@/lib/run-observability';
+import { AgentRunObservabilityPanel } from '../../agents/agents-panels';
+import { agentRunTraceExportUrl, fetchAgentRun, fetchAgentRunEvents, fetchAgentRunTrace } from '../../agents/agents-api';
+import type { AgentRun, AgentRunEvent, AgentTraceBundle } from '../../agents/agents-model';
 
 interface Artifact {
     name: string;
@@ -57,6 +61,10 @@ export default function RunDetailPage() {
     const [isStreaming, setIsStreaming] = useState(false);
     const [viewMode, setViewMode] = useState<'browser' | 'log'>('log'); // Default to log (VNC may not be available)
     const [autoSelectedBrowser, setAutoSelectedBrowser] = useState(false);
+    const [linkedAgentRun, setLinkedAgentRun] = useState<AgentRun | null>(null);
+    const [linkedAgentEvents, setLinkedAgentEvents] = useState<AgentRunEvent[]>([]);
+    const [linkedAgentTrace, setLinkedAgentTrace] = useState<AgentTraceBundle | null>(null);
+    const [linkedAgentTraceLoading, setLinkedAgentTraceLoading] = useState(false);
 
     // Jira bug report state
     const [jiraIssue, setJiraIssue] = useState<{ exists: boolean; jira_issue_key?: string; jira_url?: string; summary?: string } | null>(null);
@@ -117,6 +125,46 @@ export default function RunDetailPage() {
 
         return () => window.clearInterval(interval);
     }, [id, projectId, currentRunIsActive, fetchRunData]);
+
+    useEffect(() => {
+        if (!id || !projectId || !currentRunIsActive) return;
+
+        const eventSource = new EventSource(`${API_BASE}${withProjectQuery(`/runs/${id}/events/stream`, projectId)}`);
+
+        eventSource.addEventListener('status', (event) => {
+            try {
+                const eventData = JSON.parse(event.data);
+                setData((prev: any) => prev ? { ...prev, ...eventData } : prev);
+            } catch (e) {
+                console.error('Error parsing run status SSE data:', e);
+            }
+        });
+
+        eventSource.addEventListener('diagnostic', (event) => {
+            try {
+                const eventData = JSON.parse(event.data);
+                setData((prev: any) => prev ? {
+                    ...prev,
+                    health: eventData.health || prev.health,
+                    diagnostics: { ...(prev.diagnostics || {}), ...(eventData.diagnostics || {}) },
+                    blocker_message: eventData.blocker_message ?? prev.blocker_message,
+                } : prev);
+            } catch (e) {
+                console.error('Error parsing run diagnostic SSE data:', e);
+            }
+        });
+
+        eventSource.addEventListener('complete', () => {
+            eventSource.close();
+            fetchRunData();
+        });
+
+        eventSource.addEventListener('error', () => {
+            eventSource.close();
+        });
+
+        return () => eventSource.close();
+    }, [currentRunIsActive, fetchRunData, id, projectId]);
 
     // Check if Jira issue exists for this run + load Jira config
     useEffect(() => {
@@ -182,6 +230,34 @@ export default function RunDetailPage() {
             eventSource.close();
         };
     }, [currentRunIsStreaming, id, projectId, fetchRunData]);
+
+    useEffect(() => {
+        const linkedAgentRunId = extractLinkedAgentRunId(data?.agentic_summary);
+        if (!linkedAgentRunId) {
+            setLinkedAgentRun(null);
+            setLinkedAgentEvents([]);
+            setLinkedAgentTrace(null);
+            return;
+        }
+
+        const controller = new AbortController();
+        setLinkedAgentTraceLoading(true);
+        Promise.allSettled([
+            fetchAgentRun(linkedAgentRunId, { projectId, signal: controller.signal }),
+            fetchAgentRunEvents(linkedAgentRunId, { limit: 150, signal: controller.signal }),
+            fetchAgentRunTrace(linkedAgentRunId, projectId),
+        ]).then(results => {
+            if (controller.signal.aborted) return;
+            const [runResult, eventsResult, traceResult] = results;
+            setLinkedAgentRun(runResult.status === 'fulfilled' ? runResult.value : null);
+            setLinkedAgentEvents(eventsResult.status === 'fulfilled' ? eventsResult.value : []);
+            setLinkedAgentTrace(traceResult.status === 'fulfilled' ? traceResult.value : null);
+        }).finally(() => {
+            if (!controller.signal.aborted) setLinkedAgentTraceLoading(false);
+        });
+
+        return () => controller.abort();
+    }, [data?.agentic_summary, projectId]);
 
     if (loading) return (
         <PageLayout tier="standard">
@@ -278,6 +354,18 @@ export default function RunDetailPage() {
     ].filter(Boolean) as [string, string][];
     const logSections = Array.isArray(data.log_sections) ? data.log_sections : [];
     const shouldShowStructuredLogs = logSections.length > 0 && (!isStreaming || !streamingLog);
+    const runHealth = resolveRunHealth(data);
+    const temporalDiagnostics = data.diagnostics?.temporal || {};
+    const browserPoolDiagnostics = data.diagnostics?.browser_pool || {};
+    const agentProgress = runHealth.agent_progress || data.diagnostics?.agent_progress || {};
+    const activeTemporalActivities = runHealth.temporal_started_activities || (temporalDiagnostics.activities || []).filter((activity: any) => activity?.status === 'started');
+    const temporalPollers = temporalDiagnostics.task_queue_status;
+    const browserSlotOwner = runHealth.browser_slot_owner || (browserPoolDiagnostics.running_requests || []).find((requestId: string) => requestId === id);
+    const linkedAgentRunId = extractLinkedAgentRunId(data.agentic_summary);
+    const exportLinkedAgentTrace = () => {
+        if (!linkedAgentRunId || typeof window === 'undefined') return;
+        window.open(agentRunTraceExportUrl(linkedAgentRunId, projectId), '_blank', 'noopener,noreferrer');
+    };
 
     const handleStop = async () => {
         if (!confirm('Are you sure you want to stop this run?')) return;
@@ -563,6 +651,108 @@ export default function RunDetailPage() {
 
             <div className="animate-in stagger-2" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+                    <section className="card">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                            <h2 style={{ fontSize: '1.25rem', margin: 0, display: 'flex', alignItems: 'center', gap: '0.75rem', fontWeight: 600 }}>
+                                <Wrench size={20} /> Run Progress Debug
+                            </h2>
+                            {runHealth.stuck_warning && (
+                                <div style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.45rem',
+                                    padding: '0.45rem 0.7rem',
+                                    border: '1px solid rgba(245, 158, 11, 0.45)',
+                                    background: 'rgba(245, 158, 11, 0.10)',
+                                    borderRadius: 'var(--radius)',
+                                    color: 'var(--warning)',
+                                    fontSize: '0.82rem',
+                                    fontWeight: 700,
+                                    maxWidth: '100%',
+                                }}>
+                                    <AlertTriangle size={15} /> {runHealth.stuck_warning}
+                                </div>
+                            )}
+                        </div>
+
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+                            gap: '0.75rem',
+                            marginBottom: '1rem',
+                        }}>
+                            {[
+                                ['Stage age', formatAge(runHealth.stage_age_seconds)],
+                                ['Last log update', formatAge(runHealth.last_log_age_seconds)],
+                                ['Last artifact update', formatAge(runHealth.last_artifact_age_seconds)],
+                                ['Recent output', runHealth.has_recent_output ? 'Yes' : 'No'],
+                                ['Agent messages', agentProgress.messages_received !== undefined ? String(agentProgress.messages_received) : 'Unknown'],
+                                ['Parsed output', agentProgress.messages_received !== undefined ? `${agentProgress.text_blocks_received ?? 0} text, ${agentProgress.tool_calls ?? 0} tools, ${agentProgress.output_chars ?? 0} chars` : 'Unknown'],
+                                ['Stream health', agentProgress.unproductive_stream ? 'Unproductive' : (agentProgress.status || agentProgress.phase || 'Unknown')],
+                                ['Temporal activity', activeTemporalActivities.length > 0 ? activeTemporalActivities.map((activity: any) => activity.activity_type || activity.activity_id || 'activity').join(', ') : (temporalDiagnostics.workflow_status || 'None')],
+                                ['Worker pollers', temporalPollers ? `${temporalPollers.workflow_pollers ?? 0} workflow, ${temporalPollers.activity_pollers ?? 0} activity` : 'Unknown'],
+                                ['Browser slot owner', browserSlotOwner || 'None'],
+                                ['Browser blocker', data.blocker_message || browserPoolDiagnostics.blocker || 'None'],
+                            ].map(([label, value]) => (
+                                <div key={label} style={{ padding: '0.75rem', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--surface-hover)', minWidth: 0 }}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.3rem' }}>{label}</div>
+                                    <div style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{value}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {(runHealth.warnings || []).length > 1 && (
+                            <div style={{ display: 'grid', gap: '0.4rem', marginBottom: '1rem' }}>
+                                {(runHealth.warnings || []).slice(1).map((warning, index) => (
+                                    <div key={`${warning}-${index}`} style={{ color: 'var(--warning)', fontSize: '0.86rem', display: 'flex', alignItems: 'flex-start', gap: '0.45rem' }}>
+                                        <AlertTriangle size={14} style={{ marginTop: '0.12rem', flexShrink: 0 }} /> <span>{warning}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {(temporalDiagnostics.workflow_status || temporalDiagnostics.error || activeTemporalActivities.length > 0) && (
+                            <details style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--background)', overflow: 'hidden', marginBottom: linkedAgentRun ? '1rem' : 0 }}>
+                                <summary style={{ cursor: 'pointer', padding: '0.65rem 0.8rem', fontWeight: 700, fontSize: '0.85rem' }}>Temporal diagnostics</summary>
+                                <pre style={{ margin: 0, padding: '0.8rem', borderTop: '1px solid var(--border)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                                    {JSON.stringify({
+                                        workflow_status: temporalDiagnostics.workflow_status,
+                                        task_queue: temporalDiagnostics.task_queue,
+                                        task_queue_status: temporalDiagnostics.task_queue_status,
+                                        history_last_event_at: temporalDiagnostics.history_last_event_at,
+                                        activities: (temporalDiagnostics.activities || []).slice(-5),
+                                        error: temporalDiagnostics.error,
+                                    }, null, 2)}
+                                </pre>
+                            </details>
+                        )}
+
+                        {agentProgress.messages_received !== undefined && (
+                            <details style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--background)', overflow: 'hidden', marginBottom: linkedAgentRun ? '1rem' : 0 }}>
+                                <summary style={{ cursor: 'pointer', padding: '0.65rem 0.8rem', fontWeight: 700, fontSize: '0.85rem' }}>Agent progress</summary>
+                                <pre style={{ margin: 0, padding: '0.8rem', borderTop: '1px solid var(--border)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                                    {JSON.stringify(agentProgress, null, 2)}
+                                </pre>
+                            </details>
+                        )}
+
+                        {linkedAgentRun && (
+                            <div style={{ marginTop: '1rem' }}>
+                                <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <Wrench size={16} /> Linked Tool Activity
+                                </div>
+                                <AgentRunObservabilityPanel
+                                    run={linkedAgentRun}
+                                    events={linkedAgentEvents}
+                                    trace={linkedAgentTrace}
+                                    traceLoading={linkedAgentTraceLoading}
+                                    activeTraceTab="tools"
+                                    onExportTrace={exportLinkedAgentTrace}
+                                />
+                            </div>
+                        )}
+                    </section>
 
                     {/* Visual Regression Section */}
                     {visualDiffs.length > 0 && (

@@ -705,7 +705,8 @@ def _build_single_flow_prompt(flow: dict[str, Any], base_url: str) -> str:
         if auth.get("required"):
             prereq_section += "\n### Authentication Required:\n"
             prereq_section += f"- User type: {auth.get('user_type', 'standard user')}\n"
-            prereq_section += f"- Login URL: {auth.get('login_url', '/login')}\n"
+            if auth.get("login_url"):
+                prereq_section += f"- Login URL: {auth.get('login_url')}\n"
             if auth.get("permissions"):
                 prereq_section += f"- Permissions: {', '.join(auth.get('permissions', []))}\n"
 

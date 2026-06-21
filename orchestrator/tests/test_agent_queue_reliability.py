@@ -440,6 +440,43 @@ def test_agent_worker_reports_sdk_only_options_unsupported_in_cli_queue():
     ]
 
 
+@pytest.mark.asyncio
+async def test_agent_runner_fails_unproductive_sdk_stream(monkeypatch, tmp_path):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    async def fake_query(**_kwargs):
+        for _index in range(25):
+            yield SimpleNamespace(type="assistant", message=SimpleNamespace(content=[]))
+
+    monkeypatch.setenv("AGENT_UNPRODUCTIVE_STREAM_MIN_MESSAGES", "3")
+    monkeypatch.setenv("AGENT_UNPRODUCTIVE_STREAM_SECONDS", "0")
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: None)
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        session_dir=tmp_path,
+        cwd=tmp_path,
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+
+    result = await runner.run("make a plan")
+
+    assert result.success is False
+    assert result.error_type == "unproductive_stream"
+    assert result.messages_received == 25
+    assert result.text_blocks_received == 0
+    assert result.tool_calls == []
+    progress = json.loads((tmp_path / "agent_progress.json").read_text())
+    assert progress["unproductive_stream"] is True
+    assert progress["messages_received"] == 25
+
+
 def test_agent_runner_treats_hooks_agents_skills_plugins_as_direct_sdk_only():
     runner = AgentRunner(
         allowed_tools=["Read"],

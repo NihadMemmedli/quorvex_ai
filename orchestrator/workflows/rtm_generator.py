@@ -139,10 +139,19 @@ class RtmGenerator:
             logger.info("Using heuristic matching...")
             mappings = self._match_heuristically(requirements, specs)
 
-        # Clear existing RTM entries before storing new ones to avoid duplicates
-        cleared = self.store.clear_rtm_for_project(self.project_id)
+        # Replace mappings only for the specs in this run when explicit paths are provided.
+        # Full project clears remain available for project-wide RTM regeneration.
+        if specs_paths:
+            cleared = self.store.clear_rtm_for_project_spec_paths(
+                [str(path) for path in specs_paths],
+                self.project_id,
+            )
+        else:
+            cleared = self.store.clear_rtm_for_project(self.project_id)
         if cleared:
-            logger.info(f"Cleared {cleared} existing RTM entries for project {self.project_id}")
+            logger.info(
+                f"Cleared {cleared} existing RTM entries for project {self.project_id}"
+            )
 
         # Store mappings
         logger.info(f"Storing {len(mappings)} RTM mappings...")
@@ -517,7 +526,13 @@ Generate the mappings now. Include mappings for all requirements that have match
                         best_match = spec
 
             if best_match and best_score > 0.2:
-                mapping_type = "full" if best_score > 0.6 else "partial" if best_score > 0.4 else "suggested"
+                mapping_type = (
+                    "full"
+                    if best_score >= 0.75
+                    else "partial"
+                    if best_score >= 0.5
+                    else "suggested"
+                )
 
                 mapping = RtmMapping(
                     requirement_id=req.id,

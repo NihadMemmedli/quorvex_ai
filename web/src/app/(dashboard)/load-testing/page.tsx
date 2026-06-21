@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import dynamic from 'next/dynamic';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
     Activity, Play, FileCode, Loader2, CheckCircle, AlertCircle,
     X, Clock, Square, BarChart2,
@@ -188,9 +189,15 @@ function JobStatusPanel({ job, projectId, onStop }: { job: JobStatus; projectId:
 
 export default function LoadTestingPage() {
     const { projectId } = useRequiredProject();
+    const router = useRouter();
+    const searchParams = useSearchParams();
 
-    const [activeTab, setActiveTab] = useState<TabType>('overview');
-    const [visited, setVisited] = useState(new Set<string>(['overview']));
+    const initialTab = (searchParams.get('tab') || 'overview') as TabType;
+    const normalizedInitialTab = (
+        ['overview', 'scenarios', 'scripts', 'history'].includes(initialTab) ? initialTab : 'overview'
+    ) as TabType;
+    const [activeTab, setActiveTab] = useState<TabType>(normalizedInitialTab);
+    const [visited, setVisited] = useState(new Set<string>(['overview', normalizedInitialTab]));
 
     // Scenarios state
     const [specs, setSpecs] = useState<LoadSpec[]>([]);
@@ -233,6 +240,28 @@ export default function LoadTestingPage() {
     useEffect(() => {
         setVisited(prev => new Set([...prev, activeTab]));
     }, [activeTab]);
+
+    const updateUrlState = useCallback((updates: Record<string, string | null>) => {
+        const next = new URLSearchParams(searchParams.toString());
+        Object.entries(updates).forEach(([key, value]) => {
+            if (value) next.set(key, value);
+            else next.delete(key);
+        });
+        const query = next.toString();
+        router.replace(query ? `/load-testing?${query}` : '/load-testing', { scroll: false });
+    }, [router, searchParams]);
+
+    const handleTabChange = useCallback((tab: TabType) => {
+        setActiveTab(tab);
+        updateUrlState({ tab });
+    }, [updateUrlState]);
+
+    useEffect(() => {
+        const tab = searchParams.get('tab') as TabType | null;
+        if (tab && ['overview', 'scenarios', 'scripts', 'history'].includes(tab) && tab !== activeTab) {
+            setActiveTab(tab);
+        }
+    }, [activeTab, searchParams]);
 
     // ========== Data Fetching ==========
 
@@ -314,6 +343,16 @@ export default function LoadTestingPage() {
     }, [projectId, fetchSpecs, fetchScripts, fetchRuns]);
 
     useEffect(() => {
+        const jobId = searchParams.get('job_id');
+        if (!jobId || activeJobs[jobId]) return;
+        setActiveJobs(prev => ({
+            ...prev,
+            [jobId]: { job_id: jobId, status: 'running', stage: 'running', message: 'Checking job status...' },
+        }));
+        return pollJob(jobId);
+    }, [activeJobs, pollJob, searchParams]);
+
+    useEffect(() => {
         fetchSpecs();
         fetchScripts();
     }, [fetchSpecs, fetchScripts]);
@@ -321,6 +360,14 @@ export default function LoadTestingPage() {
     useEffect(() => {
         if (activeTab === 'history') fetchRuns(0);
     }, [activeTab, fetchRuns]);
+
+    useEffect(() => {
+        const compare = searchParams.get('compare');
+        if (activeTab !== 'history' || !compare) return;
+        const ids = compare.split(',').map(id => id.trim()).filter(Boolean).slice(0, 2);
+        if (ids.length !== 2) return;
+        setCompareIds(new Set(ids));
+    }, [activeTab, searchParams]);
 
     // K6 status polling
     useEffect(() => {
@@ -576,6 +623,31 @@ export default function LoadTestingPage() {
         }
     }, [projectId]);
 
+    useEffect(() => {
+        const runId = searchParams.get('run_id');
+        if (activeTab !== 'history' || !runId || expandedRunId === runId) return;
+        setExpandedRunId(runId);
+        loadRunDetails(runId);
+        fetchRuns(0);
+    }, [activeTab, expandedRunId, fetchRuns, loadRunDetails, searchParams]);
+
+    useEffect(() => {
+        function handleLoadTestingRefresh(event: Event) {
+            const detail = (event as CustomEvent).detail || {};
+            if (detail.projectId && detail.projectId !== projectId) return;
+            fetchSpecs();
+            fetchScripts();
+            fetchRuns(0);
+            if (detail.runId) {
+                setActiveTab('history');
+                setExpandedRunId(String(detail.runId));
+                loadRunDetails(String(detail.runId));
+            }
+        }
+        window.addEventListener('quorvex:load-refresh', handleLoadTestingRefresh);
+        return () => window.removeEventListener('quorvex:load-refresh', handleLoadTestingRefresh);
+    }, [fetchRuns, fetchScripts, fetchSpecs, loadRunDetails, projectId]);
+
     const loadComparison = useCallback(async () => {
         const ids = Array.from(compareIds);
         if (ids.length !== 2) return;
@@ -593,6 +665,12 @@ export default function LoadTestingPage() {
             setComparisonLoading(false);
         }
     }, [compareIds, projectId]);
+
+    useEffect(() => {
+        const compare = searchParams.get('compare');
+        if (activeTab !== 'history' || !compare || comparisonData || comparisonLoading) return;
+        if (compareIds.size === 2) loadComparison();
+    }, [activeTab, compareIds, comparisonData, comparisonLoading, loadComparison, searchParams]);
 
     const toggleCompareId = useCallback((id: string) => {
         setCompareIds(prev => {
@@ -788,7 +866,7 @@ export default function LoadTestingPage() {
                 ].map(tab => (
                     <button
                         key={tab.key}
-                        onClick={() => setActiveTab(tab.key)}
+                        onClick={() => handleTabChange(tab.key)}
                         style={{
                             display: 'flex', alignItems: 'center', gap: '0.5rem',
                             padding: '0.75rem 1.25rem', border: 'none',
@@ -848,6 +926,7 @@ export default function LoadTestingPage() {
                     onRunFromSpec={handleRunFromSpec}
                     onLoadSpecContent={loadSpecContent}
                     specContents={specContents}
+                    initialSpecName={searchParams.get('spec') || undefined}
                 />
             )}
 
@@ -862,6 +941,7 @@ export default function LoadTestingPage() {
                     onRunScript={handleRunScript}
                     onLoadScriptContent={loadScriptContent}
                     scriptContents={scriptContents}
+                    initialScriptPath={searchParams.get('script') || undefined}
                 />
             )}
 

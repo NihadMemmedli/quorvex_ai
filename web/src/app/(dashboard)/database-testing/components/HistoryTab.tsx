@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { formatDate, formatDuration } from '@/lib/formatting';
 import { cardStyle, btnSecondary } from '@/lib/styles';
@@ -13,9 +13,10 @@ interface HistoryTabProps {
     runs: DbTestRun[];
     projectId: string;
     onRefreshRuns: () => void;
+    initialRunId?: string;
 }
 
-export default function HistoryTab({ runs, projectId, onRefreshRuns }: HistoryTabProps) {
+export default function HistoryTab({ runs, projectId, onRefreshRuns, initialRunId }: HistoryTabProps) {
     const [selectedRun, setSelectedRun] = useState<DbTestRun | null>(null);
     const [runChecks, setRunChecks] = useState<DbTestCheck[]>([]);
     const [runFindings, setRunFindings] = useState<SchemaFinding[]>([]);
@@ -51,6 +52,14 @@ export default function HistoryTab({ runs, projectId, onRefreshRuns }: HistoryTa
         } catch (e) { console.error('Failed to fetch run data:', e); }
         setRunDataLoaded(true);
     }, [projectId]);
+
+    useEffect(() => {
+        if (!initialRunId || selectedRun?.id === initialRunId) return;
+        const run = runs.find(item => item.id === initialRunId);
+        if (!run) return;
+        setSelectedRun(run);
+        fetchRunChecks(run.id, run.run_type);
+    }, [fetchRunChecks, initialRunId, runs, selectedRun?.id]);
 
     return (
         <div style={cardStyle}>

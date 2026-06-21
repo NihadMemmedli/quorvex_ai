@@ -177,6 +177,7 @@ For EACH flow, identify:
 
 2. **Authentication Patterns**:
    - If login was performed before the flow, the flow requires authentication
+   - Use an explicit observed login URL only; set login_url to null if the login URL is unknown
    - Look for protected URLs (/dashboard, /admin, /my_*, /user/*)
    - Guest flows typically start from public pages
 
@@ -204,7 +205,7 @@ Return ONLY valid JSON:
           "required": true,
           "user_type": "organizer",
           "permissions": ["create_trip"],
-          "login_url": "/login"
+          "login_url": "/users/sign_in"
         }},
         "data_requirements": [
           {{
@@ -237,7 +238,7 @@ Return ONLY valid JSON:
           "required": true,
           "user_type": "organizer",
           "permissions": ["edit_trip"],
-          "login_url": "/login"
+          "login_url": "/users/sign_in"
         }},
         "data_requirements": [
           {{

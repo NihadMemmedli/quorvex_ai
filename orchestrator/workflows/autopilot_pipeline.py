@@ -50,7 +50,11 @@ from orchestrator.ai.validation import (
     should_gate_exploration,
     validate_exploration_result,
 )
-from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
+from orchestrator.utils.playwright_mcp import (
+    browser_runtime_status,
+    live_browser_display_diagnostics,
+    validate_playwright_test_mcp_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +131,9 @@ class AutoPilotConfig:
     max_specs: int = 50  # Max specs to generate
     parallel_generation: int = 2  # Concurrent test generations
     hybrid_healing: bool = False  # Use hybrid healing mode
-    requirements_mode: str = "single_agent"
+    requirements_mode: str = "multi_agent"
     requirements_max_agents: int = 3
-    requirements_browser_verification: str = "off"
+    requirements_browser_verification: str = "selected"
 
 
 @contextmanager
@@ -249,6 +253,16 @@ class AutoPilotPipeline:
                 question.answered_at = datetime.utcnow()
                 db.add(question)
                 db.commit()
+                self._checklist_complete(
+                    source_type="question",
+                    source_id=str(question.id),
+                    title=f"Question: {question.question_type.replace('_', ' ')}",
+                    kind="question",
+                    phase_name=question.phase_name,
+                    detail=answer_text,
+                    status="answered",
+                    metadata={"answer_text": answer_text},
+                )
 
         self._question_answered.set()
 
@@ -271,6 +285,7 @@ class AutoPilotPipeline:
             Summary dict with results from all phases
         """
         self._config = config
+        self._validate_config_test_data_refs(config)
         summary: dict[str, Any] = {
             "session_id": self.session_id,
             "status": "running",
@@ -705,6 +720,15 @@ class AutoPilotPipeline:
                 logger.warning(
                     f"Failed to acquire browser slot for exploration of {url}"
                 )
+                self._checklist_fail(
+                    source_type="exploration_session",
+                    source_id=explore_session_id,
+                    title=f"Exploring {url}",
+                    kind="exploration",
+                    phase_name="exploration",
+                    detail="Timeout waiting for browser slot",
+                    metadata={"url": url, "exploration_session_id": explore_session_id},
+                )
                 return None
 
             self._update_live_browser_state(
@@ -795,6 +819,22 @@ class AutoPilotPipeline:
                     result.error_message
                     or "Explorer did not produce verified browser exploration records"
                 )
+            self._checklist_complete(
+                source_type="exploration_session",
+                source_id=explore_session_id,
+                title=f"Exploring {url}",
+                kind="exploration",
+                phase_name="exploration",
+                detail=f"Discovered {result.pages_discovered} pages and {len(result.flows)} flows",
+                metadata={
+                    "url": url,
+                    "exploration_session_id": explore_session_id,
+                    "pages_discovered": result.pages_discovered,
+                    "flows_discovered": len(result.flows),
+                    "transitions_discovered": len(result.transitions),
+                    "api_endpoints_discovered": len(result.api_endpoints),
+                },
+            )
             return result
 
     def _build_exploration_test_data_instructions(self, config: AutoPilotConfig) -> str:
@@ -830,6 +870,34 @@ class AutoPilotPipeline:
                 f"```json\n{json.dumps(inline_data, indent=2, sort_keys=True)}\n```"
             )
         return "\n\n".join(sections)
+
+    def _validate_config_test_data_refs(self, config: AutoPilotConfig) -> None:
+        refs = [str(ref).strip() for ref in (config.test_data_refs or []) if str(ref).strip()]
+        if not refs:
+            return
+        try:
+            from orchestrator.api.db import engine
+            from orchestrator.services.test_data_resolver import resolve_test_data_refs
+
+            with Session(engine) as db:
+                resolved = resolve_test_data_refs(
+                    db,
+                    project_id=config.project_id or "default",
+                    refs=refs,
+                    render_as="json",
+                    decrypt_sensitive=False,
+                )
+            missing = resolved.get("missing") or []
+            if missing:
+                raise RuntimeError(
+                    f"Auto Pilot test_data_refs are unavailable: {', '.join(map(str, missing))}"
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to resolve Auto Pilot test_data_refs before generation: {exc}"
+            ) from exc
 
     def _resolve_browser_auth_for_run_dir(
         self,
@@ -988,12 +1056,36 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
             )
             exploration_ids = usable_exploration_ids
 
-        generator = RequirementsGenerator(project_id=config.project_id)
+        generator = RequirementsGenerator(
+            project_id=config.project_id,
+            owner_type="autopilot",
+            owner_id=self.session_id,
+        )
         all_requirements = []
+        failures: list[dict[str, str]] = []
+        current_requirements_explore_id: str | None = None
 
         def on_requirements_progress(progress: dict[str, Any]) -> None:
             subagents = list(progress.get("subagents") or [])
             completed = sum(1 for item in subagents if item.get("status") in {"completed", "failed"})
+            if current_requirements_explore_id:
+                self._checklist_upsert(
+                    source_type="requirements",
+                    source_id=current_requirements_explore_id,
+                    title=f"Generate requirements from {current_requirements_explore_id}",
+                    kind="requirements",
+                    phase_name="requirements",
+                    detail=progress.get("message") or "Analyzing exploration evidence",
+                    status="running",
+                    items_total=progress.get("items_total") or len(subagents),
+                    items_completed=completed,
+                    metadata={
+                        "exploration_id": current_requirements_explore_id,
+                        "subagents": subagents,
+                        "requirements_generated": progress.get("requirements_generated", len(all_requirements)),
+                        "verification_status": progress.get("verification_status") or config.requirements_browser_verification,
+                    },
+                )
             self._update_live_browser_state(
                 {
                     "active": True,
@@ -1024,6 +1116,18 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 items_total=len(exploration_ids),
                 items_completed=idx,
             )
+            current_requirements_explore_id = explore_id
+            self._checklist_upsert(
+                source_type="requirements",
+                source_id=explore_id,
+                title=f"Generate requirements from {explore_id}",
+                kind="requirements",
+                phase_name="requirements",
+                detail=f"Starting requirements extraction {idx + 1}/{len(exploration_ids)}",
+                status="running",
+                items_total=len(exploration_ids),
+                items_completed=idx,
+            )
 
             try:
                 result = await generator.generate_from_exploration(
@@ -1047,8 +1151,50 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 logger.info(
                     f"Generated {result.total_requirements} requirements from exploration {explore_id}"
                 )
+                self._checklist_complete(
+                    source_type="requirements",
+                    source_id=explore_id,
+                    title=f"Generate requirements from {explore_id}",
+                    kind="requirements",
+                    phase_name="requirements",
+                    detail=f"Generated {result.total_requirements} requirements",
+                    metadata={
+                        "exploration_id": explore_id,
+                        "requirements_generated": result.total_requirements,
+                        "verification_status": result.telemetry.verification_status,
+                    },
+                )
             except Exception as e:
                 logger.warning(f"Requirements generation failed for {explore_id}: {e}")
+                failures.append({"exploration_id": explore_id, "error": str(e)[:500]})
+                self._checklist_fail(
+                    source_type="requirements",
+                    source_id=explore_id,
+                    title=f"Generate requirements from {explore_id}",
+                    kind="requirements",
+                    phase_name="requirements",
+                    detail=str(e)[:500],
+                    metadata={"exploration_id": explore_id},
+                )
+            finally:
+                current_requirements_explore_id = None
+
+        if not all_requirements:
+            self._merge_session_config(
+                {
+                    "ai_quality": {
+                        "requirements": {
+                            "gated": True,
+                            "reason": "no_schema_valid_requirements",
+                            "failures": failures,
+                            "input_exploration_ids": exploration_ids,
+                        }
+                    }
+                }
+            )
+            raise RuntimeError(
+                "Requirements generation produced 0 schema-valid, source-backed requirements"
+            )
 
         self._update_session_field(
             "total_requirements_generated", len(all_requirements)
@@ -1166,6 +1312,17 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 items_total=len(exploration_ids),
                 items_completed=idx,
             )
+            self._checklist_upsert(
+                source_type="test_ideas",
+                source_id=explore_id,
+                title=f"Generate test ideas from {explore_id}",
+                kind="test_ideas",
+                phase_name="test_ideas",
+                detail=f"Starting test idea generation {idx + 1}/{len(exploration_ids)}",
+                status="running",
+                items_total=len(exploration_ids),
+                items_completed=idx,
+            )
 
             try:
                 result = await generator.generate_from_exploration(explore_id)
@@ -1173,8 +1330,26 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 logger.info(
                     f"Generated {result.total_ideas} test ideas from exploration {explore_id}"
                 )
+                self._checklist_complete(
+                    source_type="test_ideas",
+                    source_id=explore_id,
+                    title=f"Generate test ideas from {explore_id}",
+                    kind="test_ideas",
+                    phase_name="test_ideas",
+                    detail=f"Generated {result.total_ideas} test ideas",
+                    metadata={"exploration_id": explore_id, "test_ideas_generated": result.total_ideas},
+                )
             except Exception as e:
                 logger.warning(f"Test idea generation failed for {explore_id}: {e}")
+                self._checklist_fail(
+                    source_type="test_ideas",
+                    source_id=explore_id,
+                    title=f"Generate test ideas from {explore_id}",
+                    kind="test_ideas",
+                    phase_name="test_ideas",
+                    detail=str(e)[:500],
+                    metadata={"exploration_id": explore_id},
+                )
 
         requirements = self._get_requirements_for_explorations(
             config.project_id, exploration_ids
@@ -1186,6 +1361,20 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 self._create_spec_tasks_from_requirements(requirements)
         elif not self._has_spec_tasks():
             self._create_spec_tasks_from_requirements(requirements)
+
+        self._checklist_complete(
+            source_type="test_ideas_summary",
+            source_id="spec_task_creation",
+            title="Create spec generation tasks",
+            kind="summary",
+            phase_name="test_ideas",
+            detail=f"Created {self._count_spec_tasks()} spec task candidates",
+            metadata={
+                "test_ideas": len(all_ideas),
+                "requirements_considered": len(requirements),
+                "spec_tasks_created": self._count_spec_tasks(),
+            },
+        )
 
         self._update_phase_step(
             phase_id,
@@ -1256,16 +1445,25 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
             self._create_entry_page_spec_task(config)
             candidate_tasks = self._load_open_spec_tasks()
 
+        promotion_ready_tasks = []
+        gated_tasks = []
+        for task in candidate_tasks:
+            ok, reason = self._spec_task_promotion_gate(task)
+            if ok:
+                promotion_ready_tasks.append(task)
+            else:
+                gated_tasks.append((task, reason))
+
         threshold = self._effective_priority_threshold(config)
         threshold_level = PRIORITY_ORDER.get(threshold, 3)
         eligible_tasks = [
             t
-            for t in candidate_tasks
+            for t in promotion_ready_tasks
             if PRIORITY_ORDER.get(t.priority, 3) <= threshold_level
         ]
         filtered_tasks = [
             t
-            for t in candidate_tasks
+            for t in promotion_ready_tasks
             if PRIORITY_ORDER.get(t.priority, 3) > threshold_level
         ]
         eligible_tasks.sort(key=lambda t: PRIORITY_ORDER.get(t.priority, 3))
@@ -1286,6 +1484,8 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 items_total=len(tasks),
                 items_completed=idx,
             )
+            if task.id is not None:
+                self._update_spec_task(task.id, "generating")
 
             try:
                 spec_path = self._generate_spec_from_task(task, specs_dir, config)
@@ -1314,6 +1514,9 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 [task.id for task in filtered_tasks if task.id is not None],
                 f"Skipped by priority threshold '{threshold}'",
             )
+        for task, reason in gated_tasks:
+            if task.id is not None:
+                self._skip_spec_tasks([task.id], reason)
         if skipped_due_to_limit:
             self._skip_spec_tasks(
                 [task.id for task in skipped_due_to_limit if task.id is not None],
@@ -1343,6 +1546,7 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
             ),
             "eligible_tasks": len(eligible_tasks),
             "filtered_by_priority": len(filtered_tasks),
+            "gated_tasks": len(gated_tasks),
             "skipped_due_to_max_specs": len(skipped_due_to_limit),
             "remaining_pending_tasks": remaining_pending,
             "priority_threshold": threshold,
@@ -1351,6 +1555,216 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
     # ------------------------------------------------------------------
     # Phase 5: Test Generation
     # ------------------------------------------------------------------
+
+    async def _preflight_test_generation_runtime(
+        self,
+        *,
+        config: AutoPilotConfig,
+        pipeline_cls: Any,
+        should_use_agent_queue_fn: Any,
+    ) -> dict[str, Any]:
+        """Fail fast when AutoPilot cannot run live browser-backed agents."""
+        diagnostics: dict[str, Any] = {
+            "ready": True,
+            "runtime": _autopilot_browser_runtime_status(),
+            "checks": {},
+        }
+        errors: list[str] = []
+        runtime_error_path: str | None = None
+
+        try:
+            from orchestrator.services.runtime_diagnostics import (
+                autopilot_runtime_diagnostics,
+            )
+
+            diagnostics["runtime_identity"] = autopilot_runtime_diagnostics()
+            if diagnostics["runtime_identity"].get("runtime_stale"):
+                errors.append(
+                    "AutoPilot runtime is stale; restart backend and agent workers before starting test generation."
+                )
+        except Exception as exc:
+            diagnostics["runtime_identity"] = {"error": str(exc)}
+
+        if should_use_agent_queue_fn():
+            try:
+                from orchestrator.services.agent_queue import get_agent_queue
+
+                queue = get_agent_queue()
+                await queue.connect()
+                health = await queue.get_worker_health()
+                diagnostics["checks"]["agent_queue"] = health
+                if int(health.get("live_browser_worker_count") or 0) < 1:
+                    errors.append(
+                        "No live-browser-capable agent worker is available for queued AutoPilot generation."
+                    )
+            except Exception as exc:
+                diagnostics["checks"]["agent_queue"] = {"error": str(exc)}
+                errors.append(f"Agent queue health check failed: {exc}")
+        else:
+            runtime = browser_runtime_status()
+            diagnostics["checks"]["direct_browser_runtime"] = runtime
+            if runtime.get("browser_runtime") == "unavailable":
+                errors.append(
+                    str(runtime.get("runtime_message") or "Playwright browser runtime is unavailable.")
+                )
+
+        preflight_dir = Path("runs") / f"{self.session_id}-runtime-preflight"
+        preflight_dir.mkdir(parents=True, exist_ok=True)
+        if not errors:
+            try:
+                pipeline = pipeline_cls(
+                    project_id=config.project_id,
+                    owner_type="autopilot",
+                    owner_id=self.session_id,
+                    owner_label=f"AutoPilot {self.session_id} runtime preflight",
+                )
+                runtime = pipeline.prepare_run_browser_context(run_dir=preflight_dir)
+                mcp_config_path = runtime.get("mcp_config_path") or str(preflight_dir / ".mcp.json")
+                mcp_contract = validate_playwright_test_mcp_contract(mcp_config_path)
+                diagnostics["checks"]["playwright_test_mcp"] = mcp_contract
+                if not mcp_contract.get("ready"):
+                    errors.append(str(mcp_contract.get("error") or "Playwright Test MCP contract is not ready."))
+                else:
+                    smoke = await self._run_test_generation_planner_smoke(
+                        preflight_dir=preflight_dir,
+                        target_url=(config.entry_urls or ["https://example.com"])[0],
+                    )
+                    diagnostics["checks"]["planner_smoke"] = smoke
+                    if not smoke.get("ready"):
+                        errors.append(str(smoke.get("error") or "Planner smoke failed."))
+            except Exception as exc:
+                diagnostics["checks"]["playwright_test_mcp"] = {"ready": False, "error": str(exc)}
+                errors.append(f"Playwright Test MCP preflight failed: {exc}")
+
+        if errors:
+            diagnostics["ready"] = False
+            diagnostics["errors"] = errors
+            diagnostics["status"] = (
+                "runtime_stale"
+                if (diagnostics.get("runtime_identity") or {}).get("runtime_stale")
+                else "runtime_failed"
+            )
+            try:
+                runtime_error_path = str(preflight_dir / "runtime_error.json")
+                (preflight_dir / "runtime_error.json").write_text(
+                    json.dumps(diagnostics, indent=2, sort_keys=True, default=str)
+                )
+                diagnostics["runtime_error_path"] = runtime_error_path
+            except OSError as exc:
+                logger.debug("Could not write runtime preflight artifact: %s", exc)
+        return diagnostics
+
+    async def _run_test_generation_planner_smoke(
+        self,
+        *,
+        preflight_dir: Path,
+        target_url: str,
+    ) -> dict[str, Any]:
+        """Exercise the same planner AgentRunner path before creating test tasks."""
+        from orchestrator.utils.agent_runner import AgentRunner
+        from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
+
+        target_url = str(target_url or "https://example.com").strip() or "https://example.com"
+        plan_path = preflight_dir / "planner-smoke-plan.md"
+        prompt = f"""Run a short AutoPilot runtime smoke test using the Playwright Test planner tools.
+
+Required tool sequence:
+1. Call `planner_setup_page`.
+2. Call `browser_navigate` to `{target_url}`.
+3. Call `browser_snapshot`.
+4. Call `planner_save_plan` with a minimal non-secret smoke plan at `{plan_path}`.
+
+Do not log in, do not mutate account data, and do not call `browser_close`.
+Final response: `runtime_smoke: passed` if the tools completed.
+"""
+        tool_config = get_agent_tool_config("prd-live-planner", mcp_config_dir=preflight_dir)
+        timeout = int(os.environ.get("AUTOPILOT_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS", "180"))
+        runner = AgentRunner(
+            timeout_seconds=timeout,
+            allowed_tools=tool_config.get("allowed_tools"),
+            tools=tool_config.get("tools"),
+            disallowed_tools=tool_config.get("disallowed_tools"),
+            log_tools=True,
+            on_task_enqueued=None,
+            owner_type="autopilot",
+            owner_id=self.session_id,
+            owner_label=f"AutoPilot {self.session_id} runtime preflight",
+            model_tier="tool_deep",
+            cwd=preflight_dir,
+            session_dir=preflight_dir,
+            requires_live_browser=True,
+            preserve_browser_on_failure=True,
+            autopilot_retry_enabled=True,
+            autopilot_session_id=self.session_id,
+            autopilot_stable_key="runtime_preflight:planner_smoke",
+            autopilot_agent_kind="runtime_preflight",
+            autopilot_source_type="runtime_preflight",
+            autopilot_source_id="planner_smoke",
+            autopilot_checklist_title="Runtime preflight",
+            autopilot_phase_name="test_generation",
+            autopilot_checklist_kind="runtime_preflight",
+        )
+        result = await runner.run(prompt)
+        tool_names = [str(getattr(call, "name", "")) for call in result.tool_calls or []]
+        short_names = [name.split("__")[-1] if "__" in name else name for name in tool_names]
+        required = [
+            "planner_setup_page",
+            "browser_navigate",
+            "browser_snapshot",
+            "planner_save_plan",
+        ]
+        missing = [name for name in required if name not in short_names]
+        ready = bool(result.success and result.messages_received > 0 and not missing)
+        return {
+            "ready": ready,
+            "success": result.success,
+            "sdk_first_message_received": result.messages_received > 0,
+            "messages_received": result.messages_received,
+            "text_blocks_received": result.text_blocks_received,
+            "tool_calls": len(result.tool_calls or []),
+            "tool_names": tool_names,
+            "missing_tools": missing,
+            "sdk_session_id": result.session_id,
+            "error_type": result.error_type,
+            "error": result.error,
+            "mcp_config_path": str(preflight_dir / ".mcp.json"),
+            "plan_path": str(plan_path),
+            **({"error": result.error or f"Missing smoke evidence: {', '.join(missing)}"} if not ready else {}),
+        }
+
+    def _should_skip_planning_for_spec(self, spec_path: str | None) -> bool:
+        """Use existing exploration-derived specs directly when they are actionable."""
+        if os.environ.get("AUTOPILOT_SKIP_PLANNING_FROM_EVIDENCE", "1").lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            return False
+        if not spec_path or not self._spec_has_actionable_e2e_steps(spec_path):
+            return False
+        try:
+            content = Path(spec_path).read_text()
+        except Exception:
+            return False
+        evidence_markers = (
+            "Source exploration session:",
+            "Observed API endpoint",
+            "evidence:",
+            "Target URL:",
+            "@testdata",
+        )
+        return any(marker in content for marker in evidence_markers)
+
+    @staticmethod
+    def _absolute_spec_path(spec_path: str | None) -> str | None:
+        if not spec_path:
+            return None
+        path = Path(spec_path)
+        if path.is_absolute():
+            return str(path)
+        root = Path(__file__).resolve().parent.parent.parent
+        return str((root / path).resolve())
 
     async def _run_test_generation_phase(
         self, config: AutoPilotConfig, phase_id: int
@@ -1376,6 +1790,41 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
         if not spec_tasks:
             logger.warning("No completed spec tasks for test generation")
             raise RuntimeError("No completed specs are available for test generation")
+
+        runtime_preflight = await self._preflight_test_generation_runtime(
+            config=config,
+            pipeline_cls=FullNativePipeline,
+            should_use_agent_queue_fn=should_use_agent_queue,
+        )
+        if not runtime_preflight.get("ready"):
+            preflight_status = str(runtime_preflight.get("status") or "runtime_failed")
+            message = "; ".join(runtime_preflight.get("errors") or [])[:1000]
+            logger.error("AutoPilot runtime preflight failed: %s", message)
+            self._update_live_browser_state(
+                {
+                    "active": False,
+                    "phase": "test_generation",
+                    "activity_label": "Runtime preflight",
+                    "status": preflight_status,
+                    "message": message or "AutoPilot runtime is not ready",
+                    "runtime_preflight": runtime_preflight,
+                }
+            )
+            self._update_phase_step(
+                phase_id,
+                f"Runtime not ready: {message or 'preflight failed'}",
+                items_total=0,
+                items_completed=0,
+            )
+            self._merge_session_config({"autopilot_runtime_preflight": runtime_preflight})
+            return {
+                "status": preflight_status,
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "runtime_preflight": runtime_preflight,
+                "reason": message,
+            }
 
         # Create test tasks for spec tasks that do not already have one
         test_tasks = self._create_test_tasks(spec_tasks)
@@ -1563,6 +2012,26 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                         owner_id=self.session_id,
                         owner_label=f"AutoPilot {self.session_id}",
                     )
+                    autopilot_attempt_context = {
+                        "autopilot_retry_enabled": True,
+                        "autopilot_session_id": self.session_id,
+                        "autopilot_stable_key": f"test_task:{test_task_id}",
+                        "autopilot_agent_kind": "test_generation",
+                        "autopilot_source_type": "test_task",
+                        "autopilot_source_id": str(test_task_id),
+                        "autopilot_checklist_title": f"Generate test: {spec_name}",
+                        "autopilot_phase_name": "test_generation",
+                        "autopilot_checklist_kind": "test_task",
+                    }
+                    for agent_obj in (
+                        pipeline,
+                        getattr(pipeline, "native_planner", None),
+                        getattr(pipeline, "native_generator", None),
+                        getattr(pipeline, "native_healer", None),
+                    ):
+                        if agent_obj is not None:
+                            for key, value in autopilot_attempt_context.items():
+                                setattr(agent_obj, key, value)
                     try:
                         env_overrides = {
                             "QUORVEX_TEST_DATA_REFS": json.dumps(test_data_refs)
@@ -1586,11 +2055,14 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                                     browser="chromium",
                                 )
                             else:
+                                skip_planning = self._should_skip_planning_for_spec(spec_path)
+                                absolute_spec_path = self._absolute_spec_path(spec_path) or spec_path
                                 result = await pipeline.run(
-                                    spec_path=spec_path,
+                                    spec_path=absolute_spec_path,
                                     run_dir=run_dir,
                                     browser="chromium",
                                     hybrid_healing=config.hybrid_healing,
+                                    skip_planning=skip_planning,
                                     storage_state_path=storage_state_path,
                                     browser_auth_context=browser_auth_context,
                                 )
@@ -1614,16 +2086,23 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                             error_message = self._extract_task_error_summary(
                                 run_dir, result
                             )
+                            failure_status = self._test_task_status_from_result(result)
+                            failure_stage = (
+                                "runtime_failed"
+                                if failure_status == "runtime_failed"
+                                else result_stage
+                            )
                             self._update_test_task(
                                 test_task_id,
-                                "failed",
-                                passed=False,
+                                failure_status,
+                                passed=False if failure_status != "runtime_failed" else None,
                                 test_path=test_path,
-                                current_stage=result_stage,
+                                current_stage=failure_stage,
                                 error_summary=error_message,
                                 healing_attempt=healing_attempt,
                             )
-                            failed_count += 1
+                            if failure_status != "runtime_failed":
+                                failed_count += 1
 
                         results[test_task_id] = result
 
@@ -1685,7 +2164,20 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
             "total": total_generated,
             "passed": passed_count,
             "failed": failed_count,
+            "runtime_failed": task_counts.get("runtime_failed", 0),
         }
+
+    @staticmethod
+    def _test_task_status_from_result(result: dict[str, Any]) -> str:
+        diagnostics = result.get("planner_diagnostics")
+        if isinstance(diagnostics, dict) and diagnostics.get("failure_category") == "runtime_failed":
+            return "runtime_failed"
+        if result.get("status") in {"runtime_failed", "runtime_stale"}:
+            return str(result["status"])
+        stage = str(result.get("stage") or "")
+        if stage == "runtime_failed":
+            return "runtime_failed"
+        return "failed"
 
     def _should_use_conservative_test_generation(
         self, spec_path: str | None = None
@@ -1986,6 +2478,21 @@ test.describe({suite}, () => {{
             db.commit()
             db.refresh(question)
             self._current_question_id = question.id
+        self._checklist_upsert(
+            source_type="question",
+            source_id=str(question.id),
+            title=f"Question: {question_type.replace('_', ' ')}",
+            kind="question",
+            phase_name=phase_name,
+            detail=question_text,
+            status="waiting",
+            metadata={
+                "question_id": question.id,
+                "question_type": question_type,
+                "default_answer": default_answer,
+                "auto_continue_at": question.auto_continue_at.isoformat() if question.auto_continue_at else None,
+            },
+        )
 
         logger.info(f"Question asked (id={question.id}): {question_text[:100]}...")
         self._update_session_status("awaiting_input")
@@ -2017,6 +2524,20 @@ test.describe({suite}, () => {{
             resolved = db.get(AutoPilotQuestion, question.id)
             if resolved and resolved.answer_text:
                 resolved_answer = resolved.answer_text
+                resolved_status = resolved.status
+            else:
+                resolved_status = "answered"
+
+        self._checklist_complete(
+            source_type="question",
+            source_id=str(question.id),
+            title=f"Question: {question_type.replace('_', ' ')}",
+            kind="question",
+            phase_name=phase_name,
+            detail=resolved_answer,
+            status=resolved_status if resolved_status in {"answered", "auto_continued"} else "answered",
+            metadata={"answer_text": resolved_answer},
+        )
 
         self._checkpoint_answers[question_type] = resolved_answer
         self._current_question_id = None
@@ -2036,6 +2557,16 @@ test.describe({suite}, () => {{
                 question.answered_at = datetime.utcnow()
                 db.add(question)
                 db.commit()
+                self._checklist_complete(
+                    source_type="question",
+                    source_id=str(question.id),
+                    title=f"Question: {question.question_type.replace('_', ' ')}",
+                    kind="question",
+                    phase_name=question.phase_name,
+                    detail=default_answer,
+                    status="auto_continued",
+                    metadata={"answer_text": default_answer},
+                )
 
         logger.info(
             f"Question {question_id} auto-continued with default: {default_answer}"
@@ -2141,6 +2672,43 @@ test.describe({suite}, () => {{
         if self._has_real_tool_progress(live_patch):
             live_patch.setdefault("activity_source", "real_tool_progress")
         self._merge_session_config({"live_browser": live_patch})
+        phase_name = str(live_patch.get("phase") or "")
+        if phase_name == "exploration" and live_patch.get("exploration_session_id"):
+            self._checklist_upsert(
+                source_type="exploration_session",
+                source_id=str(live_patch["exploration_session_id"]),
+                title=str(live_patch.get("activity_label") or "Explore URL"),
+                kind="exploration",
+                phase_name="exploration",
+                detail=str(live_patch.get("message") or live_patch.get("status") or "Exploration running"),
+                status=str(live_patch.get("status") or "running"),
+                metadata={
+                    "url": live_patch.get("url"),
+                    "last_tool": live_patch.get("last_tool"),
+                    "last_tool_label": live_patch.get("last_tool_label"),
+                    "tool_calls": live_patch.get("tool_calls"),
+                    "browser_tool_calls": live_patch.get("browser_tool_calls"),
+                    "agent_task_id": live_patch.get("agent_task_id"),
+                },
+            )
+        elif phase_name == "test_generation" and live_patch.get("test_task_id"):
+            self._checklist_upsert(
+                source_type="test_task",
+                source_id=str(live_patch["test_task_id"]),
+                title=f"Generate test for {live_patch.get('spec_name') or 'spec'}",
+                kind="test_task",
+                phase_name="test_generation",
+                detail=str(live_patch.get("message") or live_patch.get("current_stage") or "Test generation running"),
+                status=str(live_patch.get("status") or "running"),
+                metadata={
+                    "run_id": live_patch.get("run_id"),
+                    "spec_name": live_patch.get("spec_name"),
+                    "current_stage": live_patch.get("current_stage"),
+                    "last_tool": live_patch.get("last_tool"),
+                    "last_tool_label": live_patch.get("last_tool_label"),
+                    "agent_task_id": live_patch.get("agent_task_id"),
+                },
+            )
 
     def _record_live_tool_use(
         self, tool_name: str, patch: dict[str, Any] | None = None
@@ -2158,7 +2726,7 @@ test.describe({suite}, () => {{
 
             config = copy.deepcopy(session.config or {})
             live = dict(config.get("live_browser") or {})
-            recent_tools = list(live.get("recent_tools") or [])
+            recent_tools = list(patch.get("recent_tools") or live.get("recent_tools") or [])
             if not recent_tools or recent_tools[-1].get("name") != tool_name:
                 recent_tools.append(
                     {
@@ -2169,7 +2737,31 @@ test.describe({suite}, () => {{
                 )
                 recent_tools = recent_tools[-12:]
 
+            old_tool_calls = self._int_live_value(live.get("tool_calls"))
+            old_browser_tool_calls = self._int_live_value(live.get("browser_tool_calls"))
+            old_interactions = self._int_live_value(live.get("interactions"))
+            patch_tool_calls = self._int_live_value(patch.get("tool_calls")) if "tool_calls" in patch else None
+            patch_browser_tool_calls = (
+                self._int_live_value(patch.get("browser_tool_calls")) if "browser_tool_calls" in patch else None
+            )
+            patch_interactions = self._int_live_value(patch.get("interactions")) if "interactions" in patch else None
+
             live.update(patch)
+            live["tool_calls"] = (
+                max(old_tool_calls, patch_tool_calls)
+                if patch_tool_calls is not None
+                else old_tool_calls + 1
+            )
+            live["browser_tool_calls"] = (
+                max(old_browser_tool_calls, patch_browser_tool_calls)
+                if patch_browser_tool_calls is not None
+                else old_browser_tool_calls + (1 if self._is_browser_tool_name(tool_name) else 0)
+            )
+            live["interactions"] = (
+                max(old_interactions, patch_interactions)
+                if patch_interactions is not None
+                else old_interactions + 1
+            )
             live.update(
                 {
                     "last_tool": tool_name,
@@ -2183,6 +2775,36 @@ test.describe({suite}, () => {{
             session.config = config
             db.add(session)
             db.commit()
+        phase_name = str((patch or {}).get("phase") or "")
+        if phase_name == "exploration" and patch.get("exploration_session_id"):
+            self._checklist_upsert(
+                source_type="exploration_session",
+                source_id=str(patch["exploration_session_id"]),
+                title=str(patch.get("activity_label") or "Explore URL"),
+                kind="exploration",
+                phase_name="exploration",
+                detail=f"Using {label}",
+                status=str(patch.get("status") or "tool_use"),
+                metadata={"last_tool": tool_name, "last_tool_label": label, "last_tool_input": patch.get("last_tool_input")},
+            )
+        elif phase_name == "test_generation" and patch.get("test_task_id"):
+            self._checklist_upsert(
+                source_type="test_task",
+                source_id=str(patch["test_task_id"]),
+                title=f"Generate test for {patch.get('spec_name') or 'spec'}",
+                kind="test_task",
+                phase_name="test_generation",
+                detail=f"Using {label}",
+                status=str(patch.get("status") or "tool_use"),
+                metadata={
+                    "run_id": patch.get("run_id"),
+                    "spec_name": patch.get("spec_name"),
+                    "current_stage": patch.get("current_stage"),
+                    "last_tool": tool_name,
+                    "last_tool_label": label,
+                    "last_tool_input": patch.get("last_tool_input"),
+                },
+            )
 
     @staticmethod
     def _short_tool_name(tool_name: str) -> str:
@@ -2191,6 +2813,18 @@ test.describe({suite}, () => {{
         if "__" in tool_name:
             return tool_name.rsplit("__", 1)[-1].replace("_", " ")
         return tool_name.replace("_", " ")
+
+    @staticmethod
+    def _is_browser_tool_name(tool_name: str) -> bool:
+        short_name = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
+        return "__browser_" in tool_name or short_name.startswith("browser_")
+
+    @staticmethod
+    def _int_live_value(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _has_real_tool_progress(patch: dict[str, Any]) -> bool:
@@ -2247,6 +2881,8 @@ test.describe({suite}, () => {{
             expected = int(result.get("expected_min_spec_tasks") or 0)
             actual = self._count_spec_tasks()
             return actual >= expected if expected > 0 else actual > 0
+        if phase_name == "requirements":
+            return int(result.get("total_requirements") or 0) > 0
         if phase_name == "spec_generation":
             return (
                 int(result.get("specs_generated") or 0) > 0
@@ -2261,6 +2897,8 @@ test.describe({suite}, () => {{
             return "Exploration produced no persisted pages or sessions"
         if phase_name == "test_ideas":
             return "Test idea generation did not produce enough spec tasks for discovered unique requirements"
+        if phase_name == "requirements":
+            return "Requirements generation produced 0 schema-valid, source-backed requirements"
         if phase_name == "spec_generation":
             return "Spec generation produced 0 specs"
         return f"{phase_name.replace('_', ' ').title()} did not produce resumable output: {result.get('reason', 'empty output')}"
@@ -2384,14 +3022,117 @@ test.describe({suite}, () => {{
     # Phase record helpers
     # ------------------------------------------------------------------
 
-    def _create_phase_record(self, phase_name: str) -> int:
-        from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AutoPilotPhase
-
+    def _phase_sequence(self, phase_name: str) -> int:
         phase_order = next(
             (i for i, (name, _) in enumerate(self.PHASES) if name == phase_name),
             0,
         )
+        return (phase_order + 1) * 1000
+
+    def _checklist_upsert(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        title: str,
+        kind: str = "task",
+        phase_name: str | None = None,
+        detail: str | None = None,
+        status: str = "running",
+        progress: float | int | None = None,
+        items_completed: int | None = None,
+        items_total: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        sequence: int | None = None,
+    ) -> None:
+        try:
+            from orchestrator.services.autopilot_checklist import upsert_checklist_item
+
+            upsert_checklist_item(
+                session_id=self.session_id,
+                source_type=source_type,
+                source_id=source_id,
+                title=title,
+                kind=kind,
+                phase_name=phase_name,
+                detail=detail,
+                status=status,
+                progress=progress,
+                items_completed=items_completed,
+                items_total=items_total,
+                metadata=metadata,
+                sequence=sequence,
+            )
+        except Exception as exc:
+            logger.debug("Unable to update AutoPilot checklist item %s:%s: %s", source_type, source_id, exc)
+
+    def _checklist_complete(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        title: str,
+        kind: str = "task",
+        phase_name: str | None = None,
+        detail: str | None = None,
+        items_completed: int | None = None,
+        items_total: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        status: str = "completed",
+    ) -> None:
+        try:
+            from orchestrator.services.autopilot_checklist import complete_checklist_item
+
+            complete_checklist_item(
+                session_id=self.session_id,
+                source_type=source_type,
+                source_id=source_id,
+                title=title,
+                kind=kind,
+                phase_name=phase_name,
+                detail=detail,
+                items_completed=items_completed,
+                items_total=items_total,
+                metadata=metadata,
+                status=status,
+            )
+        except Exception as exc:
+            logger.debug("Unable to complete AutoPilot checklist item %s:%s: %s", source_type, source_id, exc)
+
+    def _checklist_fail(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        title: str,
+        kind: str = "task",
+        phase_name: str | None = None,
+        detail: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        status: str = "failed",
+    ) -> None:
+        try:
+            from orchestrator.services.autopilot_checklist import fail_checklist_item
+
+            fail_checklist_item(
+                session_id=self.session_id,
+                source_type=source_type,
+                source_id=source_id,
+                title=title,
+                kind=kind,
+                phase_name=phase_name,
+                detail=detail,
+                metadata=metadata,
+                status=status,
+            )
+        except Exception as exc:
+            logger.debug("Unable to fail AutoPilot checklist item %s:%s: %s", source_type, source_id, exc)
+
+    def _create_phase_record(self, phase_name: str) -> int:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotPhase
+
+        phase_order = self._phase_sequence(phase_name) // 1000 - 1
 
         with Session(engine) as db:
             # Check for existing record (resume case)
@@ -2410,6 +3151,17 @@ test.describe({suite}, () => {{
                 db.add(existing)
                 db.commit()
                 db.refresh(existing)
+                self._checklist_upsert(
+                    source_type="phase",
+                    source_id=phase_name,
+                    title=f"{phase_name.replace('_', ' ').title()} phase",
+                    kind="phase",
+                    phase_name=phase_name,
+                    detail="Phase started",
+                    status="running",
+                    progress=0,
+                    sequence=self._phase_sequence(phase_name),
+                )
                 return existing.id
 
             phase = AutoPilotPhase(
@@ -2422,6 +3174,17 @@ test.describe({suite}, () => {{
             db.add(phase)
             db.commit()
             db.refresh(phase)
+            self._checklist_upsert(
+                source_type="phase",
+                source_id=phase_name,
+                title=f"{phase_name.replace('_', ' ').title()} phase",
+                kind="phase",
+                phase_name=phase_name,
+                detail="Phase started",
+                status="running",
+                progress=0,
+                sequence=self._phase_sequence(phase_name),
+            )
             return phase.id
 
     def _complete_phase_record(self, phase_id: int, result: dict):
@@ -2437,6 +3200,17 @@ test.describe({suite}, () => {{
                 phase.result_summary = result
                 db.add(phase)
                 db.commit()
+                self._checklist_complete(
+                    source_type="phase",
+                    source_id=phase.phase_name,
+                    title=f"{phase.phase_name.replace('_', ' ').title()} phase",
+                    kind="phase",
+                    phase_name=phase.phase_name,
+                    detail=phase.current_step or "Phase complete",
+                    items_completed=phase.items_total or phase.items_completed,
+                    items_total=phase.items_total,
+                    metadata={"result": result},
+                )
 
     def _fail_phase_record(self, phase_id: int, error: str):
         from orchestrator.api.db import engine
@@ -2450,6 +3224,14 @@ test.describe({suite}, () => {{
                 phase.completed_at = datetime.utcnow()
                 db.add(phase)
                 db.commit()
+                self._checklist_fail(
+                    source_type="phase",
+                    source_id=phase.phase_name,
+                    title=f"{phase.phase_name.replace('_', ' ').title()} phase",
+                    kind="phase",
+                    phase_name=phase.phase_name,
+                    detail=error[:1000],
+                )
 
     def _update_phase_step(
         self,
@@ -2475,6 +3257,20 @@ test.describe({suite}, () => {{
                     session.current_phase_progress = phase.progress
                     db.add(session)
                 db.commit()
+                self._checklist_upsert(
+                    source_type="phase",
+                    source_id=phase.phase_name,
+                    title=f"{phase.phase_name.replace('_', ' ').title()} phase",
+                    kind="phase",
+                    phase_name=phase.phase_name,
+                    detail=step,
+                    status=phase.status,
+                    progress=phase.progress,
+                    items_completed=items_completed,
+                    items_total=items_total,
+                    sequence=self._phase_sequence(phase.phase_name),
+                    metadata={"current_step": step},
+                )
 
     # ------------------------------------------------------------------
     # Exploration result storage
@@ -2758,6 +3554,35 @@ test.describe({suite}, () => {{
             return "medium"
         return config.priority_threshold
 
+    def _spec_task_promotion_gate(self, task) -> tuple[bool, str]:
+        """Return whether a task has enough evidence to become an executable spec."""
+        metadata = dict(getattr(task, "evidence_metadata", {}) or {})
+        readiness = str(metadata.get("readiness") or "ready").strip().lower()
+        if readiness in {"blocked", "needs_review", "candidate", "suggestion"}:
+            return False, f"Skipped by promotion gate: readiness={readiness}"
+
+        confidence = metadata.get("confidence")
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            confidence_value = 0.0 if metadata else 0.6
+        if metadata and confidence_value < 0.5:
+            return False, f"Skipped by promotion gate: confidence={confidence_value:.2f}"
+
+        evidence_keys = (
+            "source_session_id",
+            "source_flows",
+            "source_requirements",
+            "source_api_endpoints",
+            "evidence_refs",
+            "steps",
+            "target_url",
+        )
+        has_evidence = any(bool(metadata.get(key)) for key in evidence_keys)
+        if metadata and not has_evidence:
+            return False, "Skipped by promotion gate: missing source evidence"
+        return True, ""
+
     def _create_fallback_spec_tasks_from_exploration(
         self, config: AutoPilotConfig
     ) -> None:
@@ -2778,14 +3603,37 @@ test.describe({suite}, () => {{
                         in {"authentication", "crud", "form_submission"}
                         else "medium"
                     )
-                    if self._create_spec_task_if_missing(flow.flow_name, priority):
+                    metadata = {
+                        "source_session_id": eid,
+                        "source_flows": [flow.flow_name],
+                        "target_url": flow.start_url or flow.end_url,
+                        "readiness": "ready",
+                        "confidence": 0.7,
+                        "origin": "fallback_flow",
+                    }
+                    if self._create_spec_task_if_missing(flow.flow_name, priority, metadata):
                         created += 1
                 continue
 
             transitions = store.get_session_transitions(eid)
             for idx, transition in enumerate(transitions[:10], 1):
                 title = f"Validate discovered {transition.action_type.replace('_', ' ')} path {idx}"
-                if self._create_spec_task_if_missing(title, "medium"):
+                metadata = {
+                    "source_session_id": eid,
+                    "target_url": transition.before_url or transition.after_url,
+                    "steps": [
+                        {
+                            "action": transition.action_type,
+                            "element": transition.action_target,
+                            "before_url": transition.before_url,
+                            "after_url": transition.after_url,
+                        }
+                    ],
+                    "readiness": "ready",
+                    "confidence": 0.55,
+                    "origin": "fallback_transition",
+                }
+                if self._create_spec_task_if_missing(title, "medium", metadata):
                     created += 1
 
         if created == 0:
@@ -2793,7 +3641,16 @@ test.describe({suite}, () => {{
 
     def _create_entry_page_spec_task(self, config: AutoPilotConfig) -> None:
         title = "Validate application entry page availability"
-        self._create_spec_task_if_missing(title, "medium")
+        self._create_spec_task_if_missing(
+            title,
+            "medium",
+            {
+                "target_url": config.entry_urls[0] if config.entry_urls else None,
+                "readiness": "ready",
+                "confidence": 0.4,
+                "origin": "entry_page_fallback",
+            },
+        )
 
     def _get_requirements_for_explorations(
         self, project_id: str, exploration_ids: list[str]
@@ -2825,7 +3682,12 @@ test.describe({suite}, () => {{
             }
         )
 
-    def _create_spec_task_if_missing(self, title: str, priority: str) -> bool:
+    def _create_spec_task_if_missing(
+        self,
+        title: str,
+        priority: str,
+        evidence_metadata: dict[str, Any] | None = None,
+    ) -> bool:
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotSpecTask
 
@@ -2844,6 +3706,7 @@ test.describe({suite}, () => {{
                     requirement_title=normalized_title,
                     priority=priority if priority in PRIORITY_ORDER else "medium",
                     status="pending",
+                    evidence_metadata_json=json.dumps(evidence_metadata or {}),
                 )
             )
             db.commit()
@@ -2884,6 +3747,7 @@ test.describe({suite}, () => {{
                     priority=req.priority,
                     status="pending",
                 )
+                task.evidence_metadata = self._evidence_metadata_from_requirement(req)
                 db.add(task)
                 existing_titles.add(key)
                 if req_id is not None:
@@ -2920,6 +3784,7 @@ test.describe({suite}, () => {{
                     priority=idea.priority,
                     status="pending",
                 )
+                task.evidence_metadata = self._evidence_metadata_from_test_idea(idea)
                 db.add(task)
                 existing_titles.add(key)
                 created += 1
@@ -3022,6 +3887,10 @@ test.describe({suite}, () => {{
             "passed": 0,
             "failed": 0,
             "error": 0,
+            "runtime_failed": 0,
+            "runtime_stale": 0,
+            "spec_not_automatable": 0,
+            "planner_contract_failed": 0,
             "skipped": 0,
             "pending": 0,
             "running": 0,
@@ -3059,6 +3928,25 @@ test.describe({suite}, () => {{
                     task.completed_at = datetime.utcnow()
                 db.add(task)
                 db.commit()
+                self._checklist_upsert(
+                    source_type="spec_task",
+                    source_id=str(task.id),
+                    title=f"Generate spec: {task.requirement_title or task.spec_name or 'Unnamed requirement'}",
+                    kind="spec_task",
+                    phase_name="spec_generation",
+                    detail=error[:1000] if error else (task.spec_path or task.status),
+                    status=status,
+                    progress=1.0 if status in {"completed", "failed", "skipped"} else 0.1,
+                    metadata={
+                        "spec_task_id": task.id,
+                        "requirement_id": task.requirement_id,
+                        "requirement_title": task.requirement_title,
+                        "priority": task.priority,
+                        "spec_name": task.spec_name,
+                        "spec_path": task.spec_path,
+                        "error_message": task.error_message,
+                    },
+                )
 
     def _skip_spec_tasks(self, task_ids: list[int], reason: str):
         from orchestrator.api.db import engine
@@ -3079,6 +3967,25 @@ test.describe({suite}, () => {{
                 task.error_message = reason[:1000]
                 task.completed_at = datetime.utcnow()
                 db.add(task)
+                self._checklist_upsert(
+                    source_type="spec_task",
+                    source_id=str(task.id),
+                    title=f"Generate spec: {task.requirement_title or task.spec_name or 'Unnamed requirement'}",
+                    kind="spec_task",
+                    phase_name="spec_generation",
+                    detail=reason[:1000],
+                    status="skipped",
+                    progress=1.0,
+                    metadata={
+                        "spec_task_id": task.id,
+                        "requirement_id": task.requirement_id,
+                        "requirement_title": task.requirement_title,
+                        "priority": task.priority,
+                        "spec_name": task.spec_name,
+                        "spec_path": task.spec_path,
+                        "error_message": task.error_message,
+                    },
+                )
             db.commit()
 
     def _generate_spec_from_task(
@@ -3101,6 +4008,11 @@ test.describe({suite}, () => {{
         )
 
         store = get_exploration_store(project_id=config.project_id)
+        evidence_metadata = (
+            dict(getattr(task, "evidence_metadata", {}) or {})
+            if hasattr(task, "evidence_metadata")
+            else {}
+        )
 
         # Look up requirement details from the store
         requirements = store.get_requirements()
@@ -3127,12 +4039,19 @@ test.describe({suite}, () => {{
 
         # Determine target URL from exploration sessions
         target_url = (
-            config.entry_urls[0] if config.entry_urls else "https://example.com"
+            evidence_metadata.get("target_url")
+            or (config.entry_urls[0] if config.entry_urls else "https://example.com")
         )
+        flow_steps = self._steps_from_evidence_metadata(evidence_metadata)
 
         if idea:
             scenario = scenario_from_test_idea(
                 idea, target_url=target_url, fallback_title=title
+            )
+            self._apply_spec_task_evidence_to_scenario(
+                scenario,
+                evidence_metadata=evidence_metadata,
+                config=config,
             )
         elif req:
             # Try to find matching flow for step details
@@ -3151,20 +4070,20 @@ test.describe({suite}, () => {{
                 if matching_flow:
                     break
 
-            flow_steps = []
             source_flows = []
             if matching_flow:
                 target_url = matching_flow.start_url or target_url
                 source_flows.append(matching_flow.flow_name)
-                for fs in store.get_flow_steps(matching_flow.id):
-                    if fs.value is not None:
-                        flow_steps.append(
-                            f'{fs.action_type.capitalize()} "{fs.value}" into the {fs.element_name or "field"}'
-                        )
-                    else:
-                        flow_steps.append(
-                            f"{fs.action_type.capitalize()} the {fs.element_name or 'element'}"
-                        )
+                if not flow_steps:
+                    for fs in store.get_flow_steps(matching_flow.id):
+                        if fs.value is not None:
+                            flow_steps.append(
+                                f'{fs.action_type.capitalize()} "{fs.value}" into the {fs.element_name or "field"}'
+                            )
+                        else:
+                            flow_steps.append(
+                                f"{fs.action_type.capitalize()} the {fs.element_name or 'element'}"
+                            )
 
             scenario = scenario_from_requirement(
                 title=req.title,
@@ -3174,7 +4093,12 @@ test.describe({suite}, () => {{
                 flow_steps=flow_steps,
                 priority=req.priority,
                 category=req.category,
-                source_flows=source_flows,
+                source_flows=source_flows or evidence_metadata.get("source_flows") or [],
+            )
+            self._apply_spec_task_evidence_to_scenario(
+                scenario,
+                evidence_metadata=evidence_metadata or self._evidence_metadata_from_requirement(req),
+                config=config,
             )
         else:
             scenario = scenario_from_requirement(
@@ -3182,6 +4106,11 @@ test.describe({suite}, () => {{
                 description=f"Automated test for: {title}",
                 target_url=target_url,
                 flow_steps=[f"Verify {title}"],
+            )
+            self._apply_spec_task_evidence_to_scenario(
+                scenario,
+                evidence_metadata=evidence_metadata,
+                config=config,
             )
 
         spec_path.write_text(render_scenario_markdown(scenario))
@@ -3198,6 +4127,140 @@ test.describe({suite}, () => {{
         self._register_generated_spec_metadata(spec_path, config.project_id)
         logger.info(f"Generated spec: {spec_path}")
         return spec_path
+
+    def _apply_spec_task_evidence_to_scenario(
+        self,
+        scenario,
+        *,
+        evidence_metadata: dict[str, Any],
+        config: AutoPilotConfig,
+    ) -> None:
+        """Attach source links and test-data refs to a rendered AutoPilot scenario."""
+        refs = [
+            str(ref).strip()
+            for ref in (
+                evidence_metadata.get("test_data_refs")
+                or evidence_metadata.get("testDataRefs")
+                or config.test_data_refs
+                or []
+            )
+            if str(ref).strip()
+        ]
+        for ref in refs:
+            directive = f'@testdata "{ref}"'
+            if directive not in scenario.test_data:
+                scenario.test_data.append(directive)
+
+        target_url = evidence_metadata.get("target_url")
+        if target_url:
+            target_note = f"Target URL: {target_url}"
+            if target_note not in scenario.test_data:
+                scenario.test_data.append(target_note)
+
+        source_notes = self._source_notes_from_evidence_metadata(evidence_metadata)
+        for note in source_notes:
+            if note not in scenario.source_notes:
+                scenario.source_notes.append(note)
+
+    def _source_notes_from_evidence_metadata(
+        self, evidence_metadata: dict[str, Any]
+    ) -> list[str]:
+        notes: list[str] = []
+        source_session_id = evidence_metadata.get("source_session_id")
+        if source_session_id:
+            notes.append(f"Source exploration session: {source_session_id}")
+        flow_id = evidence_metadata.get("flow_id")
+        if flow_id:
+            notes.append(f"Source flow ID: {flow_id}")
+        for label, key in (
+            ("Source flow(s)", "source_flows"),
+            ("Observed element(s)", "source_elements"),
+            ("Observed API endpoint(s)", "source_api_endpoints"),
+            ("Evidence ref(s)", "evidence_refs"),
+        ):
+            values = self._metadata_string_list(evidence_metadata.get(key))
+            if values:
+                notes.append(f"{label}: {', '.join(values[:8])}")
+        readiness = evidence_metadata.get("readiness")
+        confidence = evidence_metadata.get("confidence")
+        if readiness:
+            notes.append(f"Spec readiness: {readiness}")
+        if confidence is not None:
+            notes.append(f"Source confidence: {confidence}")
+        return notes
+
+    def _steps_from_evidence_metadata(
+        self, evidence_metadata: dict[str, Any]
+    ) -> list[str]:
+        raw_steps = evidence_metadata.get("steps") or evidence_metadata.get("suggested_steps") or []
+        steps: list[str] = []
+        if not isinstance(raw_steps, list):
+            return steps
+        for raw in raw_steps:
+            if isinstance(raw, str):
+                value = raw.strip()
+                if value:
+                    steps.append(value)
+                continue
+            if not isinstance(raw, dict):
+                continue
+            action = str(raw.get("action") or raw.get("action_type") or "Interact").strip()
+            element = str(raw.get("element") or raw.get("element_name") or raw.get("target") or "").strip()
+            value = raw.get("value")
+            if value not in (None, "") and element:
+                steps.append(f'{action.capitalize()} "{value}" into {element}')
+            elif element:
+                steps.append(f"{action.capitalize()} {element}")
+            elif raw.get("after_url"):
+                steps.append(f"Navigate to {raw.get('after_url')}")
+        return steps
+
+    def _evidence_metadata_from_requirement(self, req) -> dict[str, Any]:
+        provenance = dict(getattr(req, "provenance_metadata", {}) or {})
+        metadata = {
+            "source_session_id": getattr(req, "source_session_id", None),
+            "source_flows": provenance.get("source_flows") or [],
+            "source_elements": provenance.get("source_elements") or [],
+            "source_api_endpoints": provenance.get("source_api_endpoints") or [],
+            "evidence_refs": provenance.get("evidence_refs") or [],
+            "confidence": getattr(req, "confidence", None),
+            "uncertainty_reason": getattr(req, "uncertainty_reason", None),
+            "readiness": "ready"
+            if float(getattr(req, "confidence", 0.0) or 0.0) >= 0.7
+            else "needs_review",
+            "origin": "requirement",
+        }
+        return {key: value for key, value in metadata.items() if value not in (None, [], "")}
+
+    def _evidence_metadata_from_test_idea(self, idea) -> dict[str, Any]:
+        metadata = {
+            "source_session_id": getattr(idea, "source_exploration_session", None)
+            or getattr(idea, "source_session_id", None),
+            "source_flows": getattr(idea, "source_flows", []) or [],
+            "source_requirements": getattr(idea, "source_requirements", []) or [],
+            "source_api_endpoints": getattr(idea, "source_api_endpoints", []) or [],
+            "steps": getattr(idea, "suggested_steps", []) or [],
+            "expected_outcomes": getattr(idea, "expected_outcomes", []) or [],
+            "readiness": getattr(idea, "spec_readiness", None) or "ready",
+            "confidence": getattr(idea, "confidence", None),
+            "origin": "test_idea",
+        }
+        return {key: value for key, value in metadata.items() if value not in (None, [], "")}
+
+    @staticmethod
+    def _metadata_string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded, list):
+                    value = decoded
+                else:
+                    return [value] if value.strip() else []
+            except json.JSONDecodeError:
+                return [value] if value.strip() else []
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
 
     def _register_generated_spec_metadata(self, spec_path: Path, project_id: str) -> None:
         """Associate an AutoPilot-generated spec file with the active project."""
@@ -3359,6 +4422,10 @@ test.describe({suite}, () => {{
                     "failed",
                     "error",
                     "skipped",
+                    "runtime_failed",
+                    "runtime_stale",
+                    "spec_not_automatable",
+                    "planner_contract_failed",
                 ):
                     # Re-attempt
                     existing.status = "pending"
@@ -3372,6 +4439,23 @@ test.describe({suite}, () => {{
                     db.add(existing)
                     db.commit()
                     db.refresh(existing)
+                    self._checklist_upsert(
+                        source_type="test_task",
+                        source_id=str(existing.id),
+                        title=f"Generate test for {existing.spec_name or st.spec_name or 'spec'}",
+                        kind="test_task",
+                        phase_name="test_generation",
+                        detail="Queued for test generation",
+                        status="pending",
+                        progress=0,
+                        metadata={
+                            "test_task_id": existing.id,
+                            "spec_task_id": existing.spec_task_id,
+                            "spec_name": existing.spec_name,
+                            "spec_path": existing.spec_path,
+                            "run_id": existing.run_id,
+                        },
+                    )
                     result_tuples.append(
                         (
                             existing.id,
@@ -3400,6 +4484,23 @@ test.describe({suite}, () => {{
                 db.refresh(tt)
                 result_tuples.append(
                     (tt.id, st.spec_path, tt.spec_name or "unknown", tt.run_id)
+                )
+                self._checklist_upsert(
+                    source_type="test_task",
+                    source_id=str(tt.id),
+                    title=f"Generate test for {tt.spec_name or 'spec'}",
+                    kind="test_task",
+                    phase_name="test_generation",
+                    detail="Queued for test generation",
+                    status="pending",
+                    progress=0,
+                    metadata={
+                        "test_task_id": tt.id,
+                        "spec_task_id": tt.spec_task_id,
+                        "spec_name": tt.spec_name,
+                        "spec_path": tt.spec_path,
+                        "run_id": tt.run_id,
+                    },
                 )
 
         return result_tuples
@@ -3432,7 +4533,17 @@ test.describe({suite}, () => {{
         run.current_stage = task.current_stage
         run.stage_message = task.error_summary or task.current_stage
         run.error_message = (
-            task.error_summary if task.status in ("failed", "error") else None
+            task.error_summary
+            if task.status
+            in (
+                "failed",
+                "error",
+                "runtime_failed",
+                "runtime_stale",
+                "spec_not_automatable",
+                "planner_contract_failed",
+            )
+            else None
         )
         run.healing_attempt = task.healing_attempt
         run.started_at = task.started_at or run.started_at
@@ -3443,6 +4554,10 @@ test.describe({suite}, () => {{
             "paused",
             "cancelled",
             "skipped",
+            "runtime_failed",
+            "runtime_stale",
+            "spec_not_automatable",
+            "planner_contract_failed",
         ):
             run.completed_at = task.completed_at
         db.add(run)
@@ -3481,8 +4596,52 @@ test.describe({suite}, () => {{
                     task.healing_attempt = healing_attempt
                 if status == "running":
                     task.started_at = datetime.utcnow()
-                if status in ("passed", "failed", "error", "paused"):
+                if status in (
+                    "passed",
+                    "failed",
+                    "error",
+                    "paused",
+                    "runtime_failed",
+                    "runtime_stale",
+                    "spec_not_automatable",
+                    "planner_contract_failed",
+                ):
                     task.completed_at = datetime.utcnow()
                 db.add(task)
                 self._ensure_test_run_record(db, task)
                 db.commit()
+                terminal = status in {
+                    "passed",
+                    "failed",
+                    "error",
+                    "paused",
+                    "skipped",
+                    "cancelled",
+                    "runtime_failed",
+                    "runtime_stale",
+                    "spec_not_automatable",
+                    "planner_contract_failed",
+                }
+                self._checklist_upsert(
+                    source_type="test_task",
+                    source_id=str(task.id),
+                    title=f"Generate test for {task.spec_name or 'spec'}",
+                    kind="test_task",
+                    phase_name="test_generation",
+                    detail=error_summary or current_stage or task.current_stage or status,
+                    status=status,
+                    progress=1.0 if terminal else 0.35,
+                    metadata={
+                        "test_task_id": task.id,
+                        "spec_task_id": task.spec_task_id,
+                        "spec_name": task.spec_name,
+                        "spec_path": task.spec_path,
+                        "run_id": task.run_id,
+                        "current_stage": task.current_stage,
+                        "generation_mode": task.current_stage,
+                        "healing_attempt": task.healing_attempt,
+                        "test_path": task.test_path,
+                        "passed": task.passed,
+                        "error_summary": task.error_summary,
+                    },
+                )

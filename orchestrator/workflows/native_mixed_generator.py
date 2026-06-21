@@ -21,10 +21,6 @@ from orchestrator.load_env import setup_claude_env
 
 setup_claude_env()
 
-config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-if config_dir:
-    os.chdir(config_dir)
-
 import logging
 
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout

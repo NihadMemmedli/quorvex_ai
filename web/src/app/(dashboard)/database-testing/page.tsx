@@ -72,6 +72,14 @@ export default function DatabaseTestingPage() {
         updateUrlState({ table: tableName || null });
     }, [updateUrlState]);
 
+    useEffect(() => {
+        const tab = searchParams.get('tab') as TabType | null;
+        if (tab && ['connections', 'viewer', 'analyzer', 'specs', 'history', 'dashboard'].includes(tab) && tab !== activeTab) {
+            setActiveTab(tab);
+            setVisited(prev => new Set([...prev, tab]));
+        }
+    }, [activeTab, searchParams]);
+
     // ========== Data Fetching ==========
 
     const fetchConnections = useCallback(async () => {
@@ -125,6 +133,20 @@ export default function DatabaseTestingPage() {
         fetchSpecs();
         fetchRuns();
     }, [projectId, fetchConnections, fetchSpecs, fetchRuns]);
+
+    useEffect(() => {
+        function handleDatabaseRefresh(event: Event) {
+            const detail = (event as CustomEvent).detail || {};
+            if (detail.projectId && detail.projectId !== projectId) return;
+            fetchConnections();
+            fetchSpecs();
+            fetchRuns();
+            if (detail.specName) handleTabChange('specs');
+            else if (detail.runId) handleTabChange('history');
+        }
+        window.addEventListener('quorvex:database-refresh', handleDatabaseRefresh);
+        return () => window.removeEventListener('quorvex:database-refresh', handleDatabaseRefresh);
+    }, [fetchConnections, fetchRuns, fetchSpecs, handleTabChange, projectId]);
 
     const workflowSteps = [
         {
@@ -289,6 +311,7 @@ export default function DatabaseTestingPage() {
                     projectId={projectId}
                     onSpecsSaved={fetchSpecs}
                     preferredConnectionId={preferredConnectionId}
+                    initialRunId={searchParams.get('runId') || undefined}
                 />
             )}
 
@@ -300,6 +323,7 @@ export default function DatabaseTestingPage() {
                     onRefreshSpecs={fetchSpecs}
                     onRefreshRuns={fetchRuns}
                     preferredConnectionId={preferredConnectionId}
+                    initialSpecName={searchParams.get('specName') || undefined}
                 />
             )}
 
@@ -308,6 +332,7 @@ export default function DatabaseTestingPage() {
                     runs={runs}
                     projectId={projectId}
                     onRefreshRuns={fetchRuns}
+                    initialRunId={searchParams.get('runId') || undefined}
                 />
             )}
 
