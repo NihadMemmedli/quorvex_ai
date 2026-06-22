@@ -32,6 +32,8 @@ REAL_BROWSER_EXECUTABLE_NAMES = {
 BROWSER_ACTION_TIMEOUT_ENV = "AGENT_BROWSER_ACTION_TIMEOUT_SECONDS"
 PLAYWRIGHT_MCP_ACTION_TIMEOUT_ENV = "PLAYWRIGHT_MCP_TIMEOUT_ACTION"
 DEFAULT_BROWSER_ACTION_TIMEOUT_SECONDS = 30.0
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSY_ENV_VALUES = {"0", "false", "no", "off"}
 
 
 def _parse_positive_float(value: Any, default: float) -> float:
@@ -152,20 +154,63 @@ def resolve_playwright_chromium_executable() -> Path | None:
     return sorted(existing, key=lambda path: path.parent.parent.name, reverse=True)[0]
 
 
-def is_vnc_runtime() -> bool:
+def _env_bool_value(value: Any) -> bool | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in _TRUTHY_ENV_VALUES:
+        return True
+    if normalized in _FALSY_ENV_VALUES:
+        return False
+    return None
+
+
+def _env_source(env: dict[str, str] | None = None) -> dict[str, str]:
+    return env if env is not None else os.environ
+
+
+def display_capable_vnc_enabled(env: dict[str, str] | None = None) -> bool:
+    """Return whether headed browser launches have a VNC display to render on."""
+    source = _env_source(env)
+    return _env_bool_value(source.get("VNC_ENABLED")) is True and bool(source.get("DISPLAY"))
+
+
+def requested_headless_from_env(env: dict[str, str] | None = None) -> bool | None:
+    """Return an explicit headless env override.
+
+    Either HEADLESS=false or PLAYWRIGHT_HEADLESS=false requests headed mode for
+    compatibility with existing CLI/runtime configuration.
+    """
+    source = _env_source(env)
+    saw_true = False
+    for key in ("HEADLESS", "PLAYWRIGHT_HEADLESS"):
+        if key in source:
+            parsed = _env_bool_value(source.get(key))
+            if parsed is False:
+                return False
+            if parsed is True:
+                saw_true = True
+    return True if saw_true else None
+
+
+def display_aware_headless(requested_headless: bool, env: dict[str, str] | None = None) -> bool:
+    """Force headless unless a headed request can actually render on VNC."""
+    return True if requested_headless is False and not display_capable_vnc_enabled(env) else requested_headless
+
+
+def is_vnc_runtime(env: dict[str, str] | None = None) -> bool:
     """Return whether this process is configured to render browsers on the VNC display."""
-    return (
-        os.environ.get("VNC_ENABLED", "").lower() == "true"
-        and os.environ.get("HEADLESS", "true").lower() == "false"
-        and bool(os.environ.get("DISPLAY"))
-    )
+    if not display_capable_vnc_enabled(env):
+        return False
+    explicit_headless = requested_headless_from_env(env)
+    return explicit_headless is None or explicit_headless is False
 
 
 def _is_truthy_env(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return _env_bool_value(value) is True
 
 
 def browser_live_worker_enabled() -> bool:
@@ -195,11 +240,19 @@ def resolve_vnc_ws_url() -> str | None:
     return None
 
 
-def should_run_headless() -> bool:
+def should_run_headless(env: dict[str, str] | None = None) -> bool:
     """Return whether MCP should launch Chromium headless for this process."""
-    if is_vnc_runtime():
+    explicit_headless = requested_headless_from_env(env)
+    if explicit_headless is not None:
+        return display_aware_headless(explicit_headless, env)
+    if display_capable_vnc_enabled(env):
         return False
-    return os.environ.get("HEADLESS", "true").lower() != "false"
+    return True
+
+
+def playwright_headed_cli_args(env: dict[str, str] | None = None) -> str:
+    """Return Playwright CLI flags for visible execution when a display exists."""
+    return "" if should_run_headless(env) else " --headed --workers=1"
 
 
 def browser_runtime_status() -> dict[str, Any]:
@@ -400,7 +453,7 @@ def _browser_mcp_env(headless: bool | None = None) -> dict[str, str]:
         if value:
             env[key] = value
 
-    effective_headless = should_run_headless() if headless is None else headless
+    effective_headless = should_run_headless() if headless is None else display_aware_headless(headless)
     env["HEADLESS"] = "true" if effective_headless else "false"
     env["PLAYWRIGHT_HEADLESS"] = "true" if effective_headless else "false"
     timeout = browser_action_timeout_config()
@@ -701,22 +754,23 @@ def write_playwright_test_mcp_config(
     """
     mcp_output_dir = run_dir / "mcp-output"
     mcp_output_dir.mkdir(parents=True, exist_ok=True)
+    effective_headless = display_aware_headless(headless)
 
     if config_path.exists():
         prepared = prepare_run_playwright_config_content(
             config_path.read_text(),
             base_dir=Path.cwd(),
             run_dir=run_dir,
-            headless=headless,
+            headless=effective_headless,
             storage_state_path=storage_state_path,
         )
         config_path.write_text(prepared)
 
     args = ["playwright", "run-test-mcp-server", "-c", str(config_path)]
-    if headless:
+    if effective_headless:
         args.append("--headless")
 
-    mcp_env = _browser_mcp_env(headless)
+    mcp_env = _browser_mcp_env(effective_headless)
     mcp_servers: dict[str, dict[str, Any]] = {
         server_name: {
             "command": "npx",

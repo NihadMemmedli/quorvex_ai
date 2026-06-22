@@ -21,17 +21,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from orchestrator.utils.generated_test_materializer import materialize_generated_test_for_run
-from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
+from orchestrator.utils.playwright_mcp import playwright_config_cli_arg, playwright_headed_cli_args
 from orchestrator.utils.string_utils import clean_extracted_url
 
 
 def playwright_headed_args() -> str:
     """Return Playwright CLI flags needed for VNC-visible execution."""
-    playwright_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "").lower()
-    generic_headless = os.environ.get("HEADLESS", "").lower()
-    if playwright_headless == "false" or generic_headless == "false":
-        return " --headed --workers=1"
-    return ""
+    return playwright_headed_cli_args()
 
 
 def run_command(

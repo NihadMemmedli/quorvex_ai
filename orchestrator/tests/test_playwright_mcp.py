@@ -348,6 +348,107 @@ def test_write_playwright_test_mcp_config_preserves_headless_mode(tmp_path, monk
     assert "PLAYWRIGHT_WORKERS" not in server["env"]
 
 
+def test_write_playwright_test_mcp_config_forces_headless_without_display(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import write_playwright_test_mcp_config
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("VNC_ENABLED", "true")
+    monkeypatch.setenv("HEADLESS", "false")
+    monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "false")
+
+    config_path = tmp_path / "playwright.config.ts"
+    config_path.write_text("export default {};\n")
+
+    runtime = write_playwright_test_mcp_config(
+        run_dir=tmp_path,
+        server_name="playwright-test",
+        config_path=config_path,
+        headless=False,
+    )
+
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    server = config["mcpServers"]["playwright-test"]
+    assert server["args"] == ["playwright", "run-test-mcp-server", "-c", str(config_path), "--headless"]
+    assert server["env"]["HEADLESS"] == "true"
+    assert server["env"]["PLAYWRIGHT_HEADLESS"] == "true"
+    assert "CI" not in server["env"]
+    assert "PLAYWRIGHT_WORKERS" not in server["env"]
+    assert runtime["mcp_args"] == server["args"]
+
+
+def test_write_playwright_mcp_config_defaults_to_headless_without_env(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
+
+    monkeypatch.setenv("PLAYWRIGHT_MCP_COMMAND", "playwright-mcp")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ARGS", "--browser chromium")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("VNC_ENABLED", raising=False)
+    monkeypatch.delenv("HEADLESS", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_HEADLESS", raising=False)
+
+    runtime = write_playwright_mcp_config(
+        run_dir=tmp_path,
+        server_name="playwright-test",
+        project_root=tmp_path,
+    )
+
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    server = config["mcpServers"]["playwright-test"]
+    assert "--headless" in server["args"]
+    assert server["env"]["HEADLESS"] == "true"
+    assert server["env"]["PLAYWRIGHT_HEADLESS"] == "true"
+    assert runtime["mcp_env"]["HEADLESS"] == "true"
+
+
+def test_write_playwright_mcp_config_ignores_stale_headed_env_without_display(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
+
+    monkeypatch.setenv("PLAYWRIGHT_MCP_COMMAND", "playwright-mcp")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ARGS", "--browser chromium")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("VNC_ENABLED", "true")
+    monkeypatch.setenv("HEADLESS", "false")
+    monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "false")
+
+    runtime = write_playwright_mcp_config(
+        run_dir=tmp_path,
+        server_name="playwright-test",
+        project_root=tmp_path,
+    )
+
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    server = config["mcpServers"]["playwright-test"]
+    assert "--headless" in server["args"]
+    assert server["env"]["HEADLESS"] == "true"
+    assert server["env"]["PLAYWRIGHT_HEADLESS"] == "true"
+    assert "CI" not in server["env"]
+    assert "PLAYWRIGHT_WORKERS" not in server["env"]
+    assert runtime["mcp_env"]["HEADLESS"] == "true"
+
+
+def test_playwright_headed_cli_args_requires_display_capable_vnc():
+    from orchestrator.utils.playwright_mcp import playwright_headed_cli_args
+
+    assert playwright_headed_cli_args({"HEADLESS": "false"}) == ""
+    assert (
+        playwright_headed_cli_args(
+            {"VNC_ENABLED": "true", "DISPLAY": ":99", "PLAYWRIGHT_HEADLESS": "false"}
+        )
+        == " --headed --workers=1"
+    )
+
+
+def test_playwright_headed_cli_args_treats_either_headless_false_as_headed():
+    from orchestrator.utils.playwright_mcp import playwright_headed_cli_args
+
+    assert (
+        playwright_headed_cli_args(
+            {"VNC_ENABLED": "true", "DISPLAY": ":99", "HEADLESS": "true", "PLAYWRIGHT_HEADLESS": "false"}
+        )
+        == " --headed --workers=1"
+    )
+
+
 def test_write_playwright_mcp_config_includes_storage_state_and_isolated(tmp_path, monkeypatch):
     from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
 

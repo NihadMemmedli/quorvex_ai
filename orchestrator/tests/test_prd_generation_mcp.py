@@ -450,9 +450,11 @@ def test_import_requirements_route_is_registered_and_imports(monkeypatch, tmp_pa
         assert requirement.title == "Users can pay by card."
 
 
-def test_prd_generation_workspace_uses_headed_mcp_for_live_browser_runs(tmp_path):
+def test_prd_generation_workspace_uses_headed_mcp_for_live_browser_runs(tmp_path, monkeypatch):
     base_dir = tmp_path / "project"
     run_dir = tmp_path / "runs" / "prd-generation-123"
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setenv("VNC_ENABLED", "true")
     base_dir.mkdir()
     (base_dir / "playwright.config.ts").write_text(
         """
