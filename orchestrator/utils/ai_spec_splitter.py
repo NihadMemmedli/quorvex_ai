@@ -112,6 +112,49 @@ class AISpecSplitter:
         runtime_env_vars: dict[str, str] | None,
     ) -> str:
         """Call Claude Code subscription runtime via AgentRunner and return response text."""
+
+        def _extract_valid_test_case_json(value: Any) -> str | None:
+            if value is None:
+                return None
+
+            text = str(value).strip()
+            if not text:
+                return None
+
+            def _valid_payload(data: Any) -> str | None:
+                if not isinstance(data, dict):
+                    return None
+                test_cases = data.get("test_cases")
+                if not isinstance(test_cases, list) or not test_cases:
+                    return None
+                return json.dumps(data)
+
+            try:
+                from utils.json_utils import extract_json_from_markdown
+            except ImportError:
+                from orchestrator.utils.json_utils import extract_json_from_markdown
+
+            try:
+                payload = _valid_payload(extract_json_from_markdown(text))
+                if payload:
+                    return payload
+            except (ValueError, json.JSONDecodeError):
+                pass
+
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(text):
+                if char not in "{[":
+                    continue
+                try:
+                    data, _end = decoder.raw_decode(text[index:])
+                except json.JSONDecodeError:
+                    continue
+                payload = _valid_payload(data)
+                if payload:
+                    return payload
+
+            return None
+
         runner = AgentRunner(
             allowed_tools=[],
             log_tools=False,
@@ -120,7 +163,24 @@ class AISpecSplitter:
         )
         result = cls._run_agent_sync(runner.run(prompt))
         if not result or not getattr(result, "success", False):
-            error = getattr(result, "error", None) or "Claude Code returned no successful result"
+            recoverable_failed_result = result and not (
+                getattr(result, "timed_out", False)
+                or getattr(result, "cancelled", False)
+                or getattr(result, "error_type", None)
+            )
+            if recoverable_failed_result:
+                for value in (
+                    getattr(result, "output", None),
+                    getattr(result, "error", None),
+                ):
+                    payload = _extract_valid_test_case_json(value)
+                    if payload:
+                        return payload
+
+            error = (
+                getattr(result, "error", None)
+                or "Claude Code returned no successful result"
+            )
             raise RuntimeError(
                 "Claude Code extraction failed. Check the Claude Code CLI, subscription login, "
                 f"and OAuth token configuration in Settings. Details: {error}"

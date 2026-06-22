@@ -66,6 +66,17 @@ class FakeAgentResult:
     }"""
 
 
+class FakeFailedAgentResult:
+    success = False
+    output = ""
+
+    def __init__(self, error, *, error_type=None, timed_out=False, cancelled=False):
+        self.error = error
+        self.error_type = error_type
+        self.timed_out = timed_out
+        self.cancelled = cancelled
+
+
 def test_claude_code_mode_extracts_test_cases_via_agent_runner(monkeypatch):
     captured = {}
 
@@ -97,7 +108,10 @@ def test_claude_code_mode_extracts_test_cases_via_agent_runner(monkeypatch):
     assert captured["kwargs"]["allowed_tools"] == []
     assert captured["kwargs"]["log_tools"] is False
     assert captured["kwargs"]["model_tier"] == "standard"
-    assert captured["kwargs"]["env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-1234567890"
+    assert (
+        captured["kwargs"]["env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"]
+        == "oauth-token-1234567890"
+    )
     assert "Return ONLY the JSON" in captured["prompt"]
     assert cases[0]["id"] == "TC-001"
     assert cases[0]["_url"] == "https://example.test/checkout"
@@ -127,6 +141,122 @@ def test_claude_code_mode_extracts_smart_groups_via_agent_runner(monkeypatch):
             "description": "Checkout flow tests",
         }
     ]
+
+
+def test_claude_code_failed_result_with_test_case_json_error_extracts_cases(
+    monkeypatch,
+):
+    class FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, _prompt):
+            return FakeFailedAgentResult(
+                f"CLI returned error:\n```json\n{FakeAgentResult.output}\n```"
+            )
+
+    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+
+    cases = AISpecSplitter.extract_test_cases(
+        SPEC_CONTENT,
+        "checkout.md",
+        runtime_env_vars=_claude_code_env(),
+    )
+
+    assert cases[0]["id"] == "TC-001"
+    assert cases[0]["name"] == "Complete checkout"
+    assert cases[0]["_url"] == "https://example.test/checkout"
+
+
+def test_claude_code_failed_result_with_test_case_json_error_extracts_groups(
+    monkeypatch,
+):
+    class FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, _prompt):
+            return FakeFailedAgentResult(
+                f"CLI returned error:\n```json\n{FakeAgentResult.output}\n```"
+            )
+
+    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+
+    cases, groups = AISpecSplitter.extract_and_group(
+        SPEC_CONTENT,
+        "checkout.md",
+        runtime_env_vars=_claude_code_env(),
+    )
+
+    assert cases[0]["id"] == "TC-001"
+    assert groups == [
+        {
+            "name": "Checkout",
+            "test_ids": ["TC-001"],
+            "description": "Checkout flow tests",
+        }
+    ]
+
+
+def test_claude_code_failed_result_without_test_case_json_still_raises(monkeypatch):
+    class FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, _prompt):
+            return FakeFailedAgentResult(
+                'CLI returned error: {"message": "quota exceeded"}'
+            )
+
+    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        AISpecSplitter.extract_test_cases(
+            SPEC_CONTENT,
+            "checkout.md",
+            runtime_env_vars=_claude_code_env(),
+        )
+
+    message = str(exc_info.value)
+    assert "Claude Code extraction failed" in message
+    assert "quota exceeded" in message
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"timed_out": True}, "timed out"),
+        ({"cancelled": True}, "cancelled"),
+        ({"error_type": "claude_code_auth_required"}, "auth required"),
+    ],
+)
+def test_claude_code_classified_failed_result_with_json_still_raises(
+    monkeypatch,
+    kwargs,
+    expected,
+):
+    class FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, _prompt):
+            return FakeFailedAgentResult(
+                f"CLI {expected}:\n```json\n{FakeAgentResult.output}\n```",
+                **kwargs,
+            )
+
+    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        AISpecSplitter.extract_test_cases(
+            SPEC_CONTENT,
+            "checkout.md",
+            runtime_env_vars=_claude_code_env(),
+        )
+
+    message = str(exc_info.value)
+    assert "Claude Code extraction failed" in message
+    assert expected in message
 
 
 def test_missing_direct_key_and_claude_token_raises_actionable_message():
