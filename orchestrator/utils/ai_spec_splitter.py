@@ -6,8 +6,10 @@ any heading structure, ID format, and layout. Falls back gracefully when
 API credentials are unavailable.
 """
 
+import asyncio
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from load_env import setup_claude_env
 from orchestrator.services.ai_runtime_config import resolve_runtime_ai_selection
+from orchestrator.utils.agent_runner import AgentRunner
 
 setup_claude_env()
 
@@ -26,6 +29,103 @@ class AISpecSplitter:
     Uses the configured Anthropic-compatible API endpoint with the configured
     model. This is a simple "markdown in, JSON out" task - no MCP tools needed.
     """
+
+    CLAUDE_CODE_SUBSCRIPTION = "claude_code_subscription"
+    DIRECT_API_KEY_ENV_KEYS = (
+        "QUORVEX_LLM_API_KEY",
+        "QUORVEX_LLM_API_KEYS",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKENS",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    MISSING_CREDENTIALS_MESSAGE = (
+        "AI extraction requires either an API key credential or Claude Code subscription auth. "
+        "Save an API key in Settings/.env, or configure/generate a Claude Code OAuth token in Settings."
+    )
+
+    @staticmethod
+    def _env_value(env_vars: dict[str, str] | None, key: str) -> str:
+        if env_vars is not None and key in env_vars:
+            return env_vars.get(key, "")
+        import os
+
+        return os.environ.get(key, "")
+
+    @classmethod
+    def _has_explicit_direct_api_key(
+        cls,
+        env_vars: dict[str, str] | None,
+        fallback_api_key: str,
+    ) -> bool:
+        if env_vars is not None and any(key in env_vars for key in cls.DIRECT_API_KEY_ENV_KEYS):
+            for key in cls.DIRECT_API_KEY_ENV_KEYS:
+                value = env_vars.get(key, "")
+                if key in {"QUORVEX_LLM_API_KEYS", "ANTHROPIC_AUTH_TOKENS"}:
+                    value = value.split(",", 1)[0].strip()
+                if value:
+                    return True
+            return False
+        return bool(fallback_api_key)
+
+    @classmethod
+    def _is_claude_code_subscription_mode(
+        cls,
+        runtime_env_vars: dict[str, str] | None,
+        *,
+        direct_api_key: str,
+    ) -> bool:
+        auth_mode = cls._env_value(runtime_env_vars, "QUORVEX_LLM_AUTH_MODE").strip().lower()
+        provider = cls._env_value(runtime_env_vars, "QUORVEX_LLM_PROVIDER").strip().lower()
+        oauth_token = cls._env_value(runtime_env_vars, "CLAUDE_CODE_OAUTH_TOKEN").strip()
+        if auth_mode == cls.CLAUDE_CODE_SUBSCRIPTION or provider == cls.CLAUDE_CODE_SUBSCRIPTION:
+            return True
+        return bool(oauth_token and not direct_api_key)
+
+    @staticmethod
+    def _run_agent_sync(coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result: dict[str, Any] = {}
+
+        def _target() -> None:
+            try:
+                result["value"] = asyncio.run(coro)
+            except BaseException as exc:  # pragma: no cover - re-raised below
+                result["error"] = exc
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    @classmethod
+    def _call_claude_code_model(
+        cls,
+        prompt: str,
+        runtime_env_vars: dict[str, str] | None,
+    ) -> str:
+        """Call Claude Code subscription runtime via AgentRunner and return response text."""
+        runner = AgentRunner(
+            allowed_tools=[],
+            log_tools=False,
+            model_tier="standard",
+            env_vars=runtime_env_vars,
+        )
+        result = cls._run_agent_sync(runner.run(prompt))
+        if not result or not getattr(result, "success", False):
+            error = getattr(result, "error", None) or "Claude Code returned no successful result"
+            raise RuntimeError(
+                "Claude Code extraction failed. Check the Claude Code CLI, subscription login, "
+                f"and OAuth token configuration in Settings. Details: {error}"
+            )
+        return getattr(result, "output", "") or ""
 
     @staticmethod
     def _call_text_model(api_key: str, base_url: str, model: str, prompt: str) -> str:
@@ -94,11 +194,16 @@ class AISpecSplitter:
         api_key = selection.api_key
         base_url = selection.base_url
         model = selection.model
+        direct_api_key = api_key if cls._has_explicit_direct_api_key(runtime_env_vars, api_key) else ""
 
-        if not api_key:
-            raise RuntimeError("QUORVEX_LLM_API_KEY not set. Configure AI credentials in .env file or settings.")
-        if not base_url:
-            raise RuntimeError("QUORVEX_LLM_BASE_URL not set. Configure AI credentials in .env file or settings.")
+        use_claude_code = cls._is_claude_code_subscription_mode(runtime_env_vars, direct_api_key=direct_api_key)
+        if use_claude_code and not cls._env_value(runtime_env_vars, "CLAUDE_CODE_OAUTH_TOKEN").strip():
+            raise RuntimeError(cls.MISSING_CREDENTIALS_MESSAGE)
+        if not use_claude_code:
+            if not api_key:
+                raise RuntimeError(cls.MISSING_CREDENTIALS_MESSAGE)
+            if not base_url:
+                raise RuntimeError("QUORVEX_LLM_BASE_URL not set. Configure AI credentials in .env file or settings.")
 
         prompt = cls._build_extraction_prompt(content, spec_name)
 
@@ -106,7 +211,10 @@ class AISpecSplitter:
         sys.stdout.flush()
 
         try:
-            result_text = cls._call_text_model(api_key, base_url, model, prompt)
+            if use_claude_code:
+                result_text = cls._call_claude_code_model(prompt, runtime_env_vars)
+            else:
+                result_text = cls._call_text_model(api_key, base_url, model, prompt)
         except RuntimeError:
             raise  # Re-raise our own errors
         except Exception as e:
@@ -150,11 +258,16 @@ class AISpecSplitter:
         api_key = selection.api_key
         base_url = selection.base_url
         model = selection.model
+        direct_api_key = api_key if cls._has_explicit_direct_api_key(runtime_env_vars, api_key) else ""
 
-        if not api_key:
-            raise RuntimeError("QUORVEX_LLM_API_KEY not set. Configure AI credentials in .env file or settings.")
-        if not base_url:
-            raise RuntimeError("QUORVEX_LLM_BASE_URL not set. Configure AI credentials in .env file or settings.")
+        use_claude_code = cls._is_claude_code_subscription_mode(runtime_env_vars, direct_api_key=direct_api_key)
+        if use_claude_code and not cls._env_value(runtime_env_vars, "CLAUDE_CODE_OAUTH_TOKEN").strip():
+            raise RuntimeError(cls.MISSING_CREDENTIALS_MESSAGE)
+        if not use_claude_code:
+            if not api_key:
+                raise RuntimeError(cls.MISSING_CREDENTIALS_MESSAGE)
+            if not base_url:
+                raise RuntimeError("QUORVEX_LLM_BASE_URL not set. Configure AI credentials in .env file or settings.")
 
         prompt = cls._build_grouping_prompt(content, spec_name)
 
@@ -162,7 +275,10 @@ class AISpecSplitter:
         sys.stdout.flush()
 
         try:
-            result_text = cls._call_text_model(api_key, base_url, model, prompt)
+            if use_claude_code:
+                result_text = cls._call_claude_code_model(prompt, runtime_env_vars)
+            else:
+                result_text = cls._call_text_model(api_key, base_url, model, prompt)
         except RuntimeError:
             raise
         except Exception as e:

@@ -388,6 +388,8 @@ class BaseAgent:
         self.owner_type: str | None = None
         self.owner_id: str | None = None
         self.owner_label: str | None = None
+        self.model: str | None = None
+        self.model_tier: str | None = None
         self.last_agent_diagnostics: dict[str, Any] = {}
 
     def _agent_memory_project_id(self) -> str | None:
@@ -494,7 +496,7 @@ class BaseAgent:
         return "bypassPermissions"
 
     def _runtime_model_tier(self) -> str:
-        tier = os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
+        tier = getattr(self, "model_tier", None) or os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
         return tier if tier in RUNTIME_MODEL_TIERS else "tool_deep"
 
     def _refresh_runtime_settings(self, *, model_tier: str | None = None):
@@ -509,7 +511,7 @@ class BaseAgent:
         tier = model_tier if model_tier in RUNTIME_MODEL_TIERS else self._runtime_model_tier()
         env_vars = settings_api.runtime_env_vars()
         settings_api._apply_runtime_settings(env_vars)
-        selection = apply_runtime_env_aliases(env_vars, tier=tier)
+        selection = apply_runtime_env_aliases(env_vars, tier=tier, model_override=getattr(self, "model", None))
         os.environ["QUORVEX_RUN_MODEL_TIER"] = tier
         return env_vars, selection
 
@@ -532,6 +534,8 @@ class BaseAgent:
 
         cwd = self.agent_cwd or os.getcwd()
         mcp_path = Path(cwd) / ".mcp.json"
+        _, selection = self._refresh_runtime_settings()
+        self._preflight_claude_sdk_auth(selection)
 
         logger.info("[DIRECT CLI] Starting direct CLI invocation (thread pool)")
         logger.info(f"[DIRECT CLI]   Working directory: {cwd}")
@@ -564,6 +568,9 @@ class BaseAgent:
             "--",
             full_prompt,
         ]
+        if selection.model:
+            insert_at = cli_args.index("--permission-mode")
+            cli_args[insert_at:insert_at] = ["--model", selection.model]
         if tools is not None:
             insert_at = cli_args.index("--permission-mode")
             cli_args[insert_at:insert_at] = ["--tools", ",".join(tools) if isinstance(tools, list) else "default"]
@@ -814,6 +821,7 @@ echo "done" > {done_file}
                 "QUORVEX_LLM_PROVIDER",
                 "QUORVEX_AGENT_RUNTIME",
                 "QUORVEX_ASSISTANT_RUNTIME",
+                "QUORVEX_LLM_AUTH_MODE",
                 "QUORVEX_LLM_API_KEY",
                 "QUORVEX_LLM_API_KEYS",
                 "QUORVEX_LLM_BASE_URL",
@@ -847,16 +855,29 @@ echo "done" > {done_file}
             for key, value in {
                 "QUORVEX_AGENT_RUNTIME": selection.runtime,
                 "QUORVEX_LLM_PROVIDER": selection.provider,
-                "QUORVEX_LLM_API_KEY": selection.api_key,
                 "QUORVEX_LLM_BASE_URL": selection.base_url,
-                "ANTHROPIC_AUTH_TOKEN": selection.api_key,
-                "ANTHROPIC_API_KEY": selection.api_key,
                 "ANTHROPIC_BASE_URL": selection.base_url,
                 "ANTHROPIC_MODEL": selection.model,
+                "QUORVEX_LLM_ACTIVE_MODEL": selection.model,
+                "QUORVEX_LLM_ACTIVE_TIER": selection.tier,
                 "QUORVEX_RUN_MODEL_TIER": selection.tier,
             }.items():
                 if value:
                     env_vars[key] = value
+            if selection.api_key:
+                env_vars["QUORVEX_LLM_API_KEY"] = selection.api_key
+                env_vars["ANTHROPIC_AUTH_TOKEN"] = selection.api_key
+                env_vars["ANTHROPIC_API_KEY"] = selection.api_key
+            if env_vars.get("QUORVEX_LLM_AUTH_MODE") == "claude_code_subscription":
+                for key in (
+                    "QUORVEX_LLM_API_KEY",
+                    "QUORVEX_LLM_API_KEYS",
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "ANTHROPIC_AUTH_TOKENS",
+                    "ANTHROPIC_API_KEY",
+                    "OPENAI_API_KEY",
+                ):
+                    env_vars.pop(key, None)
             tool_config = self._resolved_tool_config()
 
             # Enqueue the task
@@ -1029,6 +1050,7 @@ echo "done" > {done_file}
                     tools=tool_config.get("tools"),
                     setting_sources=["project"],
                     permission_mode=self._resolved_permission_mode(),
+                    model=selection.model,
                     stderr=stderr_callback,  # Capture CLI stderr
                 )
 

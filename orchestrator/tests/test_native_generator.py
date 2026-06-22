@@ -18,6 +18,13 @@ from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 from orchestrator.workflows.native_generator import NativeGenerator
 
 
+def test_generator_uses_run_local_tests_dir_when_cwd_is_set(tmp_path):
+    generator = NativeGenerator()
+    generator.cwd = tmp_path
+
+    assert generator._resolve_tests_dir() == tmp_path / "tests" / "generated"
+
+
 def test_generator_prompt_accepts_memory_run_id(monkeypatch):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
     generator = object.__new__(NativeGenerator)

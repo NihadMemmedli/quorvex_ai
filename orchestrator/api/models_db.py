@@ -146,6 +146,11 @@ class AgentRun(SQLModel, table=True):
     config_json: str = "{}"
     result_json: str | None = None
     progress_json: str | None = None
+    state_json: str | None = None
+    contract_status: str | None = Field(default=None, index=True)
+    finalization_status: str | None = Field(default=None, index=True)
+    reporter_status: str | None = Field(default=None, index=True)
+    verifier_status: str | None = Field(default=None, index=True)
     agent_task_id: str | None = None
     temporal_workflow_id: str | None = None
     temporal_run_id: str | None = None
@@ -153,6 +158,7 @@ class AgentRun(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
     # Project isolation
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
@@ -194,6 +200,19 @@ class AgentRun(SQLModel, table=True):
     def progress(self, value: dict):
         self.progress_json = json.dumps(value)
 
+    @property
+    def state(self) -> dict | None:
+        if not self.state_json:
+            return None
+        try:
+            return json.loads(self.state_json)
+        except json.JSONDecodeError:
+            return None
+
+    @state.setter
+    def state(self, value: dict):
+        self.state_json = json.dumps(value)
+
 
 class AgentRunEvent(SQLModel, table=True):
     """Durable observable event emitted by agent runs."""
@@ -205,6 +224,7 @@ class AgentRunEvent(SQLModel, table=True):
         Index("ix_agent_run_events_agent_task", "agent_task_id"),
         Index("ix_agent_run_events_temporal_workflow", "temporal_workflow_id"),
         UniqueConstraint("run_id", "sequence", name="uq_agent_run_events_run_sequence"),
+        UniqueConstraint("run_id", "idempotency_key", name="uq_agent_run_events_run_idempotency_key"),
         {"extend_existing": True},
     )
 
@@ -219,6 +239,7 @@ class AgentRunEvent(SQLModel, table=True):
     level: str = Field(default="info", index=True)
     message: str = Field(sa_column=Column(Text))
     payload_json: str = Field(default="{}", sa_column=Column(Text))
+    idempotency_key: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
     @property
@@ -232,6 +253,252 @@ class AgentRunEvent(SQLModel, table=True):
     @payload.setter
     def payload(self, value: dict[str, Any]):
         self.payload_json = json.dumps(value)
+
+
+class AgentRunTaskContract(SQLModel, table=True):
+    """Immutable task contract captured for a native AgentRun."""
+
+    __tablename__ = "agent_run_task_contracts"
+    __table_args__ = (
+        Index("ix_agent_run_task_contracts_project_created", "project_id", "created_at"),
+        UniqueConstraint("run_id", name="uq_agent_run_task_contracts_run_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    objective: str = Field(sa_column=Column(Text))
+    scope: str | None = Field(default=None, sa_column=Column(Text))
+    success_criteria_json: str = Field(default="[]", sa_column=Column(Text))
+    allowed_tools_json: str = Field(default="[]", sa_column=Column(Text))
+    output_expectations_json: str = Field(default="{}", sa_column=Column(Text))
+    source: str = Field(default="runtime")
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def success_criteria(self) -> list[Any]:
+        try:
+            value = json.loads(self.success_criteria_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @success_criteria.setter
+    def success_criteria(self, value: list[Any]):
+        self.success_criteria_json = json.dumps(value)
+
+    @property
+    def allowed_tools(self) -> list[Any]:
+        try:
+            value = json.loads(self.allowed_tools_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @allowed_tools.setter
+    def allowed_tools(self, value: list[Any]):
+        self.allowed_tools_json = json.dumps(value)
+
+    @property
+    def output_expectations(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.output_expectations_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @output_expectations.setter
+    def output_expectations(self, value: dict[str, Any]):
+        self.output_expectations_json = json.dumps(value)
+
+
+class AgentRunWorkItem(SQLModel, table=True):
+    """Run-scoped unit of work for future team-style decomposition."""
+
+    __tablename__ = "agent_run_work_items"
+    __table_args__ = (
+        Index("ix_agent_run_work_items_run_status", "run_id", "status"),
+        Index("ix_agent_run_work_items_project_created", "project_id", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    parent_work_item_id: str | None = Field(default=None, foreign_key="agent_run_work_items.id", index=True)
+    title: str = Field(sa_column=Column(Text))
+    description: str | None = Field(default=None, sa_column=Column(Text))
+    status: str = Field(default="open", index=True)
+    priority: int = 0
+    owner: str | None = None
+    metadata_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    completed_at: datetime | None = None
+
+    @property
+    def extra_metadata(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @extra_metadata.setter
+    def extra_metadata(self, value: dict[str, Any]):
+        self.metadata_json = json.dumps(value)
+
+
+class AgentRunNote(SQLModel, table=True):
+    """Durable live note emitted while an AgentRun is executing or finalizing."""
+
+    __tablename__ = "agent_run_notes"
+    __table_args__ = (
+        Index("ix_agent_run_notes_run_sequence", "run_id", "sequence"),
+        Index("ix_agent_run_notes_project_created", "project_id", "created_at"),
+        Index("ix_agent_run_notes_type_level", "note_type", "level"),
+        UniqueConstraint("run_id", "sequence", name="uq_agent_run_notes_run_sequence"),
+        UniqueConstraint("run_id", "idempotency_key", name="uq_agent_run_notes_run_idempotency_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    agent_task_id: str | None = Field(default=None, index=True)
+    sequence: int = Field(index=True)
+    note_type: str = Field(default="observation", index=True)
+    level: str = Field(default="info", index=True)
+    title: str = Field(sa_column=Column(Text))
+    body: str | None = Field(default=None, sa_column=Column(Text))
+    source: str | None = Field(default=None, index=True)
+    tags_json: str = Field(default="[]", sa_column=Column(Text))
+    confidence: float | None = None
+    url: str | None = None
+    tool_name: str | None = Field(default=None, index=True)
+    artifact_path: str | None = None
+    actionable: bool = Field(default=False, index=True)
+    related_event_sequence: int | None = None
+    related_trace_span_id: str | None = Field(default=None, foreign_key="agent_trace_spans.id")
+    idempotency_key: str | None = Field(default=None, index=True)
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def tags(self) -> list[str]:
+        try:
+            value = json.loads(self.tags_json or "[]")
+            return [str(item) for item in value] if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @tags.setter
+    def tags(self, value: list[str]):
+        self.tags_json = json.dumps(value)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+
+class AgentRunEvidence(SQLModel, table=True):
+    """Native reference to artifacts, tools, browser observations, or traces."""
+
+    __tablename__ = "agent_run_evidence"
+    __table_args__ = (
+        Index("ix_agent_run_evidence_run_kind", "run_id", "evidence_type"),
+        Index("ix_agent_run_evidence_project_created", "project_id", "created_at"),
+        UniqueConstraint("run_id", "stable_key", name="uq_agent_run_evidence_run_stable_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    note_id: str | None = Field(default=None, foreign_key="agent_run_notes.id", index=True)
+    evidence_type: str = Field(default="artifact", index=True)
+    title: str | None = Field(default=None, sa_column=Column(Text))
+    summary: str | None = Field(default=None, sa_column=Column(Text))
+    stable_key: str = Field(index=True)
+    artifact_path: str | None = None
+    url: str | None = None
+    tool_name: str | None = Field(default=None, index=True)
+    trace_span_id: str | None = Field(default=None, foreign_key="agent_trace_spans.id")
+    event_sequence: int | None = None
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+
+class AgentRunFinding(SQLModel, table=True):
+    """Native finding candidate or verified finding linked to notes/evidence."""
+
+    __tablename__ = "agent_run_findings"
+    __table_args__ = (
+        Index("ix_agent_run_findings_run_status", "run_id", "status"),
+        Index("ix_agent_run_findings_project_created", "project_id", "created_at"),
+        UniqueConstraint("run_id", "stable_key", name="uq_agent_run_findings_run_stable_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    note_id: str | None = Field(default=None, foreign_key="agent_run_notes.id", index=True)
+    stable_key: str = Field(index=True)
+    title: str = Field(sa_column=Column(Text))
+    description: str | None = Field(default=None, sa_column=Column(Text))
+    severity: str | None = Field(default=None, index=True)
+    confidence: str | None = Field(default=None, index=True)
+    status: str = Field(default="candidate", index=True)
+    evidence_ids_json: str = Field(default="[]", sa_column=Column(Text))
+    diagnostics_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def evidence_ids(self) -> list[str]:
+        try:
+            value = json.loads(self.evidence_ids_json or "[]")
+            return [str(item) for item in value] if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @evidence_ids.setter
+    def evidence_ids(self, value: list[str]):
+        self.evidence_ids_json = json.dumps(value)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.diagnostics_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @diagnostics.setter
+    def diagnostics(self, value: dict[str, Any]):
+        self.diagnostics_json = json.dumps(value)
 
 
 class AgentTraceSnapshot(SQLModel, table=True):

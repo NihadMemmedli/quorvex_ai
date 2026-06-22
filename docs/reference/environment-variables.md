@@ -17,6 +17,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `OPENAI_API_KEY` | -- | Provider-specific | OpenAI API key used for memory embeddings and when `QUORVEX_ACTIVE_LLM_PROVIDER=openai` |
 | `ANTHROPIC_API_KEY` | -- | Provider-specific | Anthropic API key used when `QUORVEX_ACTIVE_LLM_PROVIDER=anthropic`; app containers receive Anthropic-compatible aliases from the active runtime key |
 | `QUORVEX_LLM_PROVIDER` | `anthropic_compatible` | No | Canonical runtime provider kind for app-owned AI calls |
+| `QUORVEX_LLM_AUTH_MODE` | `api_key` | No | Runtime credential mode. Use `api_key` for provider keys or `claude_code_subscription` for Claude Code OAuth-backed Anthropic-compatible runs |
 | `QUORVEX_LLM_BASE_URL` | `https://api.z.ai/api/anthropic` | No | Canonical runtime provider endpoint; mirrored to `ANTHROPIC_BASE_URL` for SDK compatibility |
 | `QUORVEX_LLM_API_KEY` | -- | Runtime | Canonical single runtime API key mapped from the active provider key during deployment; legacy Anthropic key names remain supported |
 | `QUORVEX_LLM_API_KEYS` | -- | No | Canonical comma-separated runtime key pool for rotation |
@@ -29,6 +30,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `ANTHROPIC_AUTH_TOKEN` | copied from `QUORVEX_LLM_API_KEY` when configured | No | Legacy Anthropic-compatible SDK token alias |
 | `ANTHROPIC_AUTH_TOKENS` | copied from `QUORVEX_LLM_API_KEYS` when configured | No | Legacy comma-separated token pool alias |
 | `CLAUDE_CODE_OAUTH_TOKEN` | -- | No | Claude Code OAuth token for Docker/dev setups that authenticate through Claude Code |
+| `CLAUDE_CODE_CLI_PATH` | auto-detected from `PATH` or bundled install | No | Optional Claude Code CLI path used by Settings to generate a Claude Code OAuth token |
 | `ANTHROPIC_BASE_URL` | copied from `QUORVEX_LLM_BASE_URL` | No | Legacy SDK endpoint alias |
 | `ANTHROPIC_MODEL` | selected runtime tier model | No | Legacy active model alias used by SDK clients |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `glm-5.1` | No | Claude Code / Agent SDK Opus alias target |
@@ -100,7 +102,12 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `AGENT_TIMEOUT_SECONDS` | `1800` | No | Default timeout for all agents (30 minutes) |
-| `AGENT_BROWSER_TOOL_TIMEOUT_SECONDS` | `120` | No | Timeout for browser tool calls made by agent workers |
+| `AGENT_BROWSER_ACTION_TIMEOUT_SECONDS` | `30` | No | Inner Playwright browser action timeout used by MCP click/fill/action calls |
+| `AGENT_BROWSER_TOOL_TIMEOUT_SECONDS` | `45` | No | Outer Quorvex watchdog for browser tool calls made by agent workers |
+| `AGENT_UNPRODUCTIVE_STREAM_MIN_MESSAGES` | `500` | No | Agent stream health threshold for message count before an output-less stream is flagged as unproductive |
+| `AGENT_UNPRODUCTIVE_STREAM_SECONDS` | `180` | No | Agent stream health threshold for elapsed seconds before an output-less stream is flagged as unproductive |
+| `AUTOPILOT_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS` | `180` | No | Timeout for AutoPilot runtime preflight checks |
+| `NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS` | `90` | No | Browser tool timeout override used by native planner agent runs |
 | `EXPLORATION_TIMEOUT_SECONDS` | `1800` | No | Timeout for the exploration agent |
 | `PRD_TIMEOUT_SECONDS` | `600` | No | Timeout for PRD processing jobs |
 | `PLANNER_TIMEOUT_SECONDS` | `1800` | No | Timeout for the planner agent |
@@ -118,7 +125,14 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 |----------|---------|----------|-------------|
 | `QUORVEX_AGENT_RUNTIME` | `claude_sdk` | No | Default runtime for agent runs. Supported value: `claude_sdk` |
 | `QUORVEX_ASSISTANT_RUNTIME` | `QUORVEX_AGENT_RUNTIME` | No | Optional dashboard assistant runtime override. Supported values: `claude_sdk`, `openai` |
+| `QUORVEX_AGENT_RUN_ID` | -- | Runtime-scoped | Agent run ID injected into subprocesses and MCP note tooling for durable note/event attribution |
+| `QUORVEX_AUTH_PREFLIGHT_STORAGE_STATE` | -- | Runtime-scoped | Browser auth storage-state path used by auth preflight probes |
+| `QUORVEX_AUTH_PREFLIGHT_TARGET_URL` | -- | Runtime-scoped | Target URL used by browser auth preflight probes |
+| `QUORVEX_AUTH_PREFLIGHT_TIMEOUT_MS` | `15000` | Runtime-scoped | Millisecond timeout for browser auth preflight probes |
+| `QUORVEX_NATIVE_AGENT_RUN_TYPES` | -- | No | Optional comma-separated agent types that should use native durable run state shadow writes |
+| `QUORVEX_TEST_DATA_FILE` | -- | Runtime-scoped | Resolved test-data fixture file path injected into generator/healer subprocesses |
 | `AGENT_COST_LOG` | -- | No | Optional JSONL path for appending agent usage and cost records during native pipeline runs |
+| `AGENT_RUNNER_CONSOLE_VERBOSITY` | `summary` | No | Console logging verbosity for agent-runner tool activity. Supported values include compact/default output and tool-level output |
 | `AGENT_PROVIDER_RETRY_ATTEMPTS` | `6` | No | Retry attempts for provider API key rotation |
 | `AGENT_PROVIDER_RETRY_BASE_SECONDS` | `2` | No | Base delay for provider retry backoff |
 | `AGENT_PROVIDER_RETRY_MAX_SECONDS` | `30` | No | Maximum delay for provider retry backoff |
@@ -140,6 +154,8 @@ Settings can manage backend agent runtime and dashboard assistant runtime separa
 | `AUTONOMOUS_VALIDATION_BASE_URL` | proposal target URL, then local web app | No | Base URL used when validating autonomous test proposals |
 | `AUTONOMOUS_VALIDATION_DEV_SERVER_COMMAND` | `npm --prefix web run dev -- --hostname <host> --port <port>` | No | Command used to start a local validation server when the autonomous validator targets localhost and the app is not already reachable |
 | `AUTONOMOUS_VALIDATION_SERVER_READY_SECONDS` | `45` | No | Seconds to wait for the autonomous validation dev server to become reachable |
+| `AUTOPILOT_DENY_BROWSER_CLOSE` | `true` | No | Prevent AutoPilot reliability prompts from closing debug browsers during evidence collection |
+| `AUTOPILOT_SKIP_PLANNING_FROM_EVIDENCE` | `1` | No | Allow AutoPilot to skip redundant planning when sufficient evidence already exists |
 
 ## Concurrency Limits
 
@@ -328,6 +344,9 @@ These variables are read by source code paths but are usually set by Docker Comp
 | `PLAYWRIGHT_MCP_PACKAGE` | derived | No | Package spec for Playwright MCP |
 | `PRD_TIMEOUT_MINUTES` | feature default | No | Minute-based timeout accepted by legacy PRD paths |
 | `PROJECT_ID` | `default` | No | Project scope passed into subprocesses |
+| `PYTHONPATH` | runtime environment | No | Python module search path used by subprocesses and CI jobs |
+| `QUEUE_ENV_EXISTING` | test fixture | No | Queue environment restoration fixture used by reliability tests |
+| `QUEUE_ENV_NEW` | test fixture | No | Queue environment creation fixture used by reliability tests |
 | `PR_NUMBER` | CI context | No | Pull request number used by PR advisor tooling |
 | `QUORVEX_API_TOKEN` | -- | No | API token used by external Quorvex automation |
 | `QUORVEX_API_URL` | -- | No | API URL used by external Quorvex automation |

@@ -3,11 +3,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from orchestrator.utils import agent_runner as _agent_runner_module
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner, ToolCall
 from orchestrator.workflows.native_planner import NativePlanner, SpecGenerationError
 
@@ -91,6 +93,7 @@ def _planner(tmp_path: Path) -> NativePlanner:
     planner.cwd = planner.session_dir
     planner.env_vars = {}
     planner.last_draft_script_path = None
+    planner.last_runtime_preflight = None
     planner.specs_dir = tmp_path / "specs"
     planner.specs_dir.mkdir(parents=True)
     planner.session_dir.mkdir(parents=True)
@@ -105,6 +108,38 @@ def _planner(tmp_path: Path) -> NativePlanner:
         )
     )
     return planner
+
+
+def test_native_planner_disables_memory_when_env_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+
+    def fail_memory(**_kwargs):
+        raise AssertionError("memory should not initialize")
+
+    import orchestrator.workflows.native_planner as native_planner_module
+
+    monkeypatch.setattr(native_planner_module, "get_memory_manager", fail_memory)
+
+    planner = NativePlanner(project_id="project", session_dir=tmp_path)
+
+    assert planner.memory_manager is None
+
+
+def test_native_planner_degrades_when_memory_initialization_fails(tmp_path, monkeypatch):
+    class MemoryPanic(BaseException):
+        pass
+
+    def fail_memory(**_kwargs):
+        raise MemoryPanic("chroma panic")
+
+    import orchestrator.workflows.native_planner as native_planner_module
+
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+    monkeypatch.setattr(native_planner_module, "get_memory_manager", fail_memory)
+
+    planner = NativePlanner(project_id="project", session_dir=tmp_path)
+
+    assert planner.memory_manager is None
 
 
 def _write_mcp_config(tmp_path: Path, server_name: str = "playwright-test") -> None:
@@ -187,6 +222,102 @@ def _live_save_result(plan: str) -> AgentResult:
     )
 
 
+@pytest.mark.asyncio
+async def test_live_native_planner_does_not_attach_permission_guard_by_default(
+    tmp_path, monkeypatch
+):
+    import orchestrator.workflows.native_planner as native_planner_module
+
+    planner = _planner(tmp_path)
+    captured: dict[str, Any] = {}
+
+    class FakeRunner:
+        def diagnostics(self, *, agent_class=None, prompt=None):
+            return {
+                "agent_class": agent_class,
+                "execution_path": "queue",
+                "provider": "anthropic_compatible",
+                "runtime": "claude_sdk",
+                "tier": "tool_deep",
+                "model": "test-model",
+                "api_key_set": True,
+                "api_key_env": "QUORVEX_LLM_API_KEY",
+                "claude_code_oauth_token_set": False,
+                "auth_mode": "api_key",
+                "queue": {"queue_eligible": True},
+                "runtime_env_keys": ["QUORVEX_LLM_API_KEY"],
+            }
+
+        async def run(self, prompt):
+            result = AgentResult(success=True, output=VALID_PLAN)
+            return result
+
+    def fake_create_agent_runner(source, **kwargs):
+        captured.update(kwargs)
+        return FakeRunner()
+
+    monkeypatch.setattr(
+        native_planner_module,
+        "create_agent_runner",
+        fake_create_agent_runner,
+    )
+
+    result = await planner._query_planner_agent(
+        "plan checkout",
+        target_url="https://example.test/checkout",
+    )
+
+    assert result.success is True
+    assert captured["requires_live_browser"] is True
+    assert "tool_permission_guard" not in captured
+    assert result.runtime_diagnostics["execution_path"] == "queue"
+
+
+def test_native_and_custom_queue_runners_receive_same_masked_runtime_env_keys(
+    tmp_path, monkeypatch
+):
+    from orchestrator.services.agent_prompt_runtime import create_agent_runner
+
+    runtime_env = {
+        "QUORVEX_LLM_PROVIDER": "anthropic_compatible",
+        "QUORVEX_LLM_AUTH_MODE": "api_key",
+        "QUORVEX_LLM_API_KEY": "secret-runtime-key",
+        "QUORVEX_LLM_TOOL_DEEP_MODEL": "tool-model",
+        "CLAUDE_CODE_OAUTH_TOKEN": "secret-oauth-token",
+    }
+    planner = _planner(tmp_path)
+    planner.env_vars = dict(runtime_env)
+    custom_runner = AgentRunner(
+        allowed_tools=["Read"],
+        tools=["Read"],
+        model_tier="tool_deep",
+        env_vars=dict(runtime_env),
+    )
+    native_runner = create_agent_runner(
+        planner,
+        timeout_seconds=30,
+        tool_config={"allowed_tools": ["Read"], "tools": ["Read"]},
+        log_tools=False,
+        memory_agent_type="NativePlanner",
+        memory_source_type="prd",
+        memory_stage="native_planner",
+        inject_memory=False,
+        model_tier="tool_deep",
+        session_dir=planner.session_dir,
+    )
+
+    custom_keys = set((custom_runner._collect_api_env_vars() or {}).keys())
+    native_keys = set((native_runner._collect_api_env_vars() or {}).keys())
+    native_diagnostics = native_runner.diagnostics(prompt="plan")
+
+    assert native_keys == custom_keys
+    assert "QUORVEX_LLM_API_KEY" in native_keys
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in native_keys
+    assert native_diagnostics["runtime_env_keys"] == sorted(native_keys)
+    assert "secret-runtime-key" not in json.dumps(native_diagnostics)
+    assert "secret-oauth-token" not in json.dumps(native_diagnostics)
+
+
 def test_planner_max_attempts_defaults_to_five_and_caps_env(monkeypatch):
     monkeypatch.delenv("PLANNER_MAX_ATTEMPTS", raising=False)
     assert NativePlanner._planner_max_attempts() == 5
@@ -199,6 +330,296 @@ def test_planner_max_attempts_defaults_to_five_and_caps_env(monkeypatch):
 
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "bad")
     assert NativePlanner._planner_max_attempts() == 5
+
+
+async def _run_agent_with_events(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[Any],
+) -> AgentResult:
+    async def fake_query(*args, **kwargs):
+        for event in events:
+            yield event
+
+    monkeypatch.setattr(_agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(_agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(_agent_runner_module, "AGENT_QUEUE_AVAILABLE", False)
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        log_tools=False,
+        inject_memory=False,
+        capture_memory=False,
+    )
+    return await runner.run("plan checkout")
+
+
+class TextBlock:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class ToolUseBlock:
+    def __init__(self, id: str, name: str, input: dict):
+        self.id = id
+        self.name = name
+        self.input = input
+
+
+class ToolResultBlock:
+    def __init__(self, tool_use_id: str, content: str, is_error: bool | None = None):
+        self.tool_use_id = tool_use_id
+        self.content = content
+        self.is_error = is_error
+
+
+class AssistantMessage:
+    def __init__(self, content: list[Any]):
+        self.content = content
+
+
+class UserMessage:
+    def __init__(self, content: list[Any]):
+        self.content = content
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_parses_assistant_text_message(monkeypatch):
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "done"}]},
+            }
+        ],
+    )
+
+    assert result.success is True
+    assert result.output == "done"
+    assert result.messages_received == 1
+    assert result.text_blocks_received == 1
+    assert result.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_parses_sdk_block_objects_without_type_attributes(monkeypatch):
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            AssistantMessage(
+                [
+                    TextBlock("opening page"),
+                    ToolUseBlock(
+                        "toolu_snapshot",
+                        "mcp__playwright-test__browser_snapshot",
+                        {},
+                    ),
+                ]
+            ),
+            UserMessage([ToolResultBlock("toolu_snapshot", "snapshot captured")]),
+            AssistantMessage([TextBlock("done")]),
+        ],
+    )
+
+    assert result.success is True
+    assert result.output == "opening page\ndone"
+    assert result.messages_received == 3
+    assert result.text_blocks_received == 2
+    assert [call.name for call in result.tool_calls] == [
+        "mcp__playwright-test__browser_snapshot"
+    ]
+    assert result.tool_calls[0].result_preview == "snapshot captured"
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_parses_sdk_stream_event_text_delta(monkeypatch):
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "partial text"},
+                },
+            }
+        ],
+    )
+
+    assert result.success is True
+    assert result.output == "partial text"
+    assert result.messages_received == 1
+    assert result.text_blocks_received == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_parses_top_level_sdk_text_delta(monkeypatch):
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "top-level text"},
+            }
+        ],
+    )
+
+    assert result.success is True
+    assert result.output == "top-level text"
+    assert result.text_blocks_received == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_parses_sdk_stream_event_tool_lifecycle(monkeypatch):
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__playwright-test__browser_snapshot",
+                        "input": {"fullPage": True},
+                    },
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": "snapshot captured",
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "done"},
+                },
+            },
+        ],
+    )
+
+    assert result.success is True
+    assert result.output == "done"
+    assert result.messages_received == 3
+    assert result.text_blocks_received == 1
+    assert [call.name for call in result.tool_calls] == ["mcp__playwright-test__browser_snapshot"]
+    assert result.tool_calls[0].input == {"fullPage": True}
+    assert result.tool_calls[0].result_preview == "snapshot captured"
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_reconstructs_streamed_tool_input(monkeypatch):
+    payload = json.dumps({"content": VALID_PLAN, "fileName": "checkout.md"})
+    split_at = payload.index(VALID_PLAN[:10])
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_save",
+                    "name": "mcp__playwright-test__planner_save_plan",
+                    "input": {},
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": payload[:split_at],
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": payload[split_at:],
+                },
+            },
+            {"type": "content_block_stop", "index": 1},
+        ],
+    )
+
+    assert result.success is True
+    assert [call.name for call in result.tool_calls] == [
+        "mcp__playwright-test__planner_save_plan"
+    ]
+    assert result.tool_calls[0].duration_ms is None
+    assert result.tool_calls[0].input == {
+        "content": VALID_PLAN,
+        "fileName": "checkout.md",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_treats_tool_activity_without_text_as_productive(
+    monkeypatch,
+):
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "stream_event",
+                "stream_event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_snapshot",
+                        "name": "mcp__playwright-test__browser_snapshot",
+                        "input": {},
+                    },
+                },
+            }
+        ],
+    )
+
+    assert result.success is True
+    assert result.output == ""
+    assert result.tool_calls[0].name == "mcp__playwright-test__browser_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_pending_planner_save_plan_can_supply_plan_content(monkeypatch):
+    payload = json.dumps({"content": VALID_PLAN})
+    result = await _run_agent_with_events(
+        monkeypatch,
+        [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_save",
+                    "name": "mcp__playwright-test__planner_save_plan",
+                    "input": {},
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": payload},
+            },
+            {"type": "content_block_stop", "index": 0},
+        ],
+    )
+
+    assert NativePlanner._extract_plan_content(result) == VALID_PLAN
 
 
 @pytest.mark.asyncio
@@ -226,6 +647,8 @@ async def test_query_live_planner_uses_restricted_tool_config(tmp_path, monkeypa
     assert "mcp__playwright-test__generator_write_test" in captured["allowed_tools"]
     assert "mcp__playwright-test__test_run" in captured["allowed_tools"]
     assert "mcp__playwright-test__browser_snapshot" in captured["tools"]
+    assert "mcp__playwright-test__browser_handle_dialog" in captured["allowed_tools"]
+    assert "mcp__playwright-test__browser_handle_dialog" in captured["tools"]
     assert "mcp__playwright-test__browser_run_code" not in captured["allowed_tools"]
     assert "mcp__playwright-test__browser_evaluate" not in captured["tools"]
     assert "mcp__playwright-test__browser_close" not in captured["allowed_tools"]
@@ -410,6 +833,99 @@ async def test_valid_saved_plan_recovered_from_session_artifact(tmp_path, monkey
 
     assert path == planner.specs_dir / "prd-project" / "checkout.md"
     assert path.read_text() == VALID_PLAN
+
+
+@pytest.mark.asyncio
+async def test_valid_save_plan_payload_used_before_recursive_artifact_scan(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    noisy_artifact = planner.session_dir / "planner-output.md"
+    noisy_artifact.write_text("# Checkout Summary\n\nNot a structured plan.")
+    _patch_agent(
+        monkeypatch,
+        planner,
+        AgentResult(
+            success=True,
+            output="",
+            tool_calls=[
+                ToolCall(
+                    name="mcp__playwright-test__planner_save_plan",
+                    timestamp=datetime.now(),
+                    input={"content": VALID_PLAN},
+                )
+            ],
+        ),
+    )
+
+    path = await planner.generate_spec_for_feature("Checkout", "prd-project")
+
+    assert path.read_text().strip() == VALID_PLAN.strip()
+
+
+def test_saved_plan_recovery_ignores_claude_prompt_agent_and_skill_markdown(tmp_path):
+    planner = _planner(tmp_path)
+    expected = planner.specs_dir / "prd-project" / "checkout.md"
+    for relative in (
+        ".claude/agents/planner-output.md",
+        ".claude/prompts/test-plan.md",
+        ".claude/skills/browser/test-plan.md",
+    ):
+        artifact = planner.session_dir / relative
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(VALID_PLAN)
+
+    assert planner._recover_saved_plan(expected) is None
+    assert not expected.exists()
+
+
+def test_saved_plan_recovery_uses_conservative_artifact_names(tmp_path):
+    planner = _planner(tmp_path)
+    expected = planner.specs_dir / "prd-project" / "checkout.md"
+    artifact = planner.session_dir / "generated-plan.md"
+    artifact.write_text(VALID_PLAN)
+
+    assert planner._recover_saved_plan(expected) is None
+    assert not expected.exists()
+
+
+def test_invalid_likely_saved_plan_logs_single_warning(tmp_path, caplog):
+    planner = _planner(tmp_path)
+    expected = planner.specs_dir / "prd-project" / "checkout.md"
+    artifact = planner.session_dir / "planner-output.md"
+    artifact.write_text("# Checkout Summary\n\nNot a structured plan.")
+
+    caplog.set_level("WARNING")
+
+    assert planner._recover_saved_plan(expected) is None
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Ignoring invalid saved plan" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert str(artifact) in warnings[0].getMessage()
+
+
+def test_expected_saved_plan_is_not_revalidated_after_direct_recovery(tmp_path, caplog):
+    planner = _planner(tmp_path)
+    expected = planner.specs_dir / "prd-project" / "checkout.md"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("# Checkout Summary\n\nNot a structured plan.")
+
+    caplog.set_level("WARNING")
+
+    assert planner._recover_expected_saved_plan(expected) is None
+    assert planner._recover_saved_plan(expected, include_expected=False) is None
+
+    expected_warnings = [
+        record
+        for record in caplog.records
+        if "Ignoring invalid saved plan" in record.getMessage()
+        and str(expected) in record.getMessage()
+    ]
+    assert len(expected_warnings) == 1
 
 
 @pytest.mark.asyncio
@@ -970,6 +1486,46 @@ def test_live_plan_rejected_when_saved_before_snapshot_after_navigation():
     )
 
 
+def test_failed_browser_navigate_does_not_satisfy_live_plan_sequence():
+    result = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_navigate",
+                timestamp=datetime.now(),
+                input={"url": "https://example.test/checkout"},
+                success=False,
+                error="Browser tool timed out: browser_navigate",
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_snapshot",
+                timestamp=datetime.now(),
+                input={},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        NativePlanner._validate_live_plan_tool_sequence(
+            result, "https://example.test/checkout"
+        )
+
+    assert exc_info.value.diagnostics["phase"] == "browser_session_failed"
+    assert exc_info.value.diagnostics["requires_fresh_browser"] is True
+    assert exc_info.value.diagnostics["target_navigation_observed"] is False
+
+
 def test_finalize_live_plan_writes_planner_draft_script(tmp_path):
     planner = _planner(tmp_path)
     plan_path = tmp_path / "run" / "checkout.md"
@@ -1233,7 +1789,7 @@ async def test_live_plan_rejects_valid_saved_plan_with_sequence_warning_by_defau
 
 
 @pytest.mark.asyncio
-async def test_live_plan_sequence_warning_override_accepts_valid_saved_plan(
+async def test_live_plan_sequence_warning_override_rejects_missing_navigation(
     tmp_path, monkeypatch
 ):
     planner = _planner(tmp_path)
@@ -1257,6 +1813,36 @@ async def test_live_plan_sequence_warning_override_accepts_valid_saved_plan(
     )
     prompts = _patch_agent_sequence(monkeypatch, planner, [result])
 
+    with pytest.raises(SpecGenerationError, match="saved a plan before navigating"):
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert len(prompts) == 1
+    assert not (planner.session_dir / "planner_live_sequence_warning.json").exists()
+    assert not (tmp_path / "run" / "checkout.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_live_plan_accepts_valid_saved_plan_with_later_generator_setup_missing_seed(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    monkeypatch.delenv("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING", raising=False)
+    result = _live_save_result(VALID_PLAN)
+    result.tool_calls.append(
+        ToolCall(
+            name="mcp__playwright-test__generator_setup_page",
+            timestamp=datetime.now(),
+            input={},
+        )
+    )
+    prompts = _patch_agent_sequence(monkeypatch, planner, [result])
+
     path = await planner.generate_spec_from_flow_context(
         flow_title="Checkout",
         flow_context="Checkout flow",
@@ -1270,8 +1856,84 @@ async def test_live_plan_sequence_warning_override_accepts_valid_saved_plan(
     assert path.read_text().strip() == VALID_PLAN.strip()
     assert len(prompts) == 1
     assert warning["valid_saved_plan_observed"] is True
-    assert warning["target_navigation_observed"] is False
-    assert warning["generated_plan_path"] == str(path)
+    assert warning["failure_category"] == "planner_live_sequence_setup_seed_warning"
+    assert warning["setup_tool"] == "generator_setup_page"
+    assert warning["setup_seed_file_omitted"] is True
+    assert warning["target_navigation_observed"] is True
+
+
+@pytest.mark.asyncio
+async def test_live_plan_rejects_missing_target_navigation_despite_generator_seed_warning(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    monkeypatch.delenv("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING", raising=False)
+    result = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__generator_setup_page",
+                timestamp=datetime.now(),
+                input={},
+            ),
+        ],
+    )
+    _patch_agent_sequence(monkeypatch, planner, [result])
+
+    with pytest.raises(SpecGenerationError, match="before navigating"):
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert not (planner.session_dir / "planner_live_sequence_warning.json").exists()
+    assert not (tmp_path / "run" / "checkout.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_live_plan_rejects_explicitly_wrong_generator_setup_seed(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    monkeypatch.delenv("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING", raising=False)
+    result = _live_save_result(VALID_PLAN)
+    result.tool_calls.append(
+        ToolCall(
+            name="mcp__playwright-test__generator_setup_page",
+            timestamp=datetime.now(),
+            input={"seedFile": "tests/not-seed.spec.ts"},
+        )
+    )
+    _patch_agent_sequence(monkeypatch, planner, [result])
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert "invalid setup seed file" in str(exc_info.value)
+    assert exc_info.value.diagnostics["failure_category"] == "native_setup_seed_file_error"
+    assert exc_info.value.diagnostics["received_seed_file"] == "tests/not-seed.spec.ts"
+    assert not (planner.session_dir / "planner_live_sequence_warning.json").exists()
+    assert not (tmp_path / "run" / "checkout.md").exists()
 
 
 @pytest.mark.asyncio
@@ -1330,6 +1992,83 @@ async def test_live_plan_retries_after_contract_failure_without_valid_saved_plan
     assert len(prompts) == 2
     assert "previous attempt" in prompts[1].lower()
     assert "planner_setup_page" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_live_plan_with_valid_markdown_but_no_tool_calls_retries_as_contract_failure(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    first = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        messages_received=2,
+        text_blocks_received=1,
+        tool_calls=[],
+    )
+    prompts = _patch_agent_sequence(
+        monkeypatch,
+        planner,
+        [first, _live_save_result(VALID_PLAN)],
+    )
+
+    path = await planner.generate_spec_from_flow_context(
+        flow_title="Checkout",
+        flow_context="Checkout flow",
+        target_url="https://example.test/checkout",
+        output_dir=tmp_path / "run",
+    )
+
+    assert path.read_text().strip() == VALID_PLAN.strip()
+    assert len(prompts) == 2
+    assert "no real recorded MCP tool calls" in prompts[1]
+    assert "do not write `<function_calls>`" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_live_plan_fake_text_tool_call_markup_has_specific_diagnostics(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
+    _patch_agent(
+        monkeypatch,
+        planner,
+        AgentResult(
+            success=True,
+            output=(
+                '<function_calls><invoke name="planner_setup_page">'
+                '{"seedFile":"tests/seed.spec.ts"}</invoke></function_calls>\n'
+                + VALID_PLAN
+            ),
+            messages_received=3,
+            text_blocks_received=2,
+            tool_calls=[],
+        ),
+    )
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert (
+        exc_info.value.diagnostics["failure_category"]
+        == "planner_text_tool_call_contract_failure"
+    )
+    assert exc_info.value.diagnostics["tool_calls"] == 0
+    assert exc_info.value.diagnostics["fake_tool_call_markup_observed"] is True
+    assert exc_info.value.diagnostics["expected_target_url"] == "https://example.test/checkout"
+    assert exc_info.value.diagnostics["missing_sequence_steps"] == [
+        "planner_setup_page",
+        "browser_navigate",
+        "browser_snapshot",
+    ]
+    assert "<function_calls>" in exc_info.value.diagnostics["output_preview"]
 
 
 @pytest.mark.asyncio
@@ -1428,7 +2167,49 @@ async def test_zero_output_live_planner_process_error_is_runtime_failed(
 
 
 @pytest.mark.asyncio
-async def test_unproductive_stream_recovers_saved_planner_artifact(tmp_path, monkeypatch):
+async def test_live_planner_auth_failure_preempts_zero_tool_contract_and_does_not_retry(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "3")
+    prompts = _patch_agent_sequence(
+        monkeypatch,
+        planner,
+        [
+            AgentResult(
+                success=False,
+                output="Not logged in · Please run /login",
+                error="Not logged in · Please run /login",
+                error_type="claude_code_auth_required",
+                messages_received=1,
+                text_blocks_received=1,
+                tool_calls=[],
+            )
+        ],
+    )
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert len(prompts) == 1
+    assert "Claude Code authentication failed" in str(exc_info.value)
+    assert (
+        exc_info.value.diagnostics["failure_category"]
+        == "claude_code_auth_required"
+    )
+    assert "OAuth token" in exc_info.value.diagnostics["next_action"]
+    assert "planner_live_tool_call_contract_failure" not in str(exc_info.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_unproductive_stream_with_no_tool_calls_rejects_saved_planner_artifact(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "1")
     output_path = tmp_path / "run" / "checkout.md"
@@ -1447,16 +2228,20 @@ async def test_unproductive_stream_recovers_saved_planner_artifact(tmp_path, mon
         ),
     )
 
-    result = await planner._run_planner_with_retry(
-        subject_type="flow",
-        subject_name="Checkout",
-        prompt="plan checkout",
-        target_url="https://example.test/checkout",
-        expected_output_path=output_path,
-    )
+    with pytest.raises(SpecGenerationError) as exc_info:
+        await planner._run_planner_with_retry(
+            subject_type="flow",
+            subject_name="Checkout",
+            prompt="plan checkout",
+            target_url="https://example.test/checkout",
+            expected_output_path=output_path,
+        )
 
-    assert result == output_path
-    assert output_path.read_text() == VALID_PLAN
+    assert (
+        exc_info.value.diagnostics["failure_category"]
+        == "planner_live_tool_call_contract_failure"
+    )
+    assert output_path.exists()
 
 
 @pytest.mark.asyncio
@@ -1498,3 +2283,59 @@ async def test_unproductive_stream_retries_once_with_fresh_session(tmp_path, mon
 
     assert result == output_path
     assert retry_runtime == [(None, False), (None, False)]
+
+
+@pytest.mark.asyncio
+async def test_browser_timeout_retry_abandons_claude_session_and_starts_fresh(tmp_path, monkeypatch):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    output_path = tmp_path / "run" / "checkout.md"
+    retry_runtime: list[tuple[str | None, bool, str]] = []
+
+    async def fake_query(prompt: str, target_url: str | None = None) -> AgentResult:
+        retry_runtime.append(
+            (
+                getattr(planner, "_planner_retry_session_id", None),
+                bool(getattr(planner, "_planner_retry_continue_conversation", False)),
+                prompt,
+            )
+        )
+        if len(retry_runtime) == 1:
+            return AgentResult(
+                success=False,
+                output="",
+                error="Browser tool timed out: mcp__playwright-test__browser_navigate",
+                error_type="browser_tool_timeout",
+                tool_calls=[
+                    ToolCall(
+                        name="mcp__playwright-test__planner_setup_page",
+                        timestamp=datetime.now(),
+                        input={"seedFile": "tests/seed.spec.ts"},
+                    ),
+                    ToolCall(
+                        name="mcp__playwright-test__browser_navigate",
+                        timestamp=datetime.now(),
+                        input={"url": "https://example.test/checkout"},
+                        success=False,
+                        error="Browser tool timed out: mcp__playwright-test__browser_navigate",
+                    ),
+                ],
+                session_id="failed-browser-session",
+            )
+        return _live_save_result(VALID_PLAN)
+
+    monkeypatch.setattr(planner, "_query_planner_agent", fake_query)
+
+    result = await planner._run_planner_with_retry(
+        subject_type="flow",
+        subject_name="Checkout",
+        prompt="plan checkout",
+        target_url="https://example.test/checkout",
+        expected_output_path=output_path,
+    )
+
+    assert result == output_path
+    assert retry_runtime[0][0:2] == (None, False)
+    assert retry_runtime[1][0:2] == (None, False)
+    assert "previous browser session was abandoned" in retry_runtime[1][2].lower()
+    assert "do not use `browser_resume`" in retry_runtime[1][2].lower()

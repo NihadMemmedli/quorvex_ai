@@ -31,6 +31,7 @@ _MAX_SPEC_CACHE_SIZE = 5000
 _code_path_cache: dict[str, tuple] = {}
 _CODE_PATH_CACHE_TTL = 300
 _MAX_CODE_CACHE_SIZE = 200
+_SAFE_TEST_STEM_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def sync_spec_metadata_from_file(session: Session, metadata_file: Path = METADATA_FILE) -> int:
@@ -145,22 +146,91 @@ class SpecCache:
 _spec_cache = SpecCache(SPECS_DIR)
 
 
-def get_try_code_path_fast(spec_path: Path) -> str | None:
+def get_try_code_path_fast(spec_path: Path, base_dir: Path = BASE_DIR) -> str | None:
     """Fast code path check - only checks filename patterns without scanning runs."""
     stem = spec_path.stem
+    if not _SAFE_TEST_STEM_RE.fullmatch(stem):
+        return None
     stem_slug = stem.replace("_", "-")
-    candidates = [
-        f"tests/generated/{stem}.spec.ts",
-        f"tests/generated/{stem_slug}.spec.ts",
-        f"tests/templates/{stem}.spec.ts",
-        f"tests/templates/{stem_slug}.spec.ts",
-        f"tests/{stem}.spec.ts",
-    ]
+    candidate_names = {f"{stem}.spec.ts", f"{stem_slug}.spec.ts"}
+    roots = (
+        base_dir / "tests" / "generated",
+        base_dir / "tests" / "templates",
+        base_dir / "tests",
+    )
 
-    for c in candidates:
-        if (BASE_DIR / c).exists():
-            return str(BASE_DIR / c)
+    base_dir = base_dir.resolve(strict=False)
+    for root in roots:
+        root = root.resolve(strict=False)
+        try:
+            root.relative_to(base_dir)
+        except ValueError:
+            continue
+        if not root.is_dir():
+            continue
+        for candidate in root.glob("*.spec.ts"):
+            if candidate.name in candidate_names:
+                return str(candidate)
     return None
+
+
+def _generated_test_key(test_path: Path) -> str | None:
+    if not test_path.name.endswith(".spec.ts"):
+        return None
+    return test_path.name[: -len(".spec.ts")]
+
+
+def _index_generated_tests_under(index: dict[str, str], root: Path) -> None:
+    if not root.exists():
+        return
+    try:
+        test_files = sorted(root.rglob("*.spec.ts"))
+    except OSError as e:
+        logger.debug(f"Cannot scan generated test root {root}: {e}")
+        return
+
+    for test_path in test_files:
+        key = _generated_test_key(test_path)
+        if key:
+            index.setdefault(key, str(test_path))
+
+
+def build_generated_test_index(base_dir: Path = BASE_DIR, runs_dir: Path = RUNS_DIR) -> dict[str, str]:
+    """Build a request-scoped index of generated Playwright tests by filename stem."""
+    index: dict[str, str] = {}
+
+    _index_generated_tests_under(index, base_dir / "tests" / "generated")
+    _index_generated_tests_under(index, base_dir / "tests" / "templates")
+
+    if runs_dir.exists():
+        try:
+            run_dirs = sorted(
+                [d for d in runs_dir.iterdir() if d.is_dir()],
+                key=lambda x: os.path.getmtime(x),
+                reverse=True,
+            )
+        except OSError as e:
+            logger.debug(f"Cannot scan runs directory {runs_dir}: {e}")
+            run_dirs = []
+
+        for run_dir in run_dirs:
+            _index_generated_tests_under(index, run_dir / "tests" / "generated")
+
+    return index
+
+
+def resolve_generated_code_path(
+    spec_path: Path,
+    generated_test_index: dict[str, str],
+    base_dir: Path = BASE_DIR,
+) -> str | None:
+    """Resolve generated code for a spec using fast direct checks, then a request index."""
+    direct_path = get_try_code_path_fast(spec_path, base_dir=base_dir)
+    if direct_path:
+        return direct_path
+
+    stem = spec_path.stem
+    return generated_test_index.get(stem) or generated_test_index.get(stem.replace("_", "-"))
 
 
 def get_cached_spec_info(spec_path: Path) -> dict:

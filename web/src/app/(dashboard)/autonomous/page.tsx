@@ -295,6 +295,7 @@ interface AutonomousArtifactStatus {
     browser_active?: boolean;
     browser_last_tool?: string | null;
     live_view_available?: boolean;
+    suspected_browser_dialog_block?: boolean;
     runtime_message?: string | null;
     vnc_url?: string | null;
     display_diagnostics?: BrowserDisplayDiagnostics | null;
@@ -2602,6 +2603,7 @@ export default function AutonomousMissionsPage() {
                                 browserActivitySeen={Boolean(browserArtifacts?.browser_activity_seen || latestBrowserEvent)}
                                 browserActive={Boolean(browserArtifacts?.browser_active || latestBrowserEvent)}
                                 browserLastTool={browserArtifacts?.browser_last_tool || asCompactText(latestBrowserEvent?.payload?.short_name, '') || null}
+                                suspectedBrowserDialogBlock={browserArtifacts?.suspected_browser_dialog_block === true || latestBrowserEvent?.payload?.suspected_browser_dialog_block === true}
                             />
                         </div>
                     )}

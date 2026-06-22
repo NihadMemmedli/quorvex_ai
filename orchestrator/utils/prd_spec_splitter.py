@@ -500,6 +500,7 @@ Tests: {", ".join(test_ids)} ({len(test_cases)} test cases)
 
                 if url:
                     spec += "**Test Data**:\n"
+                    spec += f"Target URL: {url}\n"
                     spec += f"- URL: {url}\n\n"
 
                 if steps:
@@ -543,6 +544,7 @@ Tests: {", ".join(test_ids)} ({len(test_cases)} test cases)
 
                 if url:
                     spec += "**Test Data**:\n"
+                    spec += f"Target URL: {url}\n"
                     spec += f"- URL: {url}\n\n"
 
                 if steps:
@@ -637,6 +639,7 @@ Category: {test_case["category"]}
 
         if url:
             spec += f"""## Test Data
+Target URL: {url}
 - URL: {url}
 
 """
@@ -739,6 +742,7 @@ Category: {test_case["category"]}
 
         if url:
             spec += f"""## Test Data
+Target URL: {url}
 - URL: {url}
 
 """

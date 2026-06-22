@@ -87,6 +87,7 @@ from orchestrator.services.workflow_runner import (
     _execute_step,
     _raise_if_run_controlled,
     _render_templates_with_trace,
+    _wait_for_status,
     create_workflow_run_steps,
     duplicate_workflow_definition_record,
     handle_workflow_step_failure,
@@ -515,6 +516,116 @@ async def test_dispatch_steps_inherit_workflow_test_data_refs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_status_returns_completed_partial_agent_report(monkeypatch):
+    structured_report = {
+        "summary": "Checkout inspection found usable partial evidence.",
+        "findings": [{"title": "Missing validation", "severity": "high"}],
+        "test_ideas": [{"title": "Validate postal code feedback", "priority": "high"}],
+        "requirements": [{"title": "Show checkout validation"}],
+        "evidence": [{"title": "Checkout screenshot", "artifact_path": "/artifacts/run/live-step-001.png"}],
+    }
+
+    async def fake_read_external_status(_client, kind: str, external_id: str, _data: dict):
+        assert kind == "agent_run"
+        assert external_id == "agent-partial-1"
+        return {
+            "status": "completed_partial",
+            "summary": "Partial but usable",
+            "result": {
+                "summary": "Partial but usable",
+                "contract_status": "partial",
+                "structured_report": structured_report,
+                "artifacts": [{"name": "live-step-001.png"}],
+            },
+        }
+
+    monkeypatch.setattr("orchestrator.services.workflow_runner._read_external_status", fake_read_external_status)
+
+    result = await _wait_for_status(
+        {"source_step": "agent", "timeout_seconds": 10, "poll_seconds": 1},
+        {
+            "run": {},
+            "steps": {"agent": {"external_kind": "agent_run", "external_id": "agent-partial-1"}},
+        },
+    )
+
+    assert result["status"] == "completed_partial"
+    assert result["contract_status"] == "partial"
+    assert result["structured_report"] == structured_report
+    assert result["test_ideas"] == structured_report["test_ideas"]
+    assert result["findings"] == structured_report["findings"]
+    assert result["requirements"] == structured_report["requirements"]
+    assert result["evidence"] == structured_report["evidence"]
+
+
+@pytest.mark.asyncio
+async def test_custom_agent_workflow_partial_child_advances_to_review(monkeypatch):
+    _ensure_tables()
+    structured_report = {
+        "summary": "Partial report is ready for review.",
+        "findings": [{"title": "Cart total mismatch", "severity": "medium"}],
+        "test_ideas": [{"title": "Verify cart totals", "priority": "medium"}],
+        "requirements": [],
+        "evidence": [{"title": "Cart page inspected"}],
+    }
+    with Session(engine) as session:
+        definition = WorkflowDefinition(
+            name=f"Partial Child Workflow {uuid.uuid4()}",
+            description="Partial child run should still reach review.",
+        )
+        definition.steps = validate_workflow_steps(
+            [
+                {"key": "agent", "type": "start_custom_agent", "input": {"definition_id": "agent-def-1", "prompt": "Inspect cart"}},
+                {"key": "wait_agent", "type": "wait_for_status", "input": {"source_step": "agent", "timeout_seconds": 10, "poll_seconds": 1}},
+                {"key": "review", "type": "review_gate", "input": {"question": "Review agent output"}},
+            ]
+        )
+        session.add(definition)
+        session.commit()
+        session.refresh(definition)
+        run = WorkflowRun(definition_id=definition.id, project_id=definition.project_id, status="queued")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        create_workflow_run_steps(session, definition, run)
+        run_id = run.id
+
+    async def fake_post_json(path: str, body: dict, *, expected_kind: str | None = None):
+        assert path == "/api/agents/definitions/agent-def-1/runs"
+        assert expected_kind == "agent_run"
+        return {"status": "queued", "run_id": "agent-partial-workflow", "external_kind": "agent_run", "external_id": "agent-partial-workflow"}
+
+    async def fake_read_external_status(_client, kind: str, external_id: str, _data: dict):
+        assert kind == "agent_run"
+        assert external_id == "agent-partial-workflow"
+        return {
+            "status": "completed_partial",
+            "result": {
+                "summary": "Partial report is ready for review.",
+                "contract_status": "partial",
+                "structured_report": structured_report,
+            },
+        }
+
+    monkeypatch.setattr("orchestrator.services.workflow_runner._post_json", fake_post_json)
+    monkeypatch.setattr("orchestrator.services.workflow_runner._read_external_status", fake_read_external_status)
+
+    await run_workflow(run_id)
+
+    with Session(engine) as session:
+        run = session.get(WorkflowRun, run_id)
+        steps = session.exec(
+            select(WorkflowRunStep).where(WorkflowRunStep.run_id == run_id).order_by(WorkflowRunStep.step_order)
+        ).all()
+
+    assert run.status == "awaiting_input"
+    assert [step.status for step in steps] == ["completed", "completed", "awaiting_input"]
+    assert steps[1].output["status"] == "completed_partial"
+    assert steps[1].output["contract_status"] == "partial"
+    assert steps[1].output["test_ideas"] == structured_report["test_ideas"]
+
+
+@pytest.mark.asyncio
 async def test_materialize_agent_report_creates_requirements_from_structured_requirements(monkeypatch):
     calls: list[tuple[str, dict, str | None]] = []
 
@@ -703,6 +814,65 @@ async def test_execute_step_persists_rendered_input_and_context_snapshot():
     assert step.context_snapshot["steps"]["first"]["summary"] == "First summary"
     assert step.input_resolution[0]["reference"] == "steps.first.summary"
     assert step.output["contract_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_step_discards_stale_attempt_result(monkeypatch):
+    _ensure_tables()
+    with Session(engine) as session:
+        definition = _create_definition(session)
+        run = WorkflowRun(definition_id=definition.id, status="queued")
+        run.inputs = {"customer": "Acme"}
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        create_workflow_run_steps(session, definition, run)
+        step = session.exec(
+            select(WorkflowRunStep)
+            .where(WorkflowRunStep.run_id == run.id)
+            .order_by(WorkflowRunStep.step_order)
+        ).first()
+        run_id = run.id
+        step_id = step.id
+
+    async def fake_dispatch(*_args, **_kwargs):
+        with Session(engine) as session:
+            running_step = session.get(WorkflowRunStep, step_id)
+            snapshot = running_step.context_snapshot
+            running_step.status = "pending"
+            running_step.context_snapshot = {
+                **snapshot,
+                "_workflow_attempt": {"token": "newer-attempt"},
+            }
+            session.add(running_step)
+            session.commit()
+        return {
+            "contract_version": 1,
+            "status": "completed",
+            "artifacts": [],
+            "metrics": {},
+            "diagnostics": {},
+            "data": {},
+            "summary": "late result",
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.services.workflow_runner._dispatch_step",
+        fake_dispatch,
+    )
+
+    await _execute_step(run_id, step_id)
+
+    with Session(engine) as session:
+        step = session.get(WorkflowRunStep, step_id)
+        run = session.get(WorkflowRun, run_id)
+
+    assert step.status == "pending"
+    assert step.output is None
+    assert ((run.context or {}).get("steps") or {}) == {}
+    discarded = step.context_snapshot["_discarded_attempts"]
+    assert discarded[0]["reason"] == "stale_attempt_result"
+    assert discarded[0]["active_attempt_id"] == "newer-attempt"
 
 
 def test_workflow_interpolation_prefers_step_summary_and_truncates(monkeypatch):

@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import {
-    fetchAgentRun,
+    fetchAgentRunResolvingTestRun,
     fetchAgentRunEvents,
     fetchAgentRunTrace,
     fetchExploratorySpecs,
 } from './agents-api';
 import {
+    LIVE_AGENT_STATUSES,
     isAgentRunTerminal,
     type AgentRun,
     type AgentRunEvent,
@@ -32,6 +33,7 @@ export function useAgentRunDetail(options: {
     setSpecResult: Dispatch<SetStateAction<SpecResult | null>>;
     setTraceSearch: Dispatch<SetStateAction<string>>;
     setTraceSpanType: Dispatch<SetStateAction<string>>;
+    onResolvedRunId?: (runId: string) => void;
 }) {
     const {
         selectedRunId,
@@ -46,9 +48,15 @@ export function useAgentRunDetail(options: {
         setSpecResult,
         setTraceSearch,
         setTraceSpanType,
+        onResolvedRunId,
     } = options;
     const runDetailAbortRef = useRef<AbortController | null>(null);
     const traceRequestIdRef = useRef(0);
+    const activeRunPollInFlightRef = useRef(false);
+    const [runLoading, setRunLoading] = useState(false);
+    const [runError, setRunError] = useState<string | null>(null);
+    const activeRunId = activeRun?.id;
+    const activeRunStatus = activeRun?.status;
 
     const mergeAgentEvents = useCallback((incoming: AgentRunEvent[]) => {
         setAgentEvents(prev => mergeAgentEventLists(prev, incoming));
@@ -56,13 +64,13 @@ export function useAgentRunDetail(options: {
 
     const fetchAgentEvents = useCallback(async (id: string, afterSequence = 0) => {
         try {
-            const data = await fetchAgentRunEvents(id, { limit: 200, afterSequence });
+            const data = await fetchAgentRunEvents(id, { limit: 200, afterSequence, projectId });
             if (afterSequence > 0) mergeAgentEvents(data);
             else setAgentEvents(data);
         } catch (e) {
             console.error('Failed to fetch agent events', e);
         }
-    }, [mergeAgentEvents, setAgentEvents]);
+    }, [mergeAgentEvents, projectId, setAgentEvents]);
 
     const fetchAgentTrace = useCallback(async (id: string) => {
         const requestId = traceRequestIdRef.current + 1;
@@ -82,29 +90,6 @@ export function useAgentRunDetail(options: {
         }
     }, [projectId, setAgentTrace, setTraceLoading]);
 
-    const fetchRun = useCallback(async (id: string) => {
-        runDetailAbortRef.current?.abort();
-        const controller = new AbortController();
-        runDetailAbortRef.current = controller;
-        try {
-            const data = await fetchAgentRun(id, { projectId, signal: controller.signal });
-            if (controller.signal.aborted) return;
-            setActiveRun(prev => {
-                const wasActive = prev?.id === id && !isAgentRunTerminal(prev.status);
-                const isTerminal = isAgentRunTerminal(data.status);
-                if (wasActive && isTerminal) {
-                    void fetchHistory();
-                    void fetchAgentEvents(id);
-                    void fetchAgentTrace(id);
-                }
-                return data;
-            });
-        } catch (e) {
-            if (e instanceof DOMException && e.name === 'AbortError') return;
-            console.error('Failed to fetch run', e);
-        }
-    }, [fetchAgentEvents, fetchAgentTrace, fetchHistory, projectId, setActiveRun]);
-
     const fetchSpecs = useCallback(async (runId: string) => {
         try {
             const data = await fetchExploratorySpecs(runId);
@@ -116,8 +101,44 @@ export function useAgentRunDetail(options: {
         }
     }, [setSpecResult]);
 
+    const fetchRun = useCallback(async (id: string, fetchOptions: { showLoading?: boolean; loadRelated?: boolean } = {}) => {
+        runDetailAbortRef.current?.abort();
+        const controller = new AbortController();
+        runDetailAbortRef.current = controller;
+        if (fetchOptions.showLoading) setRunLoading(true);
+        setRunError(null);
+        try {
+            const data = await fetchAgentRunResolvingTestRun(id, { projectId, signal: controller.signal });
+            if (controller.signal.aborted) return;
+            if (data.id !== id) onResolvedRunId?.(data.id);
+            setActiveRun(prev => {
+                const wasActive = prev?.id === data.id && !isAgentRunTerminal(prev.status);
+                const isTerminal = isAgentRunTerminal(data.status);
+                if (wasActive && isTerminal) {
+                    void fetchHistory();
+                    void fetchAgentEvents(data.id);
+                    void fetchAgentTrace(data.id);
+                }
+                return data;
+            });
+            if (fetchOptions.loadRelated) {
+                void fetchAgentEvents(data.id);
+                void fetchSpecs(data.id);
+            }
+        } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') return;
+            console.error('Failed to fetch run', e);
+            setRunError('Run not found or unavailable. Check project selection.');
+            setActiveRun(prev => prev?.id === id ? null : prev);
+        } finally {
+            if (fetchOptions.showLoading && !controller.signal.aborted) setRunLoading(false);
+        }
+    }, [fetchAgentEvents, fetchAgentTrace, fetchHistory, fetchSpecs, onResolvedRunId, projectId, setActiveRun]);
+
     useEffect(() => {
         if (!selectedRunId) {
+            setRunLoading(false);
+            setRunError(null);
             setActiveRun(null);
             setSpecResult(null);
             setAgentEvents([]);
@@ -128,9 +149,8 @@ export function useAgentRunDetail(options: {
         }
 
         runDetailAbortRef.current?.abort();
-        void fetchRun(selectedRunId);
-        void fetchAgentEvents(selectedRunId);
-        void fetchSpecs(selectedRunId);
+        setRunError(null);
+        void fetchRun(selectedRunId, { showLoading: true, loadRelated: true });
 
         return () => {
             runDetailAbortRef.current?.abort();
@@ -144,6 +164,25 @@ export function useAgentRunDetail(options: {
     }, [activeRun, fetchAgentTrace, selectedRunId, traceTab]);
 
     useEffect(() => {
+        if (!selectedRunId || !activeRunId || activeRunId !== selectedRunId || !LIVE_AGENT_STATUSES.has(activeRunStatus || '')) return;
+        const poll = async () => {
+            if (activeRunPollInFlightRef.current) return;
+            activeRunPollInFlightRef.current = true;
+            try {
+                await fetchRun(selectedRunId);
+            } finally {
+                activeRunPollInFlightRef.current = false;
+            }
+        };
+        const interval = window.setInterval(() => {
+            void poll();
+        }, 3000);
+        return () => {
+            window.clearInterval(interval);
+        };
+    }, [activeRunId, activeRunStatus, fetchRun, selectedRunId]);
+
+    useEffect(() => {
         return () => {
             runDetailAbortRef.current?.abort();
         };
@@ -155,5 +194,7 @@ export function useAgentRunDetail(options: {
         fetchAgentTrace,
         fetchSpecs,
         mergeAgentEvents,
+        runLoading,
+        runError,
     };
 }

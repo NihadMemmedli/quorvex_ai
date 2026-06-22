@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { Suspense, useEffect } from 'react';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { Loader2 } from 'lucide-react';
 
@@ -10,6 +10,14 @@ interface ProtectedRouteProps {
     requireAuth?: boolean;
     requireAdmin?: boolean;
     fallbackUrl?: string;
+}
+
+function ProtectedRouteLoading() {
+    return (
+        <div className="flex items-center justify-center min-h-[400px]">
+            <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+        </div>
+    );
 }
 
 /**
@@ -39,9 +47,30 @@ export function ProtectedRoute({
     requireAdmin = false,
     fallbackUrl = '/login',
 }: ProtectedRouteProps) {
+    return (
+        <Suspense fallback={<ProtectedRouteLoading />}>
+            <ProtectedRouteInner
+                requireAuth={requireAuth}
+                requireAdmin={requireAdmin}
+                fallbackUrl={fallbackUrl}
+            >
+                {children}
+            </ProtectedRouteInner>
+        </Suspense>
+    );
+}
+
+function ProtectedRouteInner({
+    children,
+    requireAuth,
+    requireAdmin,
+    fallbackUrl,
+}: Required<ProtectedRouteProps>) {
     const { user, isLoading, isAuthenticated } = useAuth();
     const router = useRouter();
     const pathname = usePathname();
+    const searchParams = useSearchParams();
+    const search = searchParams.toString();
 
     useEffect(() => {
         // Skip redirect while still loading auth state
@@ -50,7 +79,7 @@ export function ProtectedRoute({
         // Check authentication requirement
         if (requireAuth && !isAuthenticated) {
             // Redirect to login with return URL
-            const returnUrl = encodeURIComponent(pathname);
+            const returnUrl = encodeURIComponent(`${pathname}${search ? `?${search}` : ''}`);
             router.push(`${fallbackUrl}?returnTo=${returnUrl}`);
             return;
         }
@@ -60,15 +89,11 @@ export function ProtectedRoute({
             router.push('/');
             return;
         }
-    }, [isLoading, isAuthenticated, user, requireAuth, requireAdmin, router, pathname, fallbackUrl]);
+    }, [isLoading, isAuthenticated, user, requireAuth, requireAdmin, router, pathname, search, fallbackUrl]);
 
     // Show loading state while checking auth
     if (isLoading) {
-        return (
-            <div className="flex items-center justify-center min-h-[400px]">
-                <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-            </div>
-        );
+        return <ProtectedRouteLoading />;
     }
 
     // During migration period, allow access if auth is not required
@@ -83,9 +108,5 @@ export function ProtectedRoute({
     }
 
     // Fallback loading while redirecting
-    return (
-        <div className="flex items-center justify-center min-h-[400px]">
-            <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-        </div>
-    );
+    return <ProtectedRouteLoading />;
 }

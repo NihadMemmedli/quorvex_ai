@@ -35,6 +35,7 @@ interface GenerateSpecModalProps {
 
 type GenerationStatus = 'idle' | 'generating' | 'success' | 'error';
 type AuthMode = 'none' | 'credentials' | 'session';
+const LIVE_AGENT_STATUSES = new Set(['running', 'pending', 'queued', 'in_progress', 'waiting', 'paused']);
 
 interface GenerationResult {
     status: string;
@@ -117,6 +118,9 @@ export default function GenerateSpecModal({
     const [checkingStatus, setCheckingStatus] = useState(true);
 
     const showGenerationBrowser = status === 'generating' && Boolean(agentRunId);
+    const generationRunActive = agentRun
+        ? LIVE_AGENT_STATUSES.has(agentRun.status) && agentRun.status !== 'paused'
+        : status === 'generating';
 
     const normalizeGenerationResult = (data: Record<string, unknown>): GenerationResult => ({
         status: String(data.status || 'generated'),
@@ -888,7 +892,7 @@ export default function GenerateSpecModal({
                                     <div style={{ display: 'grid', gap: '0.85rem' }}>
                                         <LiveBrowserView
                                             runId={agentRunId}
-                                            isActive={agentRun?.status !== 'failed'}
+                                            isActive={generationRunActive}
                                             showHeader
                                             artifacts={agentRun?.artifacts || []}
                                             statusMessage={(agentRun?.progress?.message as string | undefined) || generateSpecPoller.status?.message}
@@ -898,6 +902,7 @@ export default function GenerateSpecModal({
                                             browserActivitySeen={Boolean(agentRun?.progress?.browser_tool_calls)}
                                             browserActive={agentRun?.progress?.phase === 'tool_use'}
                                             browserLastTool={agentRun?.progress?.last_tool as string | undefined}
+                                            suspectedBrowserDialogBlock={agentRun?.progress?.suspected_browser_dialog_block === true}
                                         />
                                         <div style={{
                                             display: 'flex',

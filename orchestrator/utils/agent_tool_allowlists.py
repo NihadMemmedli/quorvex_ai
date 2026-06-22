@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from orchestrator.utils.agent_runner import build_allowed_tools
+    from orchestrator.utils.agent_runner import build_allowed_tools, build_mcp_allowed_tools
 except ImportError:  # Support scripts that import from `utils.*`.
-    from utils.agent_runner import build_allowed_tools
+    from utils.agent_runner import build_allowed_tools, build_mcp_allowed_tools
 
 
 @dataclass(frozen=True)
@@ -139,6 +139,8 @@ HEALER_MCP_TOOLS: tuple[str, ...] = DEBUG_BROWSER_MCP_TOOLS + (
     "test_run",
 )
 
+NOTE_MCP_TOOLS: tuple[str, ...] = ("quorvex_record_note",)
+
 TEST_VALIDATOR_MCP_TOOLS: tuple[str, ...] = DEBUG_BROWSER_MCP_TOOLS + (
     "test_run",
 )
@@ -224,12 +226,23 @@ def get_agent_allowed_tools(
     if profile_name is None:
         return None
     profile = AGENT_TOOL_PROFILES[profile_name]
-    return build_allowed_tools(
+    allowed_tools = build_allowed_tools(
         list(profile.base_tools),
         list(profile.playwright_mcp_tools),
         mcp_config_dir=mcp_config_dir,
         mcp_config_path=mcp_config_path,
     )
+    if profile_name in {"playwright-test-planner", "playwright-test-healer"}:
+        note_tools = build_mcp_allowed_tools(
+            "quorvex-agent",
+            [],
+            list(NOTE_MCP_TOOLS),
+            mcp_config_dir=mcp_config_dir,
+            mcp_config_path=mcp_config_path,
+        )
+        if note_tools and note_tools[0].startswith("mcp__quorvex-agent__"):
+            allowed_tools.extend(note_tools)
+    return allowed_tools
 
 
 def get_agent_tool_config(

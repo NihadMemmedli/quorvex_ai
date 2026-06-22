@@ -1,5 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type React from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
@@ -38,6 +38,7 @@ import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
     LIVE_AGENT_STATUSES,
+    agentRunPartialReason,
     formatQueueAge,
     formatToolName,
     getArtifactUrl,
@@ -50,10 +51,14 @@ import {
     reportStatusColor,
     severityColor,
     sortArtifactsByModifiedAt,
+    agentRunNoteFromEvent,
+    filterAgentRunNotes,
+    mergeAgentRunNotes,
     type AgentQueueStatus,
     type AgentReportSearchItem,
     type AgentRun,
     type AgentRunEvent,
+    type AgentRunNote,
     type AgentTraceBundle,
     type CustomResultTab,
     type ReportEditableItemType,
@@ -63,6 +68,7 @@ import {
     type StructuredAgentReport,
     type TraceTab,
 } from './agents-model';
+import { fetchAgentRunNotes } from './agents-api';
 import type { ReportReviewFilter, ReportSearchTypeFilter } from './agents-workspace-state';
 
 const LiveBrowserView = dynamic<any>(() => import('@/components/LiveBrowserView').then(mod => mod.LiveBrowserView), { ssr: false });
@@ -227,6 +233,7 @@ export function CustomAgentReportView({
     onReportSeverityFilterChange: (value: string) => void;
 }) {
     const report = getStructuredReport(run);
+    const partialReason = agentRunPartialReason(run);
     const findings = report.findings || [];
     const testIdeas = report.test_ideas || [];
     const requirements = report.requirements || [];
@@ -274,6 +281,8 @@ export function CustomAgentReportView({
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <AgentRunCapturePanel activeRun={run} mode="recording" />
+
             <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
                     <div style={{ minWidth: 0 }}>
@@ -306,6 +315,12 @@ export function CustomAgentReportView({
                     <p style={{ margin: '0.85rem 0 0', color: 'var(--text)', lineHeight: 1.55, fontSize: '0.92rem' }}>
                         {report.summary}
                     </p>
+                )}
+                {partialReason && (
+                    <div data-testid="custom-agent-partial-reason" style={{ marginTop: '0.85rem', padding: '0.75rem 0.85rem', border: '1px solid rgba(251, 191, 36, 0.28)', borderRadius: '8px', background: 'var(--warning-muted)', color: 'var(--text-secondary)', display: 'flex', gap: '0.5rem', alignItems: 'flex-start', fontSize: '0.84rem', lineHeight: 1.45 }}>
+                        <AlertTriangle size={15} style={{ color: 'var(--warning)', marginTop: '0.1rem', flexShrink: 0 }} />
+                        <span>{partialReason}</span>
+                    </div>
                 )}
             </div>
 
@@ -638,9 +653,135 @@ export function TracePill({ label, value }: { label: string; value: any }) {
     );
 }
 
+export function AgentRunNotesPanel({
+    run,
+    events,
+    supplementalNotes = [],
+}: {
+    run: AgentRun;
+    events: AgentRunEvent[];
+    supplementalNotes?: AgentRunNote[];
+}) {
+    const [backfilledNotes, setBackfilledNotes] = useState<AgentRunNote[]>([]);
+    const [search, setSearch] = useState('');
+    const [noteType, setNoteType] = useState('all');
+    const [level, setLevel] = useState('all');
+    const [source, setSource] = useState('all');
+    const [actionableOnly, setActionableOnly] = useState(false);
+    const [sort, setSort] = useState<'newest' | 'chronological'>('newest');
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setBackfilledNotes([]);
+        fetchAgentRunNotes(run.id, { limit: 200, projectId: run.project_id, signal: controller.signal })
+            .then(setBackfilledNotes)
+            .catch(() => {
+                if (!controller.signal.aborted) setBackfilledNotes([]);
+            });
+        return () => controller.abort();
+    }, [run.id, run.project_id]);
+
+    const notes = useMemo(() => {
+        const liveTail = Array.isArray(run.progress?.live_notes_tail) ? run.progress.live_notes_tail as AgentRunNote[] : [];
+        const eventNotes = events.map(agentRunNoteFromEvent).filter(Boolean) as AgentRunNote[];
+        const runtimeNotes = mergeAgentRunNotes(mergeAgentRunNotes(backfilledNotes, liveTail), eventNotes);
+        return mergeAgentRunNotes(runtimeNotes, supplementalNotes);
+    }, [backfilledNotes, events, run.progress?.live_notes_tail, supplementalNotes]);
+
+    const noteTypes = useMemo(() => Array.from(new Set(notes.map(note => String(note.note_type || 'observation')))).sort(), [notes]);
+    const levels = useMemo(() => Array.from(new Set(notes.map(note => String(note.level || 'info')))).sort(), [notes]);
+    const sources = useMemo(() => Array.from(new Set(notes.map(note => String(note.source || 'runtime')))).sort(), [notes]);
+    const visibleNotes = useMemo(() => filterAgentRunNotes(notes, {
+        search,
+        noteType,
+        level,
+        source,
+        actionableOnly,
+        sort,
+    }), [actionableOnly, level, noteType, notes, search, sort, source]);
+
+    return (
+        <section style={{ display: 'grid', gap: '0.75rem', padding: '1rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', minWidth: 0 }}>
+                    <MessageSquare size={16} style={{ color: 'var(--primary)' }} />
+                    <strong>Agent Notes</strong>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.78rem' }}>{visibleNotes.length}/{notes.length}</span>
+                </div>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.78rem', fontWeight: 650 }}>
+                    <input type="checkbox" checked={actionableOnly} onChange={event => setActionableOnly(event.target.checked)} />
+                    Actionable
+                </label>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.5rem' }}>
+                <div style={{ position: 'relative', minWidth: 0 }}>
+                    <Search size={14} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+                    <Input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search notes" style={{ paddingLeft: '1.9rem' }} />
+                </div>
+                <select value={noteType} onChange={event => setNoteType(event.target.value)} style={{ minWidth: 0, border: '1px solid var(--border)', borderRadius: '6px', padding: '0.48rem 0.55rem', background: 'var(--surface)', color: 'var(--text)' }}>
+                    <option value="all">All types</option>
+                    {noteTypes.map(type => <option key={type} value={type}>{type.replaceAll('_', ' ')}</option>)}
+                </select>
+                <select value={level} onChange={event => setLevel(event.target.value)} style={{ minWidth: 0, border: '1px solid var(--border)', borderRadius: '6px', padding: '0.48rem 0.55rem', background: 'var(--surface)', color: 'var(--text)' }}>
+                    <option value="all">All levels</option>
+                    {levels.map(item => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <select value={source} onChange={event => setSource(event.target.value)} style={{ minWidth: 0, border: '1px solid var(--border)', borderRadius: '6px', padding: '0.48rem 0.55rem', background: 'var(--surface)', color: 'var(--text)' }}>
+                    <option value="all">All sources</option>
+                    {sources.map(item => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <select value={sort} onChange={event => setSort(event.target.value as 'newest' | 'chronological')} style={{ minWidth: 0, border: '1px solid var(--border)', borderRadius: '6px', padding: '0.48rem 0.55rem', background: 'var(--surface)', color: 'var(--text)' }}>
+                    <option value="newest">Newest</option>
+                    <option value="chronological">Chronological</option>
+                </select>
+            </div>
+
+            {visibleNotes.length === 0 ? (
+                <div style={{ padding: '1rem', border: '1px dashed var(--border)', borderRadius: '8px', color: 'var(--text-secondary)', background: 'var(--surface-hover)' }}>
+                    No agent notes recorded for this run.
+                </div>
+            ) : (
+                <div style={{ display: 'grid', gap: '0.55rem', maxHeight: '360px', overflowY: 'auto', paddingRight: '0.1rem' }}>
+                    {visibleNotes.map(note => (
+                        <article key={`${note.sequence}-${note.id}`} style={{ display: 'grid', gap: '0.45rem', padding: '0.75rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--surface)' }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.75rem' }}>
+                                <div style={{ minWidth: 0 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                        <strong style={{ overflowWrap: 'anywhere' }}>{note.title}</strong>
+                                        <span style={{ padding: '0.16rem 0.38rem', border: '1px solid var(--border)', borderRadius: '999px', color: 'var(--text-secondary)', fontSize: '0.68rem', textTransform: 'capitalize' }}>{String(note.note_type).replaceAll('_', ' ')}</span>
+                                        <span style={{ color: note.level === 'error' ? 'var(--danger)' : note.level === 'warning' ? 'var(--warning)' : 'var(--text-secondary)', fontSize: '0.72rem', fontWeight: 700 }}>{note.level}</span>
+                                    </div>
+                                    {note.body && <p style={{ margin: '0.35rem 0 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45, overflowWrap: 'anywhere' }}>{note.body}</p>}
+                                </div>
+                                <span style={{ color: 'var(--text-secondary)', fontSize: '0.72rem', whiteSpace: 'nowrap' }}>#{note.sequence}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', color: 'var(--text-secondary)', fontSize: '0.72rem' }}>
+                                {note.source && <span>Source: {note.source}</span>}
+                                {note.tool_name && <span>Tool: {formatToolName(note.tool_name)}</span>}
+                                {note.confidence !== null && note.confidence !== undefined && <span>Confidence: {Math.round(Number(note.confidence) * 100)}%</span>}
+                                {note.url && <a href={note.url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', overflowWrap: 'anywhere' }}>{note.url}</a>}
+                                {note.artifact_path && <span style={{ overflowWrap: 'anywhere' }}>Artifact: {note.artifact_path}</span>}
+                            </div>
+                            {(note.tags || []).length > 0 && (
+                                <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                    {(note.tags || []).map(tag => (
+                                        <span key={tag} style={{ padding: '0.14rem 0.34rem', borderRadius: '6px', background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.68rem' }}>{tag}</span>
+                                    ))}
+                                </div>
+                            )}
+                        </article>
+                    ))}
+                </div>
+            )}
+        </section>
+    );
+}
+
 export function AgentRunObservabilityPanel({
     run,
     events,
+    supplementalNotes = [],
     trace,
     traceLoading = false,
     traceSearch = '',
@@ -653,6 +794,7 @@ export function AgentRunObservabilityPanel({
 }: {
     run: AgentRun;
     events: AgentRunEvent[];
+    supplementalNotes?: AgentRunNote[];
     trace?: AgentTraceBundle | null;
     traceLoading?: boolean;
     traceSearch?: string;
@@ -665,6 +807,7 @@ export function AgentRunObservabilityPanel({
 }) {
     const health = run.health || {};
     const temporal = run.temporal || {};
+    const partialReason = agentRunPartialReason(run);
     const [internalTraceTab, setInternalTraceTab] = useState<TraceTab>(activeTraceTab);
     const selectedTraceTab = onTraceTabChange ? activeTraceTab : internalTraceTab;
     const changeTraceTab = (tab: TraceTab) => {
@@ -694,12 +837,23 @@ export function AgentRunObservabilityPanel({
     const recentEvents = events.slice(-12).reverse();
     const visibleSpans = filteredSpans.slice(-80).reverse();
     const toolSpans = filteredSpans.filter(span => span.span_type === 'tool_call' || span.span_type === 'tool_result');
+    const allToolEvents = useMemo(() => events.filter(event => event.event_type === 'tool_call' || event.event_type === 'browser_action'), [events]);
+    const toolEvents = useMemo(() => allToolEvents.filter(event => {
+        if (!traceSearch.trim()) return true;
+        const query = traceSearch.toLowerCase();
+        return [
+            event.event_type,
+            event.message,
+            event.payload ? JSON.stringify(event.payload) : '',
+        ].join(' ').toLowerCase().includes(query);
+    }), [allToolEvents, traceSearch]);
     const spanTypes = Array.from(new Set(traceSpans.map(span => span.span_type))).sort();
     const logArtifacts = sortArtifactsByModifiedAt((run.artifacts || []).filter(artifact => artifact.type === 'log'));
     const traceArtifacts = trace?.artifacts || [];
     const snapshot = trace?.snapshot;
     const memoryInjections = trace?.memory_injections || [];
     const traceTabs: Array<{ key: TraceTab; label: string; icon: any }> = [
+        { key: 'notes', label: 'Notes', icon: MessageSquare },
         { key: 'timeline', label: 'Timeline', icon: Clock },
         { key: 'context', label: 'Context', icon: FileText },
         { key: 'tools', label: 'Tools', icon: Wrench },
@@ -717,7 +871,7 @@ export function AgentRunObservabilityPanel({
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.65rem' }}>
                 {[
                     { label: 'Events', value: health.event_count ?? events.length, icon: List },
-                    { label: 'Tool Events', value: health.tool_event_count ?? 0, icon: Wrench },
+                    { label: 'Tool Events', value: Number(health.tool_event_count || 0) > 0 ? health.tool_event_count : allToolEvents.length, icon: Wrench },
                     { label: 'Errors', value: health.error_event_count ?? 0, icon: AlertTriangle },
                     { label: 'Temporal', value: temporal.error ? 'Error' : temporal.workflow_status || (run.temporal_workflow_id ? 'Scheduled' : 'Not linked'), icon: RotateCcw },
                     { label: 'Task', value: run.agent_task_id ? run.agent_task_id.slice(0, 12) : 'Not queued', icon: Terminal },
@@ -779,6 +933,11 @@ export function AgentRunObservabilityPanel({
                     {temporal.error && (
                         <div style={{ color: 'var(--warning)', overflowWrap: 'anywhere' }}>{temporal.error}</div>
                     )}
+                    {partialReason && (
+                        <div data-testid="temporal-app-partial-note" style={{ color: 'var(--warning)', overflowWrap: 'anywhere' }}>
+                            Temporal completed; agent result is partial: {partialReason}
+                        </div>
+                    )}
                     {(temporal.temporal_ui_workflow_url || temporal.temporal_ui_url) && run.temporal_workflow_id && (
                         <a href={temporal.temporal_ui_workflow_url || temporal.temporal_ui_url || '#'} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontWeight: 600 }}>
                             Open Temporal UI <ExternalLink size={13} />
@@ -823,6 +982,10 @@ export function AgentRunObservabilityPanel({
                                 {spanTypes.map(type => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
                             </select>
                         </div>
+                    )}
+
+                    {selectedTraceTab === 'notes' && (
+                        <AgentRunNotesPanel run={run} events={events} supplementalNotes={supplementalNotes} />
                     )}
 
                     {selectedTraceTab === 'timeline' && (
@@ -906,6 +1069,18 @@ export function AgentRunObservabilityPanel({
                                         <TraceJsonBlock title="Input" value={span.input_preview} />
                                         <TraceJsonBlock title="Output" value={span.output_preview} />
                                         <TraceJsonBlock title="Raw span" value={span} />
+                                    </div>
+                                </details>
+                            )) : toolEvents.length > 0 ? toolEvents.slice(-80).reverse().map(event => (
+                                <details key={event.id} style={{ border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', overflow: 'hidden' }}>
+                                    <summary style={{ cursor: 'pointer', padding: '0.58rem 0.7rem', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', fontSize: '0.8rem' }}>
+                                        <strong>{formatToolName(String(event.payload?.tool_name || event.event_type))}</strong>
+                                        <span style={{ color: event.level === 'error' ? 'var(--danger)' : 'var(--text-secondary)' }}>#{event.sequence}</span>
+                                    </summary>
+                                    <div style={{ padding: '0 0.7rem 0.7rem', display: 'grid', gap: '0.45rem' }}>
+                                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', overflowWrap: 'anywhere' }}>{event.message}</div>
+                                        <TraceJsonBlock title="Event payload" value={event.payload} />
+                                        <TraceJsonBlock title="Raw event" value={event} />
                                     </div>
                                 </details>
                             )) : <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No tool trace spans have been recorded yet.</div>}
@@ -1018,9 +1193,15 @@ export function SpecGenerationRunPanel({ run, events }: { run: AgentRun; events:
                 artifacts={run.artifacts || []}
                 latestImage={latestImage}
                 statusMessage={progress.message}
-                liveViewAvailable={Boolean(progress.live_view_available ?? true)}
+                liveViewAvailable={progress.live_view_available !== false}
                 runtimeMessage={progress.runtime_message}
                 vncUrl={progress.vnc_url}
+                browserActivitySeen={Boolean(progress.browser_activity_seen || progress.browser_tool_calls || progress.interactions)}
+                browserActive={Boolean(progress.browser_tool_calls || progress.interactions)}
+                browserLastTool={progress.last_tool_label || progress.last_tool}
+                suspectedBrowserDialogBlock={progress.suspected_browser_dialog_block === true}
+                authPreflightStatus={progress.auth_preflight_status}
+                authPreflightFailureReason={progress.auth_preflight_failure_reason}
             />
 
             <AgentRunCapturePanel activeRun={run} mode={LIVE_AGENT_STATUSES.has(run.status) ? 'live' : 'recording'} />

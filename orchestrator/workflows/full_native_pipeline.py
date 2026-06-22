@@ -41,6 +41,8 @@ from load_env import setup_claude_env
 
 setup_claude_env()
 
+from orchestrator.api.run_files import write_run_seed_spec
+from orchestrator.services.agent_native_runs import commit_agent_run_note
 from orchestrator.services.agent_prompt_runtime import create_agent_runner
 from orchestrator.services.handoff_manifest import (
     init_manifest,
@@ -53,9 +55,11 @@ from orchestrator.services.handoff_manifest import (
 )
 from utils.agent_runner import AgentRunner, build_allowed_tools
 from utils.browser_cleanup import cleanup_orphaned_browsers
+from utils.generated_test_materializer import materialize_generated_test_for_run
 from utils.playwright_mcp import (
     playwright_config_cli_arg,
     prepare_run_playwright_config_content,
+    validate_run_seed_spec_preflight,
     write_playwright_test_mcp_config,
 )
 from utils.progress_reporter import (
@@ -105,6 +109,7 @@ class _NativeRunContext:
     max_iterations: int
     skip_planning: bool
     existing_test_path: str | None
+    source_test_path: str | None
     force_api: bool
     handoff_manifest_path: Path
     spec_content: str
@@ -222,9 +227,229 @@ class FullNativePipeline:
             not in {"0", "false", "no"}
         )
 
+    def _commit_runtime_note(
+        self,
+        *,
+        phase: str,
+        title: str,
+        body: str | None = None,
+        note_type: str = "observation",
+        level: str = "info",
+        tags: list[str] | None = None,
+        url: str | None = None,
+        artifact_path: str | None = None,
+        payload: dict[str, Any] | None = None,
+        stable_context: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a runtime-authored milestone note for owned AgentRuns."""
+        run_id = getattr(self, "owner_id", None)
+        if not run_id:
+            return
+        note_payload = dict(payload or {})
+        stable_note_context = {
+            "phase": phase,
+            "title": title,
+            "url": url,
+            "artifact_path": artifact_path,
+            **(stable_context or {}),
+        }
+        suffix = hashlib.sha256(
+            json.dumps(
+                stable_note_context,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        tag_prefix = "-".join(tags or ["runtime"])
+        tool_use_id = f"{tag_prefix}-runtime:{phase}:{suffix}"
+        note_payload.setdefault("runtime_note_suffix", suffix)
+        note_payload.setdefault("runtime_note_tool_use_id", tool_use_id)
+        try:
+            commit_agent_run_note(
+                run_id=run_id,
+                phase=phase,
+                title=title,
+                body=body,
+                note_type=note_type,
+                level=level,
+                source="runtime",
+                tags=tags or ["native"],
+                url=url,
+                artifact_path=artifact_path,
+                tool_use_id=tool_use_id,
+                payload=note_payload,
+            )
+        except Exception as exc:
+            logger.debug("Could not commit runtime milestone note: %s", exc)
+
+    def _commit_generator_note(
+        self,
+        *,
+        phase: str,
+        title: str,
+        body: str | None = None,
+        note_type: str = "observation",
+        level: str = "info",
+        url: str | None = None,
+        artifact_path: str | None = None,
+        payload: dict[str, Any] | None = None,
+        stable_context: dict[str, Any] | None = None,
+    ) -> None:
+        self._commit_runtime_note(
+            phase=phase,
+            title=title,
+            body=body,
+            note_type=note_type,
+            level=level,
+            tags=["generator", "native"],
+            url=url,
+            artifact_path=artifact_path,
+            payload=payload,
+            stable_context=stable_context,
+        )
+
+    def _commit_healer_note(
+        self,
+        *,
+        phase: str,
+        title: str,
+        body: str | None = None,
+        note_type: str = "observation",
+        level: str = "info",
+        artifact_path: str | None = None,
+        payload: dict[str, Any] | None = None,
+        stable_context: dict[str, Any] | None = None,
+    ) -> None:
+        self._commit_runtime_note(
+            phase=phase,
+            title=title,
+            body=body,
+            note_type=note_type,
+            level=level,
+            tags=["healer", "native"],
+            artifact_path=artifact_path,
+            payload=payload,
+            stable_context=stable_context,
+        )
+
+    def _generator_agent_note_payload(self) -> dict[str, Any]:
+        result = getattr(
+            getattr(self, "native_generator", None),
+            "last_agent_result",
+            None,
+        )
+        tool_calls = list(getattr(result, "tool_calls", []) or []) if result else []
+        payload: dict[str, Any] = {
+            "tool_calls": len(tool_calls),
+            "tools": [getattr(call, "name", None) for call in tool_calls],
+            "model_tier": getattr(
+                getattr(self, "native_generator", None),
+                "model_tier",
+                None,
+            ),
+        }
+        if result is not None:
+            payload.update(
+                {
+                    "messages_received": getattr(result, "messages_received", 0),
+                    "text_blocks_received": getattr(result, "text_blocks_received", 0),
+                    "session_id": getattr(result, "session_id", None),
+                    "stop_reason": getattr(result, "stop_reason", None),
+                    "error": getattr(result, "error", None),
+                    "error_type": getattr(result, "error_type", None),
+                    "api_error_status": getattr(result, "api_error_status", None),
+                }
+            )
+        return {key: value for key, value in payload.items() if value not in (None, [])}
+
+    @staticmethod
+    def _generator_counts_body(payload: dict[str, Any]) -> str:
+        parts = []
+        if "tool_calls" in payload:
+            parts.append(f"Tool calls: {payload['tool_calls']}")
+        if "messages_received" in payload:
+            parts.append(f"Messages: {payload['messages_received']}")
+        if "text_blocks_received" in payload:
+            parts.append(f"Text blocks: {payload['text_blocks_received']}")
+        return "\n".join(parts)
+
+    def _commit_generator_self_run_note(
+        self,
+        *,
+        target_url: str | None = None,
+        test_path: Path | None = None,
+        generation_repair_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self_run = getattr(self.native_generator, "last_self_run_result", None) or {}
+        final_status = str(self_run.get("final_status") or self_run.get("status") or "")
+        if not final_status or final_status == "disabled":
+            return
+        attempts = getattr(self.native_generator, "last_self_heal_attempts", 0)
+        artifact_path = getattr(
+            self.native_generator,
+            "last_self_heal_artifact_path",
+            None,
+        )
+        passed = final_status in {"passed", "passed_after_self_heal"}
+        repair_metadata = generation_repair_metadata or {}
+        repair_changed_after_self_run = bool(
+            repair_metadata.get("generation_repair_accepted")
+            and repair_metadata.get("generated_file_hash_before_repair")
+            and repair_metadata.get("repaired_file_hash")
+            and repair_metadata.get("generated_file_hash_before_repair")
+            != repair_metadata.get("repaired_file_hash")
+        )
+        title = (
+            "Generator self-run passed"
+            if passed and attempts == 0 and not repair_changed_after_self_run
+            else "Generator self-run passed before repair"
+            if passed and repair_changed_after_self_run
+            else "Generator self-heal required"
+        )
+        body = f"Status: {final_status}\nSelf-heal attempts: {attempts}"
+        if passed and attempts:
+            body += "\nGenerated test passed after self-heal."
+        elif not passed:
+            body += "\nGenerated test still needs downstream validation or healing."
+        if repair_changed_after_self_run:
+            body += "\nResult applies to the pre-repair artifact; validation repair changed the generated file afterward."
+        self._commit_generator_note(
+            phase="generator_self_run_result",
+            title=title,
+            body=body,
+            note_type="verifier_note" if passed else "blocker",
+            level="warning" if attempts or not passed else "info",
+            url=target_url,
+            artifact_path=str(artifact_path) if artifact_path else None,
+            payload={
+                "final_status": final_status,
+                "self_heal_attempts": attempts,
+                "self_heal_passed": getattr(
+                    self.native_generator, "last_self_heal_passed", False
+                ),
+                "artifact_path": str(artifact_path) if artifact_path else None,
+                "test_path": str(test_path) if test_path else None,
+                "self_run_pre_repair": repair_changed_after_self_run,
+                "repair_changed_after_self_run": repair_changed_after_self_run,
+                "generation_repair_accepted": repair_metadata.get(
+                    "generation_repair_accepted"
+                ),
+            },
+            stable_context={
+                "test_path": str(test_path) if test_path else None,
+                "final_status": final_status,
+                "self_heal_attempts": attempts,
+                "repair_changed_after_self_run": repair_changed_after_self_run,
+            },
+        )
+
     def _configure_run_agent_env(self, run_dir: Path) -> None:
         """Attach per-run artifact paths to all native agent env copies."""
         cost_log = str(run_dir / "agent_costs.jsonl")
+        planner_browser_tool_timeout = os.environ.get(
+            "NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS", "90"
+        )
         test_data_env_vars = getattr(self, "test_data_env_vars", None)
         if not isinstance(test_data_env_vars, dict):
             test_data_env_vars = {}
@@ -240,6 +465,11 @@ class FullNativePipeline:
             env_vars = getattr(agent, "env_vars", None)
             if isinstance(env_vars, dict):
                 env_vars["AGENT_COST_LOG"] = cost_log
+                if agent is getattr(self, "native_planner", None):
+                    env_vars.setdefault(
+                        "NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS",
+                        planner_browser_tool_timeout,
+                    )
 
     async def _debug_validate_planner_draft_script(
         self,
@@ -535,13 +765,30 @@ root_cause: one concise sentence, or "none" if passed
         spec_file = Path(spec_path)
         spec_content = spec_file.read_text()
         auth_context = browser_auth_context or self._load_browser_auth_context()
-        self.prepare_run_browser_context(
+        browser_runtime = self.prepare_run_browser_context(
             run_dir=run_dir,
             storage_state_path=storage_state_path,
         )
         raw_included_spec_content = self._resolve_includes(
             spec_content, spec_path, resolve_testdata=False
         )
+
+        source_existing_test_path = existing_test_path
+        existing_export = self._read_json_file(run_dir / "export.json") or {}
+        if isinstance(existing_export.get("sourceTestFilePath"), str):
+            source_existing_test_path = existing_export["sourceTestFilePath"]
+        if existing_test_path:
+            try:
+                materialized = materialize_generated_test_for_run(
+                    existing_test_path,
+                    run_dir,
+                    base_dir=Path(__file__).resolve().parent.parent.parent,
+                )
+                existing_test_path = str(materialized.test_file_path)
+                if not isinstance(existing_export.get("sourceTestFilePath"), str):
+                    source_existing_test_path = str(materialized.source_test_file_path)
+            except FileNotFoundError:
+                pass
 
         existing_test_content = ""
         if existing_test_path:
@@ -623,6 +870,35 @@ root_cause: one concise sentence, or "none" if passed
                 }
             )
 
+        write_run_seed_spec(run_dir, target_url)
+        playwright_config_path = run_dir / "playwright.config.ts"
+        if playwright_config_path.exists():
+            seed_preflight = validate_run_seed_spec_preflight(
+                run_dir=run_dir,
+                config_path=playwright_config_path,
+                seed_file="tests/seed.spec.ts",
+            )
+            if not seed_preflight.get("ready"):
+                error_msg = str(
+                    seed_preflight.get("error")
+                    or "Run-local Playwright seed preflight failed."
+                )
+                logger.error(error_msg)
+                (run_dir / "status.txt").write_text("error")
+                self._write_pipeline_error(
+                    run_dir,
+                    error_msg,
+                    "playwright_seed_preflight",
+                    {"seed_preflight": seed_preflight, "browser_runtime": browser_runtime},
+                )
+                return _NativeRunPreparation(
+                    result={
+                        "success": False,
+                        "error": error_msg,
+                        "stage": "playwright_seed_preflight",
+                        "seed_preflight": seed_preflight,
+                    }
+                )
         resolved_spec_content = self._resolve_includes(spec_content, spec_path)
 
         logger.info("=" * 80)
@@ -668,7 +944,11 @@ root_cause: one concise sentence, or "none" if passed
             or self._extract_credentials(spec_content)
             or self._extract_credentials(resolved_spec_content)
         )
-        login_url = self._extract_login_url(resolved_spec_content, target_url)
+        login_url = self._extract_login_url(
+            resolved_spec_content,
+            target_url,
+            auth_context=auth_context,
+        )
 
         spec_type = SpecType.STANDARD
         try:
@@ -688,6 +968,7 @@ root_cause: one concise sentence, or "none" if passed
                 max_iterations=max_iterations,
                 skip_planning=skip_planning,
                 existing_test_path=existing_test_path,
+                source_test_path=source_existing_test_path,
                 force_api=force_api,
                 handoff_manifest_path=handoff_manifest_path,
                 spec_content=spec_content,
@@ -721,6 +1002,7 @@ root_cause: one concise sentence, or "none" if passed
 
             export_data = {
                 "testFilePath": str(test_path),
+                "sourceTestFilePath": ctx.source_test_path or str(test_path),
                 "code": test_path.read_text(),
                 "dependencies": ["@playwright/test"],
                 "notes": ["Healing existing test (skipped planning/generation)"],
@@ -1249,11 +1531,12 @@ root_cause: one concise sentence, or "none" if passed
             metadata=generated_test_metadata,
         )
         generator_result = getattr(self.native_generator, "last_agent_result", None)
+        produced_file_hash = self._file_sha256(test_path)
         record_attempt(
             ctx.handoff_manifest_path,
             "generator",
             stage_attempt=1,
-            status="passed",
+            status="produced",
             agent_session_id=getattr(generator_result, "session_id", None),
             executor_mode="queue_or_direct",
             model_tier=getattr(self.native_generator, "model_tier", None),
@@ -1275,8 +1558,11 @@ root_cause: one concise sentence, or "none" if passed
                 ctx.handoff_manifest_path,
                 ["planner_plan", "planner_draft_script"],
             ),
-            output_artifact_hash=self._file_sha256(test_path),
-            metadata=generated_test_metadata,
+            output_artifact_hash=produced_file_hash,
+            metadata={
+                **generated_test_metadata,
+                "validation_status": "pending_validation",
+            },
         )
         validation_status = validate_artifact(
             ctx.handoff_manifest_path,
@@ -1322,7 +1608,7 @@ root_cause: one concise sentence, or "none" if passed
                     consumers=["test_run", "healer", "reporting"],
                     validation_status="pending_validation",
                     metadata={
-                        **getattr(self.native_generator, "last_handoff_consumption", {}),
+                        **generated_test_metadata,
                         **generation_repair_metadata,
                     },
                 )
@@ -1338,8 +1624,69 @@ root_cause: one concise sentence, or "none" if passed
                     validator=lambda _path: (validation_error is None, validation_error),
                 )
 
+        if generator_self_run:
+            self._commit_generator_self_run_note(
+                target_url=ctx.target_url,
+                test_path=test_path,
+                generation_repair_metadata=generation_repair_metadata,
+            )
+
         if validation_error:
             logger.error(validation_error)
+            self._commit_generator_note(
+                phase="generator_validation_failed",
+                title="Generator output failed validation",
+                body=f"Failure category: generation_validation\n{validation_error}",
+                note_type="blocker",
+                level="warning",
+                url=ctx.target_url,
+                artifact_path=str(test_path),
+                payload={
+                    "failure_category": "generation_validation",
+                    "message": validation_error,
+                    "validation": validation_status,
+                    "repair": generation_repair_metadata,
+                },
+                stable_context={
+                    "target_url": ctx.target_url,
+                    "test_path": str(test_path),
+                    "validation_error": validation_error,
+                },
+            )
+            record_attempt(
+                ctx.handoff_manifest_path,
+                "generator",
+                stage_attempt=1,
+                status="failed",
+                agent_session_id=getattr(generator_result, "session_id", None),
+                executor_mode="queue_or_direct",
+                model_tier=getattr(self.native_generator, "model_tier", None),
+                timeout_seconds=int(
+                    os.environ.get(
+                        "GENERATOR_TIMEOUT_SECONDS",
+                        os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+                    )
+                ),
+                error_type=getattr(generator_result, "error_type", None)
+                or "generation_validation",
+                tool_call_summary={
+                    "count": len(getattr(generator_result, "tool_calls", []) or []),
+                    "tools": [
+                        getattr(call, "name", None)
+                        for call in (getattr(generator_result, "tool_calls", []) or [])
+                    ],
+                },
+                input_artifact_hashes=self._manifest_artifact_hashes(
+                    ctx.handoff_manifest_path,
+                    ["planner_plan", "planner_draft_script"],
+                ),
+                output_artifact_hash=self._file_sha256(test_path),
+                metadata={
+                    **generated_test_metadata,
+                    "validation": validation_status,
+                    **generation_repair_metadata,
+                },
+            )
             (ctx.run_dir / "status.txt").write_text("error")
             self._write_pipeline_error(
                 ctx.run_dir,
@@ -1377,6 +1724,62 @@ root_cause: one concise sentence, or "none" if passed
             )
 
         logger.info(f"Test generated: {test_path}")
+        accepted_metadata = {
+            **generated_test_metadata,
+            "validation": validation_status,
+            **generation_repair_metadata,
+        }
+        accepted_file_hash = self._file_sha256(test_path)
+        record_attempt(
+            ctx.handoff_manifest_path,
+            "generator",
+            stage_attempt=1,
+            status="passed",
+            agent_session_id=getattr(generator_result, "session_id", None),
+            executor_mode="queue_or_direct",
+            model_tier=getattr(self.native_generator, "model_tier", None),
+            timeout_seconds=int(
+                os.environ.get(
+                    "GENERATOR_TIMEOUT_SECONDS",
+                    os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+                )
+            ),
+            error_type=getattr(generator_result, "error_type", None),
+            tool_call_summary={
+                "count": len(getattr(generator_result, "tool_calls", []) or []),
+                "tools": [
+                    getattr(call, "name", None)
+                    for call in (getattr(generator_result, "tool_calls", []) or [])
+                ],
+            },
+            input_artifact_hashes=self._manifest_artifact_hashes(
+                ctx.handoff_manifest_path,
+                ["planner_plan", "planner_draft_script"],
+            ),
+            output_artifact_hash=accepted_file_hash,
+            metadata=accepted_metadata,
+        )
+        self._commit_generator_note(
+            phase="generator_output_accepted",
+            title="Generator output accepted",
+            body=f"Output accepted after validation: {test_path}",
+            note_type="verifier_note",
+            level="info",
+            url=ctx.target_url,
+            artifact_path=str(test_path),
+            payload=accepted_metadata,
+            stable_context={
+                "target_url": ctx.target_url,
+                "test_path": str(test_path),
+                "file_hash": accepted_file_hash,
+                "validation_status": validation_status.get("validation_status")
+                if isinstance(validation_status, dict)
+                else validation_status,
+                "generation_repair_accepted": generation_repair_metadata.get(
+                    "generation_repair_accepted"
+                ),
+            },
+        )
         record_stage(
             ctx.handoff_manifest_path,
             "generator",
@@ -1762,6 +2165,30 @@ root_cause: one concise sentence, or "none" if passed
         """
         try:
             self._last_native_generator_exception = None
+            spec_name = Path(spec_path).name
+            start_body = f"Spec: {spec_name}"
+            if target_url:
+                start_body += f"\nTarget: {target_url}"
+            self._commit_generator_note(
+                phase="generator_started",
+                title="Generator started",
+                body=start_body,
+                url=target_url,
+                artifact_path=spec_path,
+                payload={
+                    "spec_path": spec_path,
+                    "spec_name": spec_name,
+                    "target_url": target_url,
+                    "output_name": output_name,
+                    "browser": browser,
+                },
+                stable_context={
+                    "spec_path": spec_path,
+                    "target_url": target_url,
+                    "output_name": output_name,
+                    "browser": browser,
+                },
+            )
             if handoff_manifest_path:
                 if plan_path:
                     record_consumption(
@@ -1797,10 +2224,81 @@ root_cause: one concise sentence, or "none" if passed
                 planner_draft_script_path=planner_draft_script_path,
                 handoff_manifest_path=handoff_manifest_path,
             )
+            if test_path and test_path.exists():
+                payload = self._generator_agent_note_payload()
+                body = f"Output: {test_path}"
+                counts_body = self._generator_counts_body(payload)
+                if counts_body:
+                    body += f"\n{counts_body}"
+                self._commit_generator_note(
+                    phase="generator_artifact_produced",
+                    title="Generator artifact produced",
+                    body=body,
+                    url=target_url,
+                    artifact_path=str(test_path),
+                    payload={
+                        **payload,
+                        "test_path": str(test_path),
+                        "target_url": target_url,
+                        "file_hash": self._file_sha256(test_path),
+                    },
+                    stable_context={
+                        "target_url": target_url,
+                        "test_path": str(test_path),
+                        "output_name": output_name,
+                        "file_hash": self._file_sha256(test_path),
+                    },
+                )
+            else:
+                diagnostics = self._generator_failure_diagnostics()
+                error_msg = (
+                    diagnostics.get("last_agent_result", {}).get("error")
+                    or diagnostics.get("exception")
+                    or "Native generator failed to create test file"
+                )
+                self._commit_generator_note(
+                    phase="generator_failed",
+                    title="Generator failed",
+                    body=f"Failure category: generation\n{error_msg}",
+                    note_type="blocker",
+                    level="error",
+                    url=target_url,
+                    payload={
+                        "failure_category": "generation",
+                        "message": error_msg,
+                        "diagnostics": diagnostics,
+                    },
+                    stable_context={
+                        "spec_path": spec_path,
+                        "target_url": target_url,
+                        "output_name": output_name,
+                        "browser": browser,
+                    },
+                )
             return test_path
         except Exception as e:
             logger.error(f"Native generator error: {e}")
             self._last_native_generator_exception = str(e)
+            diagnostics = self._generator_failure_diagnostics()
+            self._commit_generator_note(
+                phase="generator_failed",
+                title="Generator failed",
+                body=f"Failure category: generation\n{e}",
+                note_type="blocker",
+                level="error",
+                url=target_url,
+                payload={
+                    "failure_category": "generation",
+                    "message": str(e),
+                    "diagnostics": diagnostics,
+                },
+                stable_context={
+                    "spec_path": spec_path,
+                    "target_url": target_url,
+                    "output_name": output_name,
+                    "browser": browser,
+                },
+            )
             return None
 
     def _generator_failure_diagnostics(self) -> dict[str, Any]:
@@ -2578,6 +3076,23 @@ Requirements:
         return len(re.findall(r"\bexpect\s*\(|\bassert\.", content or ""))
 
     @staticmethod
+    def _assertion_signatures(content: str) -> set[str]:
+        signatures: set[str] = set()
+        for line in (content or "").splitlines():
+            stripped = re.sub(r"\s+", " ", line.strip())
+            if re.search(r"\bexpect\s*\(|\bassert\.", stripped):
+                signatures.add(stripped)
+        return signatures
+
+    @classmethod
+    def _has_equivalent_assertion_replacement(cls, before: str, after: str) -> bool:
+        before_signatures = cls._assertion_signatures(before)
+        if not before_signatures:
+            return True
+        after_signatures = cls._assertion_signatures(after)
+        return bool(after_signatures and not before_signatures.isdisjoint(after_signatures))
+
+    @staticmethod
     def _has_test_fixme(content: str) -> bool:
         return bool(re.search(r"\btest\.fixme\s*\(", content or ""))
 
@@ -2588,6 +3103,8 @@ Requirements:
     @staticmethod
     def _guardrail_category(category: str | None) -> str:
         value = str(category or "").lower()
+        if value in {"sort_select", "sort", "select", "dropdown", "combobox"}:
+            return "sort_select"
         if value in {"selector_changed", "selector"}:
             return "selector"
         if value in {"timeout", "timing"}:
@@ -2625,16 +3142,22 @@ Requirements:
             missing.append("first_tool_test_debug_or_test_run")
         if changed and scoped_test_run["required"] and not scoped_test_run["scoped"]:
             missing.append("scoped_test_run")
-        if changed and category in {"selector", "timing"} and not (
-            {"browser_snapshot", "browser_generate_locator"} & tool_set
+        if changed and category in {"selector", "timing", "sort_select"} and not (
+            {"browser_snapshot", "browser_generate_locator", "browser_evaluate"} & tool_set
         ):
-            missing.append("browser_snapshot_or_browser_generate_locator")
+            if category == "sort_select":
+                missing.append("browser_snapshot_or_browser_evaluate_or_browser_generate_locator")
+            else:
+                missing.append("browser_snapshot_or_browser_generate_locator")
         if changed and category in {"auth", "test_data", "server_error", "product_bug", "connectivity", "not_found"} and not (
             {"browser_network_requests", "browser_console_messages"} & tool_set
         ):
             missing.append("browser_network_requests_or_browser_console_messages")
 
-        assertion_removed = self._assertion_count(content_after) < self._assertion_count(content_before)
+        assertion_removed = (
+            self._assertion_count(content_after) < self._assertion_count(content_before)
+            and not self._has_equivalent_assertion_replacement(content_before, content_after)
+        )
         fixme_before = self._has_test_fixme(content_before)
         fixme_explicit = self._has_test_fixme(content_after)
         newly_introduced_fixme = fixme_explicit and not fixme_before
@@ -2656,6 +3179,7 @@ Requirements:
                 "browser_resume",
                 "browser_snapshot",
                 "browser_generate_locator",
+                "browser_evaluate",
                 "browser_network_requests",
                 "browser_console_messages",
             }
@@ -2668,7 +3192,7 @@ Requirements:
             "scoped_test_run": scoped_test_run,
             "mcp_evidence_tools_used": evidence_tools,
             "used_failure_state_tool": bool(
-                {"test_debug", "browser_resume", "browser_snapshot"} & tool_set
+                {"test_debug", "test_run", "browser_resume", "browser_snapshot"} & tool_set
             ),
             "assertion_removed": assertion_removed,
             "test_fixme_explicit": fixme_explicit,
@@ -2685,44 +3209,58 @@ Requirements:
     ) -> dict[str, Any]:
         required_values = {
             "file": failure_metadata.get("file"),
-            "project": failure_metadata.get("project"),
+            "project": failure_metadata.get("project") or failure_metadata.get("projectName") or failure_metadata.get("projectId"),
             "title": failure_metadata.get("title") or failure_metadata.get("full_title"),
         }
         required_values = {key: str(value) for key, value in required_values.items() if value}
         if not required_values:
             return {"required": False, "scoped": True, "missing": []}
 
-        failure_state_call = next(
-            (
-                call
-                for call in tool_calls
-                if self._normalized_tool_name(call.get("tool") or call.get("name"))
-                in {"test_debug", "test_run"}
-            ),
-            None,
-        )
-        if not failure_state_call:
+        failure_state_calls = [
+            call
+            for call in tool_calls
+            if self._normalized_tool_name(call.get("tool") or call.get("name"))
+            in {"test_debug", "test_run"}
+        ]
+        if not failure_state_calls:
             return {"required": True, "scoped": False, "missing": sorted(required_values)}
 
-        call_input = failure_state_call.get("input") or failure_state_call.get("arguments") or {}
-        missing = [
-            key
-            for key, value in required_values.items()
-            if not self._tool_input_contains(call_input, value)
-        ]
-        return {"required": True, "scoped": not missing, "missing": missing}
+        missing_by_call: list[list[str]] = []
+        for call in failure_state_calls:
+            call_input = call.get("input") or call.get("arguments") or {}
+            missing = [
+                key
+                for key, value in required_values.items()
+                if not self._tool_input_contains(call_input, value, field=key)
+            ]
+            if not missing:
+                return {"required": True, "scoped": True, "missing": []}
+            missing_by_call.append(missing)
+        best_missing = min(missing_by_call, key=len) if missing_by_call else sorted(required_values)
+        return {"required": True, "scoped": False, "missing": best_missing}
 
     @classmethod
-    def _tool_input_contains(cls, value: Any, expected: str) -> bool:
+    def _tool_input_contains(cls, value: Any, expected: str, *, field: str | None = None) -> bool:
         expected_lower = expected.lower()
         expected_name = Path(expected).name.lower()
         if isinstance(value, str):
             lower = value.lower()
             return expected_lower in lower or expected_name in lower
         if isinstance(value, dict):
-            return any(cls._tool_input_contains(item, expected) for item in value.values())
+            aliases = {
+                "file": {"file", "testFile", "test_file", "path", "locations", "location"},
+                "project": {"project", "projectName", "project_name", "projectId", "project_id", "browser"},
+                "title": {"title", "grep", "testId", "test_id", "testName", "test_name", "name"},
+            }
+            if field and any(key in value for key in aliases.get(field, set())):
+                return any(
+                    cls._tool_input_contains(value.get(key), expected, field=field)
+                    for key in aliases.get(field, set())
+                    if key in value
+                )
+            return any(cls._tool_input_contains(item, expected, field=field) for item in value.values())
         if isinstance(value, list):
-            return any(cls._tool_input_contains(item, expected) for item in value)
+            return any(cls._tool_input_contains(item, expected, field=field) for item in value)
         return expected_lower in str(value).lower()
 
     def _evaluate_api_healer_guardrails(
@@ -2786,6 +3324,106 @@ Requirements:
             )
         except Exception as exc:
             logger.debug("Could not emit healer agent run event %s: %s", event_type, exc)
+
+    @staticmethod
+    def _healer_tool_summary(tool_calls: list[dict[str, Any]] | None) -> dict[str, Any]:
+        calls = tool_calls or []
+        tools = [call.get("tool") or call.get("name") for call in calls if isinstance(call, dict)]
+        return {
+            "count": len(calls),
+            "tools": [tool for tool in tools if tool],
+            "browser_tools": [
+                tool
+                for tool in tools
+                if isinstance(tool, str) and tool.startswith("browser_")
+            ],
+            "test_tools": [
+                tool
+                for tool in tools
+                if tool in {"test_debug", "test_list", "test_run"}
+            ],
+        }
+
+    @staticmethod
+    def _healer_note_payload(
+        *,
+        attempt: int | None,
+        browser: str,
+        test_path: Path,
+        failure_category: str | None,
+        failed_test: dict[str, Any] | None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        guardrail: dict[str, Any] | None = None,
+        failure_evidence_packet: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "attempt": attempt,
+            "browser": browser,
+            "test_file": str(test_path),
+            "failure_category": failure_category,
+            "failed_test": failed_test,
+            "tool_summary": FullNativePipeline._healer_tool_summary(tool_calls),
+            "evidence_tools": (guardrail or {}).get("mcp_evidence_tools_used", []),
+            "guardrail_status": (guardrail or {}).get("guardrail_status"),
+            "missing_required_tools": (guardrail or {}).get("missing_required_tools", []),
+            "failure_evidence_packet": failure_evidence_packet,
+            "diagnosis": (extra or {}).get("diagnosis") or (extra or {}).get("root_cause"),
+            "attempted_fix": (extra or {}).get("attempted_fix") or (extra or {}).get("strategy"),
+            "validation_result": (extra or {}).get("validation_result"),
+            "blocker_reason": (extra or {}).get("blocker_reason") or (extra or {}).get("error_summary"),
+            "changed_selectors": (extra or {}).get("changed_selectors"),
+            "failure_signature": {
+                "category": failure_category,
+                "failed_test": failed_test,
+                "missing_required_tools": (guardrail or {}).get("missing_required_tools", []),
+            },
+        }
+        payload.update(extra or {})
+        return {key: value for key, value in payload.items() if value not in (None, {}, [])}
+
+    def _emit_healer_tool_observability(
+        self,
+        *,
+        attempt: int,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        run_id = getattr(self, "owner_id", None)
+        if not run_id:
+            return
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name") or tool_call.get("tool")
+            tool_suffix = tool_call.get("tool") or str(tool_name or "").rsplit("__", 1)[-1]
+            generic_type = "browser_action" if str(tool_suffix).startswith("browser_") else "tool_call"
+            payload = {
+                "attempt": attempt,
+                "tool": tool_suffix,
+                "tool_name": tool_name,
+                "tool_input": tool_call.get("input"),
+                "success": tool_call.get("success", True),
+            }
+            self._emit_healer_event(
+                generic_type,
+                f"Healer used {tool_suffix}.",
+                payload=payload,
+                level="info" if tool_call.get("success", True) is not False else "warning",
+            )
+            self._emit_healer_event(
+                "healer_tool_call",
+                f"Healer used {tool_suffix}.",
+                payload={
+                    "attempt": attempt,
+                    "tool": tool_suffix,
+                    "name": tool_name,
+                    "success": tool_call.get("success", True),
+                },
+            )
+        try:
+            from orchestrator.services.agent_trace import record_tool_result_spans
+
+            record_tool_result_spans(str(run_id), tool_calls)
+        except Exception as exc:
+            logger.debug("Could not record healer tool result spans: %s", exc)
 
     def _emit_handoff_event(
         self,
@@ -3000,6 +3638,26 @@ Requirements:
             or categorize_error(result.error_summary or result.output[-2000:])
         )
         attempt_records: list[dict] = []
+        base_note_payload = self._healer_note_payload(
+            attempt=None,
+            browser=browser,
+            test_path=test_path,
+            failure_category=current_error_category,
+            failed_test=failure_metadata,
+        )
+        self._commit_healer_note(
+            phase="healer_handoff_ready",
+            title="Healer handoff ready",
+            body="Generated test failed and native healer context is ready.",
+            note_type="handoff",
+            payload=base_note_payload,
+            stable_context={
+                "test_path": str(test_path),
+                "browser": browser,
+                "failure_category": current_error_category,
+                "failed_test": failure_metadata,
+            },
+        )
 
         def record_healer_manifest_attempt(
             *,
@@ -3112,6 +3770,19 @@ Requirements:
                     "error_category": current_error_category,
                 },
             )
+            self._commit_healer_note(
+                phase="healer_attempt_started",
+                title=f"Healer attempt {attempt} started",
+                body=f"Native healer attempt {attempt}/{max_attempts} started.",
+                payload=self._healer_note_payload(
+                    attempt=attempt,
+                    browser=browser,
+                    test_path=test_path,
+                    failure_category=current_error_category,
+                    failed_test=failure_metadata,
+                ),
+                stable_context={"attempt": attempt, "test_path": str(test_path)},
+            )
 
             try:
                 content_before = ""
@@ -3138,17 +3809,10 @@ Requirements:
                 tool_calls = self._normalize_tool_calls(
                     getattr(self.native_healer, "last_tool_calls", []) or []
                 )
-                for tool_call in tool_calls:
-                    self._emit_healer_event(
-                        "healer_tool_call",
-                        f"Healer used {tool_call.get('tool') or tool_call.get('name')}.",
-                        payload={
-                            "attempt": attempt,
-                            "tool": tool_call.get("tool"),
-                            "name": tool_call.get("name"),
-                            "success": tool_call.get("success", True),
-                        },
-                    )
+                self._emit_healer_tool_observability(
+                    attempt=attempt,
+                    tool_calls=tool_calls,
+                )
                 guardrail = (
                     self._evaluate_healer_guardrails(
                         content_before=content_before,
@@ -3177,13 +3841,14 @@ Requirements:
                                 "browser_resume",
                                 "browser_snapshot",
                                 "browser_generate_locator",
+                                "browser_evaluate",
                                 "browser_network_requests",
                                 "browser_console_messages",
                             }
                         ],
                         "used_failure_state_tool": any(
                             call.get("tool")
-                            in {"test_debug", "browser_resume", "browser_snapshot"}
+                            in {"test_debug", "test_run", "browser_resume", "browser_snapshot"}
                             for call in tool_calls
                         ),
                         "scoped_test_run": {"required": False, "scoped": True, "missing": []},
@@ -3207,6 +3872,33 @@ Requirements:
                             "attempt": attempt,
                             "evidence_tools": guardrail.get("mcp_evidence_tools_used", []),
                             "failure_evidence_packet": evidence_path,
+                        },
+                    )
+                    self._commit_healer_note(
+                        phase="healer_failure_state_captured",
+                        title="Failure-state evidence captured",
+                        body="Healer captured failed browser state evidence before editing.",
+                        note_type="evidence",
+                        artifact_path=evidence_path,
+                        payload=self._healer_note_payload(
+                            attempt=attempt,
+                            browser=browser,
+                            test_path=test_path,
+                            failure_category=current_error_category,
+                            failed_test=failure_metadata,
+                            tool_calls=tool_calls,
+                            guardrail=guardrail,
+                            failure_evidence_packet=evidence_path,
+                            extra={
+                                "diagnosis": (diagnosis or {}).get("root_cause"),
+                                "validation_result": "failure_state_evidence_captured",
+                            },
+                        ),
+                        stable_context={
+                            "attempt": attempt,
+                            "test_path": str(test_path),
+                            "phase": "failure_state",
+                            "evidence_path": evidence_path,
                         },
                     )
                 attempt_record = {
@@ -3278,6 +3970,35 @@ Requirements:
                             "failure_evidence_packet": evidence_path,
                         },
                     )
+                    self._commit_healer_note(
+                        phase="healer_guardrail_failed",
+                        title="Healer edit rejected by guardrail",
+                        body=f"Missing required evidence: {missing or 'unknown'}",
+                        note_type="blocker",
+                        level="warning",
+                        artifact_path=evidence_path,
+                        payload=self._healer_note_payload(
+                            attempt=attempt,
+                            browser=browser,
+                            test_path=test_path,
+                            failure_category=current_error_category,
+                            failed_test=failure_metadata,
+                            tool_calls=tool_calls,
+                            guardrail=guardrail,
+                            failure_evidence_packet=evidence_path,
+                            extra={
+                                "error_summary": attempt_record.get("error_summary"),
+                                "blocker_reason": attempt_record.get("error_summary"),
+                                "reverted": attempt_record.get("reverted"),
+                            },
+                        ),
+                        stable_context={
+                            "attempt": attempt,
+                            "test_path": str(test_path),
+                            "guardrail_status": guardrail.get("guardrail_status"),
+                            "missing_required_tools": guardrail.get("missing_required_tools", []),
+                        },
+                    )
                     error_log = (
                         "## Previous Healer Edit Rejected By Guardrail\n\n"
                         f"Missing required evidence: {missing or 'unknown'}\n\n"
@@ -3300,6 +4021,34 @@ Requirements:
                                 "attempt": attempt,
                                 "diff_stat": attempt_record.get("diff_stat"),
                                 "guardrail_status": attempt_record.get("guardrail_status"),
+                            },
+                        )
+                        self._commit_healer_note(
+                            phase="healer_edit_accepted",
+                            title="Healer edit accepted for verification",
+                            body=f"Diff: {attempt_record.get('diff_stat') or 'unknown'}",
+                            note_type="attempted_fix",
+                            payload=self._healer_note_payload(
+                                attempt=attempt,
+                                browser=browser,
+                                test_path=test_path,
+                                failure_category=current_error_category,
+                                failed_test=failure_metadata,
+                                tool_calls=tool_calls,
+                                guardrail=guardrail,
+                                failure_evidence_packet=evidence_path,
+                                extra={
+                                    "diff_stat": attempt_record.get("diff_stat"),
+                                    "attempted_fix": attempt_record.get("strategy"),
+                                    "diagnosis": attempt_record.get("root_cause"),
+                                    "changed_selectors": attempt_record.get("changed_selectors"),
+                                    "validation_result": "pending_authoritative_rerun",
+                                },
+                            ),
+                            stable_context={
+                                "attempt": attempt,
+                                "test_path": str(test_path),
+                                "content_hash_after": attempt_record.get("content_hash_after"),
                             },
                         )
                     logger.info("Re-running healed test...")
@@ -3345,6 +4094,34 @@ Requirements:
                             "healer_verification_passed",
                             f"Healed test passed after attempt {attempt}.",
                             payload={"attempt": attempt, "test_file": str(test_path), "browser": browser},
+                        )
+                        self._commit_healer_note(
+                            phase="healer_verification_passed",
+                            title=f"Healer verification passed on attempt {attempt}",
+                            body="Authoritative rerun passed after healer edits.",
+                            note_type="validation",
+                            payload=self._healer_note_payload(
+                                attempt=attempt,
+                                browser=browser,
+                                test_path=test_path,
+                                failure_category="passed",
+                                failed_test=failure_metadata,
+                                tool_calls=tool_calls,
+                                guardrail=guardrail,
+                                failure_evidence_packet=evidence_path,
+                                extra={
+                                    "diff_stat": attempt_record.get("diff_stat"),
+                                    "root_cause": attempt_record.get("root_cause"),
+                                    "strategy": attempt_record.get("strategy"),
+                                    "changed_selectors": attempt_record.get("changed_selectors"),
+                                    "validation_result": "passed",
+                                },
+                            ),
+                            stable_context={
+                                "attempt": attempt,
+                                "test_path": str(test_path),
+                                "phase": "verification_passed",
+                            },
                         )
                         logger.info(f"Healed Test PASSED (after {attempt} attempt(s))!")
                         stability_result = await self._verify_stability_or_harden(
@@ -3404,6 +4181,37 @@ Requirements:
                                 "error_summary": attempt_record.get("error_summary"),
                             },
                         )
+                        self._commit_healer_note(
+                            phase="healer_verification_failed",
+                            title=f"Healer verification failed on attempt {attempt}",
+                            body=attempt_record.get("error_summary"),
+                            note_type="blocker",
+                            level="warning",
+                            payload=self._healer_note_payload(
+                                attempt=attempt,
+                                browser=browser,
+                                test_path=test_path,
+                                failure_category=attempt_record.get("error_category"),
+                                failed_test=failure_metadata,
+                                tool_calls=tool_calls,
+                                guardrail=guardrail,
+                                failure_evidence_packet=evidence_path,
+                                extra={
+                                    "error_summary": attempt_record.get("error_summary"),
+                                    "blocker_reason": attempt_record.get("error_summary"),
+                                    "validation_result": "failed",
+                                    "root_cause": attempt_record.get("root_cause"),
+                                    "strategy": attempt_record.get("strategy"),
+                                    "changed_selectors": attempt_record.get("changed_selectors"),
+                                },
+                            ),
+                            stable_context={
+                                "attempt": attempt,
+                                "test_path": str(test_path),
+                                "phase": "verification_failed",
+                                "error_category": attempt_record.get("error_category"),
+                            },
+                        )
                         error_log = "## Failure After Previous Heal Attempt\n\n" + (
                             self._build_structured_failure_context(
                                 test_path=test_path,
@@ -3434,8 +4242,39 @@ Requirements:
                     )
                     self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
                     logger.warning("Healer returned no code")
+                    self._commit_healer_note(
+                        phase="healer_no_fix_produced",
+                        title=f"Healer produced no fix on attempt {attempt}",
+                        body="Healer returned no valid code for verification.",
+                        note_type="blocker",
+                        level="warning",
+                        artifact_path=evidence_path,
+                        payload=self._healer_note_payload(
+                            attempt=attempt,
+                            browser=browser,
+                            test_path=test_path,
+                            failure_category=current_error_category,
+                            failed_test=failure_metadata,
+                            tool_calls=tool_calls,
+                            guardrail=guardrail,
+                            failure_evidence_packet=evidence_path,
+                            extra={"error_category": "no_fix_produced"},
+                        ),
+                        stable_context={
+                            "attempt": attempt,
+                            "test_path": str(test_path),
+                            "phase": "no_fix",
+                        },
+                    )
 
             except HealerTimeoutError:
+                timeout_tool_calls = self._normalize_tool_calls(
+                    getattr(self.native_healer, "last_tool_calls", []) or []
+                )
+                self._emit_healer_tool_observability(
+                    attempt=attempt,
+                    tool_calls=timeout_tool_calls,
+                )
                 self._record_healing_attempt(
                     run_dir,
                     test_path,
@@ -3447,6 +4286,27 @@ Requirements:
                         "error_summary": "Healer agent timed out",
                         "changed": False,
                         "passed_after": False,
+                    },
+                )
+                self._commit_healer_note(
+                    phase="healer_timeout",
+                    title=f"Healer timed out on attempt {attempt}",
+                    body="Healer agent timed out before producing a verified fix.",
+                    note_type="blocker",
+                    level="warning",
+                    payload=self._healer_note_payload(
+                        attempt=attempt,
+                        browser=browser,
+                        test_path=test_path,
+                        failure_category=current_error_category,
+                        failed_test=failure_metadata,
+                        tool_calls=timeout_tool_calls,
+                        extra={"error_category": "healer_timeout"},
+                    ),
+                    stable_context={
+                        "attempt": attempt,
+                        "test_path": str(test_path),
+                        "phase": "timeout",
                     },
                 )
                 logger.error(
@@ -3481,6 +4341,13 @@ Requirements:
                 continue
 
             except Exception as e:
+                error_tool_calls = self._normalize_tool_calls(
+                    getattr(self.native_healer, "last_tool_calls", []) or []
+                )
+                self._emit_healer_tool_observability(
+                    attempt=attempt,
+                    tool_calls=error_tool_calls,
+                )
                 error_attempt_record = {
                     "attempt": attempt,
                     "timestamp": datetime.now().isoformat(),
@@ -3501,6 +4368,31 @@ Requirements:
                     test_path,
                     attempt_records,
                     error_attempt_record,
+                )
+                self._commit_healer_note(
+                    phase="healer_error",
+                    title=f"Healer errored on attempt {attempt}",
+                    body=str(e)[:1000],
+                    note_type="blocker",
+                    level="error",
+                    payload=self._healer_note_payload(
+                        attempt=attempt,
+                        browser=browser,
+                        test_path=test_path,
+                        failure_category=current_error_category,
+                        failed_test=failure_metadata,
+                        tool_calls=error_tool_calls,
+                        extra={
+                            "error_category": "healer_error",
+                            "error_summary": str(e)[:500],
+                        },
+                    ),
+                    stable_context={
+                        "attempt": attempt,
+                        "test_path": str(test_path),
+                        "phase": "error",
+                        "error": str(e)[:200],
+                    },
                 )
                 logger.warning(f"Healing error: {e}")
 
@@ -3545,6 +4437,31 @@ Requirements:
                 failure_reason=f"Failed after {max_attempts} native healing attempts",
                 metadata={"attempts": max_attempts},
             )
+
+        self._commit_healer_note(
+            phase="healer_exhausted",
+            title="Native healer exhausted",
+            body=f"Failed after {max_attempts} native healing attempts.",
+            note_type="blocker",
+            level="error",
+            payload=self._healer_note_payload(
+                attempt=max_attempts,
+                browser=browser,
+                test_path=test_path,
+                failure_category=current_error_category,
+                failed_test=failure_metadata,
+                extra={
+                    "attempts": max_attempts,
+                    "error_category": "healing_exhausted",
+                },
+            ),
+            stable_context={
+                "test_path": str(test_path),
+                "browser": browser,
+                "phase": "exhausted",
+                "attempts": max_attempts,
+            },
+        )
 
         return {
             "success": False,
@@ -4164,6 +5081,7 @@ Requirements:
         storage_state_path: str | Path | None = None,
     ) -> dict[str, Any]:
         """Prepare run-local Playwright config/MCP files for saved browser auth."""
+        run_dir = Path(run_dir).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
         if storage_state_path is None:
             candidate = run_dir / "browser-auth-storage-state.json"
@@ -4191,6 +5109,7 @@ Requirements:
                 config_path=playwright_config_dst,
                 headless=headless,
                 storage_state_path=storage_state_path,
+                agent_run_id=getattr(self, "owner_id", None),
             )
         else:
             runtime = {}
@@ -4607,33 +5526,30 @@ Requirements:
 
         return None
 
-    def _extract_login_url(self, spec_content: str, target_url: str) -> str | None:
-        """Extract login URL from spec or derive from target URL."""
-        # Check for explicit login URL in spec
+    def _extract_login_url(
+        self,
+        spec_content: str,
+        target_url: str,
+        *,
+        auth_context: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Extract an explicit login URL without guessing generic login paths."""
+        if auth_context:
+            for key in ("login_url", "loginUrl", "auth_login_url"):
+                value = auth_context.get(key)
+                if isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+                    return value.strip().rstrip(".")
+
         login_patterns = [
             r'login\s+(?:page|url):\s*(https?://[^\s\'"]+)',
-            r'sign[_-]?in\s+(?:page|url):\s*(https?://[^\s\'"]+)',
+            r'sign[_\-\s]?in\s+(?:page|url):\s*(https?://[^\s\'"]+)',
+            r'(?:log\s*in|login|sign\s*in|signin|sign-in)\s+(?:at|to|via|on)\s+(https?://[^\s\'"]+)',
         ]
 
         for pattern in login_patterns:
             match = re.search(pattern, spec_content, re.IGNORECASE)
             if match:
-                return match.group(1)
-
-        # Check if there's a login step in the spec
-        if re.search(r"(login|sign\s*in)", spec_content, re.IGNORECASE):
-            from urllib.parse import urlparse
-
-            parsed = urlparse(target_url)
-            # Common login URL patterns
-            for login_path in [
-                "/login",
-                "/signin",
-                "/sign_in",
-                "/users/sign_in",
-                "/auth/login",
-            ]:
-                return f"{parsed.scheme}://{parsed.netloc}{login_path}"
+                return match.group(1).rstrip(".")
 
         return None
 

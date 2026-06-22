@@ -907,6 +907,7 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
                                 browserActivitySeen={generation.browserActivitySeen === true}
                                 browserActive={generation.browserActive === true}
                                 browserLastTool={generation.browserLastTool || null}
+                                suspectedBrowserDialogBlock={generation.suspectedBrowserDialogBlock === true}
                             />
                             <div className="prd-console-browser-diagnostics">
                                 {[

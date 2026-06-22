@@ -170,6 +170,152 @@ def _has_evidence(raw_output: str, artifacts: list[dict[str, Any]], tool_calls: 
     return bool(tool_calls)
 
 
+def _short_tool_name(value: Any) -> str:
+    name = str(value or "")
+    return name.rsplit("__", 1)[-1] if "__" in name else name
+
+
+def _browser_timeout_partial_reason(runtime_diagnostics: dict[str, Any], tool_calls: list[Any]) -> str | None:
+    error_text = _raw_text(runtime_diagnostics.get("last_browser_error") or runtime_diagnostics.get("error") or "")
+    error_type = str(runtime_diagnostics.get("error_type") or runtime_diagnostics.get("failure_category") or "")
+    timed_out = (
+        runtime_diagnostics.get("browser_tool_timeout") is True
+        or error_type == "browser_tool_timeout"
+        or "timed out" in error_text.lower()
+        or "timeout" in error_text.lower()
+    )
+    timeout_tool = _short_tool_name(
+        runtime_diagnostics.get("timed_out_tool_name")
+        or runtime_diagnostics.get("blocked_tool_name")
+        or runtime_diagnostics.get("last_tool")
+    )
+    for call in reversed(tool_calls):
+        name = _short_tool_name(call.get("name") if isinstance(call, dict) else getattr(call, "name", ""))
+        call_error = _raw_text(call.get("error") if isinstance(call, dict) else getattr(call, "error", ""))
+        if name.startswith("browser_") and ("timeout" in call_error.lower() or "timed out" in call_error.lower()):
+            timed_out = True
+            timeout_tool = timeout_tool or name
+            error_text = error_text or call_error
+            break
+    if not timed_out:
+        return None
+
+    def _number(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    action_timeout = _number(runtime_diagnostics.get("browser_action_timeout_seconds"))
+    tool_timeout = _number(runtime_diagnostics.get("browser_tool_timeout_seconds"))
+    timeout_suffix = ""
+    if action_timeout and tool_timeout:
+        timeout_suffix = f" after {action_timeout:g}s/{tool_timeout:g}s"
+    elif tool_timeout:
+        timeout_suffix = f" after {tool_timeout:g}s"
+    elif action_timeout:
+        timeout_suffix = f" after {action_timeout:g}s"
+    tool_label = timeout_tool or "browser action"
+    return f"Recovered partial evidence after {tool_label} timed out{timeout_suffix}."
+
+
+def _runtime_auth_failure_reason(runtime_diagnostics: dict[str, Any], raw_output: str, existing_result: dict[str, Any]) -> str | None:
+    error_type = str(runtime_diagnostics.get("error_type") or runtime_diagnostics.get("failure_category") or "")
+    error_text = _raw_text(
+        runtime_diagnostics.get("error")
+        or runtime_diagnostics.get("runtime_error")
+        or existing_result.get("error")
+        or raw_output
+    )
+    lowered = error_text.lower()
+    if (
+        error_type == "claude_code_auth_required"
+        or "authentication_failed" in lowered
+        or ("not logged in" in lowered and "run /login" in lowered)
+        or ("token expired or incorrect" in lowered and "401" in lowered)
+    ):
+        return "Claude Code authentication failed. Refresh Claude Code OAuth in Settings or run Claude Code login/token setup for the backend runtime."
+    return None
+
+
+def _collect_native_context(run_id: str) -> dict[str, Any]:
+    try:
+        from sqlmodel import Session, select
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRunEvidence, AgentRunNote
+        from orchestrator.services.agent_native_runs import serialize_agent_run_note
+
+        with Session(engine) as session:
+            notes = session.exec(
+                select(AgentRunNote).where(AgentRunNote.run_id == run_id).order_by(AgentRunNote.sequence.asc()).limit(100)
+            ).all()
+            evidence = session.exec(
+                select(AgentRunEvidence)
+                .where(AgentRunEvidence.run_id == run_id)
+                .order_by(AgentRunEvidence.created_at.asc())
+                .limit(200)
+            ).all()
+        return {
+            "notes": [serialize_agent_run_note(note) for note in notes],
+            "evidence": [
+                {
+                    "id": item.id,
+                    "type": item.evidence_type,
+                    "title": item.title,
+                    "summary": item.summary,
+                    "artifact_path": item.artifact_path,
+                    "url": item.url,
+                    "tool_name": item.tool_name,
+                    "trace_span_id": item.trace_span_id,
+                    "event_sequence": item.event_sequence,
+                }
+                for item in evidence
+            ],
+        }
+    except Exception:
+        return {"notes": [], "evidence": []}
+
+
+def _apply_finding_gates(
+    structured: dict[str, Any],
+    *,
+    artifacts: list[dict[str, Any]],
+    tool_calls: list[Any],
+    native_evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    findings = structured.get("findings")
+    if not isinstance(findings, list):
+        return {"finding_count": 0, "downgraded_findings": 0, "warnings": []}
+    durable_evidence_present = bool(artifacts or tool_calls or native_evidence or structured.get("evidence"))
+    warnings: list[str] = []
+    downgraded = 0
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            continue
+        status = str(finding.get("status") or finding.get("verification_status") or "").strip().lower()
+        if status in {"candidate", "rejected"}:
+            finding["verification_status"] = status
+            continue
+        has_inline_evidence = bool(
+            finding.get("evidence")
+            or finding.get("evidence_ids")
+            or finding.get("evidence_refs")
+            or finding.get("artifact_path")
+            or finding.get("url")
+        )
+        if durable_evidence_present or has_inline_evidence:
+            finding.setdefault("verification_status", "verified")
+            continue
+        finding["verification_status"] = "partial"
+        finding["partial_reason"] = finding.get("partial_reason") or "No durable evidence was linked to this finding."
+        finding.setdefault("confidence", "low")
+        downgraded += 1
+        warnings.append(f"Finding {index + 1} was downgraded because it has no linked evidence.")
+    return {"finding_count": len(findings), "downgraded_findings": downgraded, "warnings": warnings}
+
+
 class AgentRunFinalizer:
     """Validate, repair, and enrich raw agent output before terminal persistence."""
 
@@ -186,10 +332,15 @@ class AgentRunFinalizer:
         runtime_diagnostics: dict[str, Any] | None = None,
         artifacts: list[dict[str, Any]] | None = None,
         existing_result: dict[str, Any] | None = None,
+        native_notes: list[dict[str, Any]] | None = None,
+        native_evidence: list[dict[str, Any]] | None = None,
     ) -> FinalizedAgentRun:
         config = dict(config or {})
         tool_calls = list(tool_calls or [])
         artifacts = list(artifacts if artifacts is not None else _collect_agent_run_artifacts(run_id))
+        native_context = _collect_native_context(run_id) if native_notes is None or native_evidence is None else {}
+        native_notes = list(native_notes if native_notes is not None else native_context.get("notes") or [])
+        native_evidence = list(native_evidence if native_evidence is not None else native_context.get("evidence") or [])
         if agent_type == "custom":
             return self._finalize_custom(
                 run_id=run_id,
@@ -199,6 +350,8 @@ class AgentRunFinalizer:
                 runtime_diagnostics=runtime_diagnostics or {},
                 artifacts=artifacts,
                 existing_result=existing_result,
+                native_notes=native_notes,
+                native_evidence=native_evidence,
             )
         if agent_type == "exploratory":
             return self._finalize_explorer(
@@ -209,6 +362,8 @@ class AgentRunFinalizer:
                 runtime_diagnostics=runtime_diagnostics or {},
                 artifacts=artifacts,
                 existing_result=existing_result,
+                native_notes=native_notes,
+                native_evidence=native_evidence,
             )
         return self._finalize_generic(
             raw_model_output=raw_model_output,
@@ -227,11 +382,15 @@ class AgentRunFinalizer:
         runtime_diagnostics: dict[str, Any],
         artifacts: list[dict[str, Any]],
         existing_result: dict[str, Any] | None,
+        native_notes: list[dict[str, Any]],
+        native_evidence: list[dict[str, Any]],
     ) -> FinalizedAgentRun:
         raw_output = _raw_text(raw_model_output)
         base = dict(existing_result or {})
         if not raw_output:
             raw_output = _raw_text(base.get("output"))
+        timeout_partial_reason = _browser_timeout_partial_reason(runtime_diagnostics, tool_calls)
+        auth_failure_reason = _runtime_auth_failure_reason(runtime_diagnostics, raw_output, base)
 
         repair_attempts: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -269,13 +428,19 @@ class AgentRunFinalizer:
                     repair_attempts.append({"attempt": 2, "strategy": "repair_malformed_json", "status": "failed"})
 
         evidence_present = _has_evidence(raw_output, artifacts, tool_calls)
-        if structured is None and evidence_present:
+        if structured is None and auth_failure_reason:
+            repair_attempts.append(
+                {"attempt": 3, "strategy": "synthesize_minimal_report_from_evidence", "status": "skipped"}
+            )
+        elif structured is None and evidence_present:
             structured = _build_custom_agent_structured_report(raw_output, config, artifacts)
             contract_status = "partial"
             repair_attempts.append(
                 {"attempt": 3, "strategy": "synthesize_minimal_report_from_evidence", "status": "success"}
             )
             warnings.append("Structured JSON was not returned; a minimal report was synthesized from available evidence.")
+            if timeout_partial_reason:
+                warnings.append(timeout_partial_reason)
         elif structured is None:
             repair_attempts.append(
                 {"attempt": 3, "strategy": "synthesize_minimal_report_from_evidence", "status": "failed"}
@@ -286,18 +451,26 @@ class AgentRunFinalizer:
             "raw_output_chars": len(raw_output),
             "artifacts": len(artifacts),
             "tool_calls": len(tool_calls),
+            "native_note_count": len(native_notes),
+            "native_evidence_count": len(native_evidence),
             "structured_report_present": structured is not None,
             "repair_attempt_count": len([item for item in repair_attempts if int(item.get("attempt") or 0) > 0]),
+            "browser_timeout_recovery_reason": timeout_partial_reason,
             **runtime_diagnostics,
         }
 
         if structured is None:
             result = {
                 **base,
-                "summary": "Custom agent failed: no structured output or recoverable evidence was produced.",
+                "summary": auth_failure_reason
+                or "Custom agent failed: no structured output or recoverable evidence was produced.",
                 "output": raw_output,
-                "error": base.get("error") or "No structured output or recoverable evidence was produced.",
+                "error": auth_failure_reason
+                or base.get("error")
+                or "No structured output or recoverable evidence was produced.",
             }
+            if auth_failure_reason:
+                result["failure_reason"] = "runtime_auth_failed"
             fields = _contract_fields(
                 contract_status="invalid",
                 repair_attempts=repair_attempts,
@@ -313,6 +486,13 @@ class AgentRunFinalizer:
 
         if not structured.get("findings") and not structured.get("test_ideas") and not structured.get("requirements"):
             warnings.append("The structured report contains no findings, test ideas, or candidate requirements.")
+        gate_diagnostics = _apply_finding_gates(
+            structured,
+            artifacts=artifacts,
+            tool_calls=tool_calls,
+            native_evidence=native_evidence,
+        )
+        warnings.extend(gate_diagnostics["warnings"])
 
         result = {
             **base,
@@ -324,8 +504,10 @@ class AgentRunFinalizer:
         result["repair_attempts"] = repair_attempts[: self.max_repair_attempts + 1]
         result.pop("contract_warning", None)
         result["contract_warnings"] = _dedupe_strings(warnings)
-        _merge_diagnostics(result, diagnostics)
         status = PARTIAL_STATUS if contract_status == "partial" else "completed"
+        if status == PARTIAL_STATUS:
+            result["partial_reason"] = timeout_partial_reason or (result["contract_warnings"][0] if result["contract_warnings"] else None)
+        _merge_diagnostics(result, {**diagnostics, "gates": gate_diagnostics})
         return FinalizedAgentRun(status=status, result=result)
 
     def _finalize_explorer(
@@ -338,10 +520,13 @@ class AgentRunFinalizer:
         runtime_diagnostics: dict[str, Any],
         artifacts: list[dict[str, Any]],
         existing_result: dict[str, Any] | None,
+        native_notes: list[dict[str, Any]],
+        native_evidence: list[dict[str, Any]],
     ) -> FinalizedAgentRun:
         raw_output = _raw_text(raw_model_output)
         repair_attempts: list[dict[str, Any]] = []
         warnings: list[str] = []
+        timeout_partial_reason = _browser_timeout_partial_reason(runtime_diagnostics, tool_calls)
 
         if existing_result:
             result = dict(existing_result)
@@ -413,6 +598,8 @@ class AgentRunFinalizer:
             contract_status = "partial"
             status = PARTIAL_STATUS
             warnings.append("Evidence was captured, but no completed evidence-backed flow was observed.")
+            if timeout_partial_reason:
+                warnings.append(timeout_partial_reason)
 
         existing_warning = result.get("contract_warning") or result.get("exploration_status")
         warnings = _dedupe_strings(
@@ -433,7 +620,10 @@ class AgentRunFinalizer:
             "event_count": evidence_count,
             "artifact_count": artifact_evidence["artifact_count"],
             "screenshot_count": artifact_evidence["screenshot_count"],
+            "native_note_count": len(native_notes),
+            "native_evidence_count": len(native_evidence),
             "repair_attempt_count": len(repair_attempts),
+            "browser_timeout_recovery_reason": timeout_partial_reason,
             **browser_tool_diagnostics(tool_calls),
             **runtime_diagnostics,
         }
@@ -441,6 +631,8 @@ class AgentRunFinalizer:
         result["contract_status"] = contract_status
         result["repair_attempts"] = repair_attempts[: self.max_repair_attempts]
         result["contract_warnings"] = warnings
+        if status == PARTIAL_STATUS:
+            result["partial_reason"] = timeout_partial_reason or (warnings[0] if warnings else None)
         _merge_diagnostics(result, diagnostics)
         return FinalizedAgentRun(status=status, result=result)
 

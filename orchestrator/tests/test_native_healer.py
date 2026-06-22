@@ -185,7 +185,7 @@ def test_healer_prompt_includes_failed_test_metadata(monkeypatch):
     assert "## Failed Test Target" in prompt
     assert "Browser/project: `chromium`" in prompt
     assert "Title: `can submit form`" in prompt
-    assert "call `test_debug` scoped to this file" in prompt
+    assert "call `test_debug` scoped to failed file `tests/generated/foo.spec.ts`" in prompt
     assert "Only after `test_debug` has paused" in prompt
     assert "`test_run` for final pass/fail confirmation" in prompt
     assert "Do not call `browser_close`" in prompt

@@ -44,6 +44,7 @@ AUTH_SESSIONS_DIR = Path(
     )
 )
 BROWSER_AUTH_CAPTURE_VERSION = "mcp-storage-v1"
+CLAUDE_CODE_AUTH_MODE = "claude_code_subscription"
 
 
 class BrowserAuthSessionError(RuntimeError):
@@ -703,10 +704,30 @@ def _normalize_capture_error(message: str | None) -> str:
     lower = raw.lower()
     if not raw:
         return "MCP browser auth capture failed."
+    if "direct playwright fallback failed" in lower:
+        return raw[-1200:]
+    if "direct playwright" in lower:
+        return raw[-1200:]
+    if "not valid json storage state" in lower:
+        return raw[-1200:]
     if "not logged in" in lower or "please run /login" in lower:
         return (
             "LLM runtime is not authenticated. Configure the provider API key in Settings or deployment "
             "environment secrets, then restart the backend and worker services if using environment secrets."
+        )
+    if any(
+        token in lower
+        for token in [
+            "init-page",
+            "init page",
+            "browser-dialog-recovery.init",
+            "unexpected token 'export'",
+            "unexpected token export",
+        ]
+    ):
+        return (
+            "Playwright MCP browser auth capture infrastructure failed before navigation: "
+            "the browser init page could not load."
         )
     if any(
         token in lower
@@ -759,6 +780,52 @@ def _normalize_capture_error(message: str | None) -> str:
     return raw[-1200:]
 
 
+def _storage_state_candidates(
+    *, run_dir: Path, artifacts_dir: Path, storage_filename: str
+) -> list[Path]:
+    candidates = [
+        artifacts_dir / storage_filename,
+        run_dir / storage_filename,
+        *sorted(artifacts_dir.rglob("storage-state*.json")),
+        *sorted(run_dir.rglob("storage-state*.json")),
+    ]
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        try:
+            key = candidate.resolve()
+        except OSError:
+            key = candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _env_value(env_vars: dict[str, str] | None, key: str) -> str:
+    if env_vars is not None and key in env_vars:
+        return env_vars.get(key, "")
+    return os.environ.get(key, "")
+
+
+def _is_claude_code_subscription_env(env_vars: dict[str, str] | None) -> bool:
+    auth_mode = _env_value(env_vars, "QUORVEX_LLM_AUTH_MODE").strip().lower()
+    provider = _env_value(env_vars, "QUORVEX_LLM_PROVIDER").strip().lower()
+    return auth_mode in {
+        "claude_code",
+        "claude-code",
+        CLAUDE_CODE_AUTH_MODE,
+    } or provider == CLAUDE_CODE_AUTH_MODE
+
+
+def _claude_code_oauth_token(env_vars: dict[str, str] | None) -> str:
+    token = _env_value(env_vars, "CLAUDE_CODE_OAUTH_TOKEN")
+    if token:
+        os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return token
+
+
 async def _run_capture_agent(
     prompt: str,
     *,
@@ -767,12 +834,21 @@ async def _run_capture_agent(
     session_id: str,
     runtime_env: dict[str, str] | None = None,
 ) -> AgentResult:
+    resolved_env = runtime_env if runtime_env is not None else runtime_env_vars()
     selection = apply_runtime_env_aliases(
-        runtime_env if runtime_env is not None else runtime_env_vars(),
+        resolved_env,
         tier="tool_deep",
     )
     display_provider = infer_display_provider(selection.base_url)
-    if not selection.api_key:
+    is_claude_code_subscription = _is_claude_code_subscription_env(resolved_env)
+    if is_claude_code_subscription:
+        if not _claude_code_oauth_token(resolved_env):
+            raise BrowserAuthSessionError(
+                "Claude Code OAuth token is not configured or not visible to the backend. Configure "
+                "Claude Code subscription auth in Settings or deployment environment secrets, then restart "
+                "the backend and worker services if using environment secrets."
+            )
+    elif not selection.api_key:
         raise BrowserAuthSessionError(
             f"LLM provider API key is not configured for {display_provider}. Configure the provider API key in "
             "Settings or deployment environment secrets, then restart the backend and worker services "
@@ -796,6 +872,16 @@ async def _run_capture_agent(
         timeout_seconds=timeout_seconds,
         allowed_tools=allowed_tools,
         tools=list(allowed_tools),
+        disallowed_tools=[
+            "Bash",
+            "Read",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "LS",
+            "Grep",
+            "Glob",
+        ],
         strict_mcp_config=True,
         session_dir=run_dir,
         cwd=run_dir,
@@ -906,7 +992,6 @@ def capture_storage_state_via_mcp_agent(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     secrets_file = _write_capture_secrets(run_dir, username=username, password=password)
     storage_filename = "storage-state.json"
-    storage_path = artifacts_dir / storage_filename
     runtime = write_playwright_mcp_config(
         run_dir=run_dir,
         server_name="playwright-test",
@@ -944,27 +1029,27 @@ def capture_storage_state_via_mcp_agent(
         raise BrowserAuthSessionError(
             _normalize_capture_error(result.error or result.output)
         )
-    if not storage_path.exists():
-        alternatives = sorted(
-            [
-                *artifacts_dir.glob("storage-state*.json"),
-                *run_dir.glob("storage-state*.json"),
-            ]
-        )
-        if alternatives:
-            storage_path = alternatives[0]
-        else:
-            raise BrowserAuthStorageStateMissingError(
-                _normalize_capture_error("storage state file not produced")
-            )
-    try:
-        state = json.loads(storage_path.read_text())
-    except Exception as exc:
+    parse_error: Exception | None = None
+    for candidate in _storage_state_candidates(
+        run_dir=run_dir,
+        artifacts_dir=artifacts_dir,
+        storage_filename=storage_filename,
+    ):
+        if not candidate.exists():
+            continue
+        try:
+            state = json.loads(candidate.read_text())
+            _validate_storage_state(state)
+            return state
+        except Exception as exc:
+            parse_error = exc
+    if parse_error:
         raise BrowserAuthSessionError(
-            "Storage state file not produced by MCP browser auth capture."
-        ) from exc
-    _validate_storage_state(state)
-    return state
+            "MCP browser auth capture produced storage state, but it was not valid JSON storage state."
+        ) from parse_error
+    raise BrowserAuthStorageStateMissingError(
+        _normalize_capture_error("storage state file not produced")
+    )
 
 
 def refresh_browser_auth_session(
@@ -993,11 +1078,18 @@ def refresh_browser_auth_session(
                 runtime_env=capture_runtime_env,
                 **capture_kwargs,
             )
-        except BrowserAuthStorageStateMissingError:
-            state = create_storage_state_via_playwright(
-                **capture_kwargs,
-                run_dir=_capture_run_dir(f"{row.id}-playwright"),
-            )
+        except BrowserAuthStorageStateMissingError as mcp_exc:
+            try:
+                state = create_storage_state_via_playwright(
+                    **capture_kwargs,
+                    run_dir=_capture_run_dir(f"{row.id}-playwright"),
+                )
+            except BrowserAuthSessionError as direct_exc:
+                mcp_message = _normalize_capture_error(str(mcp_exc))
+                direct_message = _normalize_capture_error(str(direct_exc))
+                raise BrowserAuthSessionError(
+                    f"{mcp_message}; direct Playwright fallback failed: {direct_message}"
+                ) from direct_exc
         row.storage_state_json_encrypted = encrypt_storage_state(state)
         row.status = "active"
         row.failure_reason = None

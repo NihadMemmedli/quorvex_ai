@@ -124,7 +124,18 @@ def normalize_runtime_provider(value: str | None, base_url: str | None = None) -
     raw = (value or "").strip().lower()
     if raw in {"openai", "openai_compatible", "openai-compatible"}:
         return "openai_compatible"
-    if raw in {"anthropic", "anthropic_compatible", "anthropic-compatible", "zai", "openrouter", "custom", "hermes", "hermes_agent", "hermes-agent"}:
+    if raw in {
+        "anthropic",
+        "anthropic_compatible",
+        "anthropic-compatible",
+        "claude_code_subscription",
+        "zai",
+        "openrouter",
+        "custom",
+        "hermes",
+        "hermes_agent",
+        "hermes-agent",
+    }:
         return "anthropic_compatible"
 
     url = (base_url or "").lower()

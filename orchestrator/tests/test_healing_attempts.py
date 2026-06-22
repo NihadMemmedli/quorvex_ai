@@ -4,11 +4,25 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlmodel import Session, SQLModel, select
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-healing-attempts")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from orchestrator.api import db as db_module
+from orchestrator.api.db import engine
+from orchestrator.api.models_db import (
+    AgentRun,
+    AgentRunEvent,
+    AgentRunEvidence,
+    AgentRunNote,
+    AgentRunTaskContract,
+    AgentTraceSnapshot,
+    AgentTraceSpan,
+)
+from orchestrator.services.agent_native_runs import list_agent_run_notes
+from orchestrator.services.agent_run_events import list_agent_run_events
 from orchestrator.services.handoff_manifest import init_manifest, record_artifact
 from orchestrator.utils.agent_runner import AgentResult
 from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
@@ -16,6 +30,58 @@ from orchestrator.workflows.full_native_pipeline import FullNativePipeline, Test
 
 def _bare_pipeline() -> FullNativePipeline:
     return object.__new__(FullNativePipeline)
+
+
+def _ensure_tables() -> None:
+    SQLModel.metadata.create_all(engine, checkfirst=True)
+    db_module._run_migrations()
+
+
+def _create_agent_run(run_id: str) -> None:
+    with Session(engine) as session:
+        session.add(
+            AgentRun(
+                id=run_id,
+                agent_type="spec_generation",
+                status="running",
+                config_json="{}",
+                project_id=None,
+            )
+        )
+        session.commit()
+
+
+def _cleanup_run(run_id: str) -> None:
+    with Session(engine) as session:
+        for evidence in session.exec(select(AgentRunEvidence).where(AgentRunEvidence.run_id == run_id)).all():
+            session.delete(evidence)
+        for note in session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all():
+            session.delete(note)
+        for contract in session.exec(select(AgentRunTaskContract).where(AgentRunTaskContract.run_id == run_id)).all():
+            session.delete(contract)
+        for span in session.exec(select(AgentTraceSpan).where(AgentTraceSpan.run_id == run_id)).all():
+            session.delete(span)
+        for snapshot in session.exec(select(AgentTraceSnapshot).where(AgentTraceSnapshot.run_id == run_id)).all():
+            session.delete(snapshot)
+        for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+            session.delete(event)
+        run = session.get(AgentRun, run_id)
+        if run:
+            session.delete(run)
+        session.commit()
+
+
+def _wire_observed_pipeline(pipeline: FullNativePipeline, run_id: str, healer) -> None:
+    pipeline.owner_id = run_id
+    pipeline.project_id = None
+    pipeline.native_healer = healer
+    pipeline.failure_triage_agent = type(
+        "FakeTriage",
+        (),
+        {"condensed_context": lambda self, diagnosis: None},
+    )()
+    pipeline._build_structured_failure_context = lambda **kwargs: "STRUCTURED-CONTEXT"
+    pipeline._publish_agentic_summary = lambda run_dir: None
 
 
 def test_build_attempt_context_empty():
@@ -202,6 +268,152 @@ async def test_native_healing_writes_attempt_history(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_native_healing_persists_runtime_notes_and_tool_trace(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.workflows.full_native_pipeline.report_progress",
+        lambda *args, **kwargs: None,
+    )
+    _ensure_tables()
+    run_id = "native-healer-observability"
+    _cleanup_run(run_id)
+    _create_agent_run(run_id)
+
+    try:
+        pipeline = _bare_pipeline()
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        test_path = tmp_path / "foo.spec.ts"
+        test_path.write_text(
+            "import { test, expect } from '@playwright/test';\n"
+            "test('x', async ({ page }) => { await expect(page.locator('#old')).toBeVisible(); });\n"
+        )
+
+        class FakeHealer:
+            last_agent_output = "strategy: replace selector\nroot_cause: selector changed"
+            last_tool_calls = [
+                {
+                    "name": "mcp__playwright-test__test_debug",
+                    "input": {"file": str(test_path), "project": "chromium", "grep": "x"},
+                    "success": True,
+                },
+                {"name": "mcp__playwright-test__browser_snapshot", "success": True},
+            ]
+
+            async def heal_test(self, test_file, error_log, **kwargs):
+                content = Path(test_file).read_text().replace("#old", "#new")
+                Path(test_file).write_text(content)
+                return content
+
+        _wire_observed_pipeline(pipeline, run_id, FakeHealer())
+        pipeline._run_test = lambda *args, **kwargs: TestResult(passed=True, exit_code=0, output="ok")
+
+        async def _no_stability(**kwargs):
+            return None
+
+        pipeline._verify_stability_or_harden = _no_stability
+
+        outcome = await pipeline._native_healing(
+            test_path,
+            run_dir,
+            "chromium",
+            TestResult(passed=False, exit_code=1, output="boom", error_summary="locator timeout"),
+        )
+
+        assert outcome["success"] is True
+        notes = list_agent_run_notes(run_id=run_id)
+        note_titles = [note.title for note in notes]
+        assert "Healer handoff ready" in note_titles
+        assert "Healer attempt 1 started" in note_titles
+        assert "Failure-state evidence captured" in note_titles
+        assert "Healer edit accepted for verification" in note_titles
+        assert "Healer verification passed on attempt 1" in note_titles
+        passed_note = next(note for note in notes if note.title == "Healer verification passed on attempt 1")
+        assert passed_note.source == "runtime"
+        assert passed_note.tags == ["healer", "native"]
+        assert passed_note.payload["attempt"] == 1
+        assert passed_note.payload["browser"] == "chromium"
+        assert passed_note.payload["test_file"] == str(test_path)
+        assert passed_note.payload["tool_summary"]["count"] == 2
+        assert passed_note.payload["guardrail_status"] == "passed"
+
+        agent_note_events = list_agent_run_events(run_id=run_id, event_type="agent_note")
+        assert len(agent_note_events) >= 5
+        generic_tool_events = list_agent_run_events(run_id=run_id, event_type="tool_call")
+        browser_events = list_agent_run_events(run_id=run_id, event_type="browser_action")
+        assert any(event.payload["tool"] == "test_debug" for event in generic_tool_events)
+        assert any(event.payload["tool"] == "browser_snapshot" for event in browser_events)
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run is not None
+            assert run.progress["live_notes_tail"][-1]["title"] == "Healer verification passed on attempt 1"
+            spans = session.exec(select(AgentTraceSpan).where(AgentTraceSpan.run_id == run_id)).all()
+            assert any(span.span_type == "tool_call" and span.tool_name == "mcp__playwright-test__test_debug" for span in spans)
+            assert any(span.span_type == "tool_result" and span.tool_name == "mcp__playwright-test__browser_snapshot" for span in spans)
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_native_healing_persists_guardrail_warning_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.workflows.full_native_pipeline.report_progress",
+        lambda *args, **kwargs: None,
+    )
+    _ensure_tables()
+    run_id = "native-healer-guardrail-note"
+    _cleanup_run(run_id)
+    _create_agent_run(run_id)
+
+    try:
+        pipeline = _bare_pipeline()
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        test_path = tmp_path / "foo.spec.ts"
+        original = (
+            "import { test, expect } from '@playwright/test';\n"
+            "test('x', async ({ page }) => { await expect(page.locator('#old')).toBeVisible(); });\n"
+        )
+        test_path.write_text(original)
+
+        class FakeHealer:
+            last_agent_output = "strategy: guessed selector\nroot_cause: selector changed"
+            last_tool_calls = [
+                {"name": "mcp__playwright-test__test_debug", "success": True},
+            ]
+
+            async def heal_test(self, test_file, error_log, **kwargs):
+                content = Path(test_file).read_text().replace("#old", "#new")
+                Path(test_file).write_text(content)
+                return content
+
+        _wire_observed_pipeline(pipeline, run_id, FakeHealer())
+        pipeline._run_test = lambda *args, **kwargs: TestResult(passed=False, exit_code=1, output="still failing")
+
+        async def _no_stability(**kwargs):
+            return None
+
+        pipeline._verify_stability_or_harden = _no_stability
+
+        outcome = await pipeline._native_healing(
+            test_path,
+            run_dir,
+            "chromium",
+            TestResult(passed=False, exit_code=1, output="boom", error_summary="locator timeout"),
+        )
+
+        assert outcome["success"] is False
+        assert test_path.read_text() == original
+        notes = list_agent_run_notes(run_id=run_id)
+        guardrail_notes = [note for note in notes if note.title == "Healer edit rejected by guardrail"]
+        assert guardrail_notes
+        assert guardrail_notes[0].level == "warning"
+        assert "browser_snapshot_or_browser_generate_locator" in guardrail_notes[0].payload["missing_required_tools"]
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
 async def test_native_healing_includes_manifest_draft_context(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "orchestrator.workflows.full_native_pipeline.report_progress",
@@ -362,6 +574,64 @@ def test_selector_guardrail_requires_scoped_test_run_when_metadata_exists():
     assert scoped["guardrail_status"] == "passed"
 
 
+def test_scoped_guardrail_accepts_location_and_aliases_and_later_scoped_call():
+    pipeline = _bare_pipeline()
+    before = "test('can sort results', async ({ page }) => { await expect(page.locator('#sort')).toHaveValue('new'); });"
+    after = before.replace("new", "asc")
+    metadata = {
+        "file": "runs/abc/tests/generated/foo.spec.ts",
+        "projectName": "chromium",
+        "title": "can sort results",
+    }
+
+    result = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_debug", "input": {"file": "other.spec.ts"}},
+            {
+                "name": "mcp__playwright-test__test_run",
+                "input": {
+                    "locations": ["runs/abc/tests/generated/foo.spec.ts:180"],
+                    "projectName": "chromium",
+                    "testName": "can sort results",
+                },
+            },
+            {"name": "mcp__playwright-test__browser_snapshot"},
+        ],
+        error_category="selector",
+        failure_metadata=metadata,
+    )
+
+    assert result["guardrail_status"] == "passed"
+    assert result["scoped_test_run"]["scoped"] is True
+
+
+def test_sort_select_category_accepts_dom_evaluate_evidence():
+    pipeline = _bare_pipeline()
+    before = "test('sort', async ({ page }) => { await expect(page.locator('select')).toHaveValue('new'); });"
+    after = "test('sort', async ({ page }) => { await page.locator('select').selectOption('asc'); await expect(page.locator('select')).toHaveValue('asc'); });"
+
+    missing = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[{"name": "mcp__playwright-test__test_debug"}],
+        error_category="sort_select",
+    )
+    assert "browser_snapshot_or_browser_evaluate_or_browser_generate_locator" in missing["missing_required_tools"]
+
+    ok = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_debug"},
+            {"name": "mcp__playwright-test__browser_evaluate"},
+        ],
+        error_category="sort_select",
+    )
+    assert ok["guardrail_status"] == "passed"
+
+
 def test_auth_data_server_guardrail_requires_network_or_console():
     pipeline = _bare_pipeline()
     before = "test('x', async ({ page }) => { await page.goto('/login'); });"
@@ -423,6 +693,33 @@ def test_assertion_removal_blocks_new_fixme_without_triage_override():
     )
     assert "assertion_preservation_or_explicit_test_fixme" not in fixme_allowed["missing_required_tools"]
     assert "new_test_fixme_requires_non_healable_triage" not in fixme_allowed["missing_required_tools"]
+
+
+def test_assertion_guardrail_allows_equivalent_assertion_replacement():
+    pipeline = _bare_pipeline()
+    before = (
+        "test('x', async ({ page }) => {\n"
+        "  await expect(page.locator('#done')).toBeVisible();\n"
+        "  await expect(page.locator('#status')).toHaveText('Done');\n"
+        "});"
+    )
+    after = (
+        "test('x', async ({ page }) => {\n"
+        "  await expect(page.locator('#done')).toBeVisible();\n"
+        "});"
+    )
+
+    result = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_debug"},
+            {"name": "mcp__playwright-test__browser_snapshot"},
+        ],
+        error_category="selector",
+    )
+
+    assert "assertion_preservation_or_explicit_test_fixme" not in result["missing_required_tools"]
 
 
 def test_noop_edit_is_guardrail_failure():

@@ -30,20 +30,34 @@ from orchestrator.services.ai_runtime_config import (
     resolve_runtime_ai_selection,
 )
 from orchestrator.utils.browser_dialog_policy import append_browser_dialog_recovery_policy
+from orchestrator.utils.browser_dialog_recovery import browser_dialog_recovery_telemetry_from_text
+from orchestrator.utils.browser_failures import (
+    BrowserSessionFailedError,
+    classify_browser_failure,
+)
 from orchestrator.utils.claude_stream import (
+    ParsedContentBlockStop,
+    ParsedInputJsonDelta,
     ParsedToolResult,
     ParsedToolUse,
+    event_content_block_stops,
+    event_input_json_deltas,
     event_text_blocks,
     event_tool_results,
     event_tool_uses,
     event_type,
     tool_result_text,
 )
+from orchestrator.utils.playwright_mcp import browser_action_timeout_config
 from orchestrator.utils.token_budget import (
     build_agent_token_telemetry,
     estimate_tokens,
     extract_provider_usage,
 )
+
+DEFAULT_BROWSER_TOOL_TIMEOUT_SECONDS = 45.0
+BROWSER_TOOL_TIMEOUT_ENV = "AGENT_BROWSER_TOOL_TIMEOUT_SECONDS"
+NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV = "NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS"
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -230,6 +244,99 @@ class ToolCall:
     result_preview: str | None = None
 
 
+@dataclass
+class _PendingToolCall:
+    name: str
+    started_at: datetime
+    input: dict[str, Any] = field(default_factory=dict)
+    input_json_fragments: list[str] = field(default_factory=list)
+
+    def best_input(self) -> dict[str, Any]:
+        if self.input_json_fragments:
+            raw_json = "".join(self.input_json_fragments)
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                logger.debug("Could not parse pending tool input JSON fragment")
+        return dict(self.input or {})
+
+
+class DirectBrowserToolTimeoutError(TimeoutError):
+    """Raised when a direct SDK browser MCP tool remains pending too long."""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        elapsed_seconds: float,
+        timeout_seconds: float,
+    ):
+        self.tool_name = tool_name
+        self.elapsed_seconds = elapsed_seconds
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            "Browser tool timed out: "
+            f"{tool_name or 'unknown tool'} ran for {elapsed_seconds:.1f}s "
+            f"(limit {timeout_seconds:.1f}s)"
+        )
+
+    def telemetry(self) -> dict[str, Any]:
+        classification = classify_browser_failure(
+            str(self),
+            tool_name=self.tool_name,
+            error_type="browser_tool_timeout",
+        )
+        telemetry = classification.telemetry() if classification else {}
+        return {
+            "error_type": "browser_tool_timeout",
+            "browser_tool_timeout": True,
+            **browser_action_timeout_config(),
+            "suspected_browser_dialog_block": True,
+            "blocked_tool_name": self.tool_name,
+            "timed_out_tool_name": self.tool_name,
+            "timed_out_tool_elapsed_seconds": self.elapsed_seconds,
+            "browser_tool_timeout_seconds": self.timeout_seconds,
+            "phase": "browser_session_failed",
+            "legacy_phase": "browser_tool_timeout",
+            "retryable_failure": True,
+            "requires_fresh_browser": True,
+            "browser_session_usable": False,
+            "last_browser_error": str(self),
+            "last_tool": self.tool_name,
+            "dialog_recovery_attempted": True,
+            "dialog_recovery_result": "direct_runner_tool_timeout_after_automatic_acceptance",
+            "snapshot_after_recovery": False,
+            **telemetry,
+        }
+
+
+def _is_browser_tool_name(tool_name: str) -> bool:
+    short_name = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
+    return short_name.startswith("browser_") or (
+        tool_name.startswith("mcp__playwright") and "__browser_" in tool_name
+    )
+
+
+def _has_planner_setup_tool(*tool_sources: Any) -> bool:
+    for source in tool_sources:
+        if source is None:
+            continue
+        if isinstance(source, dict):
+            values = list(source.keys()) + list(source.values())
+        elif isinstance(source, str):
+            values = [source]
+        else:
+            try:
+                values = list(source)
+            except TypeError:
+                values = [source]
+        if any("planner_setup_page" in str(value) for value in values):
+            return True
+    return False
+
+
 class UnproductiveAgentStreamError(RuntimeError):
     """Raised when SDK events keep arriving without parsed output/tool activity."""
 
@@ -241,6 +348,10 @@ class UnproductiveAgentStreamError(RuntimeError):
             "Agent stream produced "
             f"{messages} messages over {elapsed:.0f}s but no parsed text, tool calls, or output."
         )
+
+
+class ClaudeCodeAuthRequiredError(RuntimeError):
+    """Raised when Claude Code reports that the backend runtime is not logged in."""
 
 
 SENSITIVE_INPUT_KEY_PARTS = (
@@ -256,6 +367,12 @@ SENSITIVE_INPUT_KEY_PARTS = (
     "private_key",
 )
 
+CLAUDE_CODE_AUTH_ERROR_TYPE = "claude_code_auth_required"
+CLAUDE_CODE_AUTH_NEXT_ACTION = (
+    "Configure Claude Code OAuth token via CLAUDE_CODE_OAUTH_TOKEN in Settings/env "
+    "or run Claude Code login/token setup for the backend runtime."
+)
+
 NATIVE_TEST_MCP_TOOL_SUFFIXES = {
     "planner_setup_page",
     "planner_save_plan",
@@ -266,6 +383,166 @@ NATIVE_TEST_MCP_TOOL_SUFFIXES = {
     "test_run",
     "test_list",
 }
+NATIVE_SETUP_SEED_FILE = "tests/seed.spec.ts"
+CONSOLE_VERBOSITY_LEVELS = {
+    "quiet": 0,
+    "summary": 1,
+    "tools": 2,
+    "debug": 3,
+}
+CONSOLE_ALWAYS_LEVELS = {"warning", "error", "final"}
+API_KEY_CREDENTIAL_ENV_KEYS = {
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKENS",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "ZAI_API_KEY",
+    "QUORVEX_LLM_API_KEY",
+    "QUORVEX_LLM_API_KEYS",
+}
+OAUTH_CREDENTIAL_ENV_KEYS = {"CLAUDE_CODE_OAUTH_TOKEN"}
+CREDENTIAL_ENV_KEYS = API_KEY_CREDENTIAL_ENV_KEYS | OAUTH_CREDENTIAL_ENV_KEYS
+LEGACY_RUNTIME_MODEL_ENV_KEYS = {
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_CHAT_MODEL",
+}
+CANONICAL_RUNTIME_MODEL_ENV_KEYS = {
+    "QUORVEX_LLM_LIGHT_MODEL",
+    "QUORVEX_LLM_STANDARD_MODEL",
+    "QUORVEX_LLM_DEEP_MODEL",
+    "QUORVEX_LLM_TOOL_DEEP_MODEL",
+    "QUORVEX_LLM_CHAT_MODEL",
+    "QUORVEX_EMBEDDING_MODEL",
+}
+SETTINGS_OWNED_RUNTIME_ENV_KEYS = (
+    CREDENTIAL_ENV_KEYS
+    | LEGACY_RUNTIME_MODEL_ENV_KEYS
+    | CANONICAL_RUNTIME_MODEL_ENV_KEYS
+    | {
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL_ID",
+        "OPENAI_CHAT_MODEL",
+        "QUORVEX_AGENT_RUNTIME",
+        "QUORVEX_ASSISTANT_RUNTIME",
+        "QUORVEX_LLM_ACTIVE_MODEL",
+        "QUORVEX_LLM_ACTIVE_TIER",
+        "QUORVEX_LLM_AUTH_MODE",
+        "QUORVEX_LLM_BASE_URL",
+        "QUORVEX_LLM_PROVIDER",
+        "ZAI_API_KEY",
+    }
+)
+RUNTIME_ENV_PASSTHROUGH_KEYS = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKENS",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "ZAI_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_CHAT_MODEL",
+    "OPENAI_MODEL_ID",
+    "OPENAI_CHAT_MODEL",
+    "QUORVEX_AGENT_RUNTIME",
+    "QUORVEX_ASSISTANT_RUNTIME",
+    "QUORVEX_LLM_PROVIDER",
+    "QUORVEX_LLM_AUTH_MODE",
+    "QUORVEX_LLM_BASE_URL",
+    "QUORVEX_LLM_API_KEY",
+    "QUORVEX_LLM_API_KEYS",
+    "QUORVEX_LLM_LIGHT_MODEL",
+    "QUORVEX_LLM_STANDARD_MODEL",
+    "QUORVEX_LLM_DEEP_MODEL",
+    "QUORVEX_LLM_TOOL_DEEP_MODEL",
+    "QUORVEX_LLM_CHAT_MODEL",
+    "QUORVEX_EMBEDDING_MODEL",
+    "API_TIMEOUT_MS",
+    "DISPLAY",
+    "VNC_ENABLED",
+    "HEADLESS",
+    "PLAYWRIGHT_HEADLESS",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "PLAYWRIGHT_WORKERS",
+    "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
+    "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+    "QUORVEX_TEST_DATA_FILE",
+    "CLAUDE_CODE_ENABLE_TELEMETRY",
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+    "ENABLE_ENHANCED_TELEMETRY_BETA",
+    "CLAUDE_CODE_PROPAGATE_TRACEPARENT",
+    "TRACEPARENT",
+    "TRACESTATE",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_LOGS_EXPORTER",
+    "OTEL_TRACES_EXPORTER",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    "OTEL_METRIC_EXPORT_INTERVAL",
+    "OTEL_LOGS_EXPORT_INTERVAL",
+    "OTEL_TRACES_EXPORT_INTERVAL",
+    "OTEL_SERVICE_NAME",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_LOG_USER_PROMPTS",
+    "OTEL_LOG_TOOL_DETAILS",
+    "OTEL_LOG_TOOL_CONTENT",
+    "ENABLE_TOOL_SEARCH",
+    "AGENT_COST_LOG",
+    BROWSER_TOOL_TIMEOUT_ENV,
+    NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV,
+)
+
+
+class NativeSetupSeedFileError(RuntimeError):
+    """Raised when native Playwright setup uses the wrong run-local seed file."""
+
+
+def _native_tool_suffix(tool_name: str) -> str:
+    return tool_name.split("__")[-1] if "__" in tool_name else tool_name
+
+
+def _validate_native_setup_seed_file(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    """Validate and normalize native setup seed input.
+
+    Returns True when the input was defaulted for an omitted seedFile.
+    """
+    suffix = _native_tool_suffix(tool_name)
+    if suffix not in {"planner_setup_page", "generator_setup_page"}:
+        return False
+    if not str(tool_name).startswith("mcp__playwright-test__"):
+        return False
+    if "seedFile" not in tool_input:
+        tool_input["seedFile"] = NATIVE_SETUP_SEED_FILE
+        logger.warning(
+            "%s omitted seedFile; defaulting to %s for native browser run",
+            suffix,
+            NATIVE_SETUP_SEED_FILE,
+        )
+        return True
+    seed_file = tool_input.get("seedFile")
+    if seed_file != NATIVE_SETUP_SEED_FILE:
+        raise NativeSetupSeedFileError(
+            f"{suffix} must be called with seedFile: \"{NATIVE_SETUP_SEED_FILE}\" "
+            "for native browser runs so the run-local seed test is used. "
+            f"Received seedFile={seed_file!r}."
+        )
+    return False
 
 
 @dataclass(frozen=True)
@@ -349,10 +626,21 @@ class AgentSdkFeaturePolicy:
 
 
 def classify_agent_error_type(error: Any, fallback: str | None = None) -> str | None:
+    if isinstance(error, ClaudeCodeAuthRequiredError):
+        return CLAUDE_CODE_AUTH_ERROR_TYPE
     if isinstance(error, UnproductiveAgentStreamError):
         return "unproductive_stream"
+    if isinstance(error, DirectBrowserToolTimeoutError):
+        return "browser_tool_timeout"
+    if isinstance(error, BrowserSessionFailedError):
+        return error.classification.error_type
+    browser_failure = classify_browser_failure(error)
+    if browser_failure:
+        return browser_failure.error_type
     text = str(error or "")
     lowered = text.lower()
+    if is_claude_code_auth_error_text(text):
+        return CLAUDE_CODE_AUTH_ERROR_TYPE
     if "no conversation found" in lowered and "session id" in lowered:
         return "invalid_session_resume"
     if "processerror" in lowered or "process error" in lowered:
@@ -364,6 +652,81 @@ def classify_agent_error_type(error: Any, fallback: str | None = None) -> str | 
     if is_transient_provider_error(error):
         return "provider_overloaded"
     return fallback
+
+
+def _event_field(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _event_sources(event: Any) -> list[Any]:
+    sources = [event]
+    for name in ("message", "event", "stream_event", "data", "payload"):
+        value = _event_field(event, name, None)
+        if value is not None:
+            sources.append(value)
+    return sources
+
+
+def _truthy_auth_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def is_claude_code_auth_error_text(text: str | None) -> bool:
+    lowered = str(text or "").lower()
+    return (
+        "authentication_failed" in lowered
+        or ("not logged in" in lowered and "run /login" in lowered)
+        or ("token expired or incorrect" in lowered and "401" in lowered)
+    )
+
+
+def _extract_claude_code_auth_message(*candidates: Any) -> str:
+    texts: list[str] = []
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, str):
+            texts.append(candidate)
+        else:
+            try:
+                texts.append(json.dumps(candidate, ensure_ascii=False, default=str))
+            except Exception:
+                texts.append(str(candidate))
+    for text in texts:
+        for line in text.splitlines():
+            if is_claude_code_auth_error_text(line):
+                return line.strip()
+    for text in texts:
+        if is_claude_code_auth_error_text(text):
+            return text.strip()[:1000]
+    return "Claude Code authentication failed: authentication_failed"
+
+
+def claude_code_auth_error_message(event: Any, output_text: str | None = None) -> str | None:
+    sources = _event_sources(event)
+    api_error = any(
+        _truthy_auth_flag(_event_field(source, "isApiErrorMessage", False))
+        for source in sources
+    )
+    auth_error_code = any(
+        str(_event_field(source, "error", "") or "").strip().lower()
+        == "authentication_failed"
+        for source in sources
+    )
+    try:
+        event_text = json.dumps(event, ensure_ascii=False, default=str)
+    except Exception:
+        event_text = str(event)
+    combined = "\n".join(part for part in (output_text or "", event_text) if part)
+    if (api_error and auth_error_code) or is_claude_code_auth_error_text(combined):
+        return _extract_claude_code_auth_message(output_text, event)
+    return None
 
 
 def _is_sensitive_input_key(key: str | None) -> bool:
@@ -547,6 +910,7 @@ class AgentRunner:
         autopilot_checklist_title: str | None = None,
         autopilot_phase_name: str | None = None,
         autopilot_checklist_kind: str | None = None,
+        console_verbosity: str | None = None,
     ):
         """
         Initialize the agent runner.
@@ -619,6 +983,9 @@ class AgentRunner:
             autopilot_agent_kind: Compact kind label for attempt diagnostics.
             autopilot_source_type/source_id: Existing checklist source row to update.
             autopilot_checklist_title/phase/kind: Checklist row metadata.
+            console_verbosity: Human-facing console detail level: quiet, summary,
+                tools, or debug. Defaults to summary, with
+                AGENT_RUNNER_CONSOLE_VERBOSITY as an environment fallback.
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -686,6 +1053,7 @@ class AgentRunner:
         self.autopilot_checklist_title = autopilot_checklist_title
         self.autopilot_phase_name = autopilot_phase_name
         self.autopilot_checklist_kind = autopilot_checklist_kind
+        self.console_verbosity = self._resolve_console_verbosity(console_verbosity)
         self._autopilot_retry_inner = False
         (
             self._resolved_tool_search_env,
@@ -720,6 +1088,31 @@ class AgentRunner:
             value = max(minimum, value)
         return value
 
+    @staticmethod
+    def _resolve_console_verbosity(value: str | None = None) -> str:
+        raw_value = value
+        if raw_value is None:
+            raw_value = os.environ.get("AGENT_RUNNER_CONSOLE_VERBOSITY")
+        normalized = str(raw_value or "summary").strip().lower()
+        return normalized if normalized in CONSOLE_VERBOSITY_LEVELS else "summary"
+
+    def _console_enabled(self, level: str) -> bool:
+        normalized = str(level or "").strip().lower()
+        if normalized in CONSOLE_ALWAYS_LEVELS:
+            return True
+        required = CONSOLE_VERBOSITY_LEVELS.get(normalized)
+        if required is None:
+            required = CONSOLE_VERBOSITY_LEVELS["summary"]
+        current = CONSOLE_VERBOSITY_LEVELS.get(
+            self.console_verbosity,
+            CONSOLE_VERBOSITY_LEVELS["summary"],
+        )
+        return current >= required
+
+    def _console_print(self, message: str, *, level: str = "summary") -> None:
+        if self._console_enabled(level):
+            print(message, flush=True)
+
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
 
@@ -735,6 +1128,40 @@ class AgentRunner:
             return None
         return list(self.allowed_tools)
 
+    def _browser_tool_timeout_seconds(self) -> float:
+        raw_value = None
+        if _has_planner_setup_tool(self.allowed_tools, self._effective_tools()):
+            raw_value = self.env_vars.get(NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV)
+        raw_value = raw_value or self.env_vars.get(BROWSER_TOOL_TIMEOUT_ENV)
+        raw_value = raw_value or os.environ.get(BROWSER_TOOL_TIMEOUT_ENV, str(int(DEFAULT_BROWSER_TOOL_TIMEOUT_SECONDS)))
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return DEFAULT_BROWSER_TOOL_TIMEOUT_SECONDS
+
+    def _browser_tool_timeout_config(self) -> dict[str, Any]:
+        planner = _has_planner_setup_tool(self.allowed_tools, self._effective_tools())
+        source_env = BROWSER_TOOL_TIMEOUT_ENV
+        raw_value = None
+        source = "default"
+        if planner and self.env_vars.get(NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV):
+            source_env = NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV
+            raw_value = self.env_vars.get(NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV)
+            source = "task_env"
+        elif self.env_vars.get(BROWSER_TOOL_TIMEOUT_ENV):
+            raw_value = self.env_vars.get(BROWSER_TOOL_TIMEOUT_ENV)
+            source = "task_env"
+        elif os.environ.get(BROWSER_TOOL_TIMEOUT_ENV):
+            raw_value = os.environ.get(BROWSER_TOOL_TIMEOUT_ENV)
+            source = "process_env"
+        timeout_seconds = self._browser_tool_timeout_seconds()
+        return {
+            "browser_tool_timeout_seconds": timeout_seconds,
+            "browser_tool_timeout_env": source_env,
+            "browser_tool_timeout_source": source,
+            "browser_tool_timeout_raw": raw_value,
+        }
+
     def _effective_permission_mode(self) -> str:
         if self.permission_mode:
             return self.permission_mode
@@ -745,7 +1172,23 @@ class AgentRunner:
     def diagnostics(self, *, agent_class: str | None = None, prompt: str | None = None) -> dict[str, Any]:
         """Return resolved runtime/tool/memory diagnostics for observability tests and logs."""
 
-        selection = apply_runtime_env_aliases(self.env_vars or None, tier=self.model_tier, model_override=self.model)
+        effective_env = self._effective_runtime_env_vars()
+        selection = resolve_runtime_ai_selection(
+            self.model_tier,
+            env_vars=self._runtime_env_for_selection(effective_env) or None,
+            model_override=self.model,
+        )
+        queue_state = self._queue_execution_state()
+        env_vars = self._collect_api_env_vars() or {}
+        auth_mode = (
+            effective_env.get("QUORVEX_LLM_AUTH_MODE")
+            or os.environ.get("QUORVEX_LLM_AUTH_MODE")
+            or ""
+        )
+        claude_code_oauth_token_set = bool(
+            effective_env.get("CLAUDE_CODE_OAUTH_TOKEN")
+            or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        )
         mcp_prefixes = sorted(
             {
                 "__".join(str(tool).split("__")[:2])
@@ -769,6 +1212,11 @@ class AgentRunner:
             "model": selection.model,
             "api_key_set": bool(selection.api_key),
             "api_key_env": selection.api_key_env,
+            "auth_mode": auth_mode,
+            "claude_code_oauth_token_set": claude_code_oauth_token_set,
+            "execution_path": queue_state["execution_path"],
+            "queue": queue_state,
+            "runtime_env_keys": sorted(env_vars),
             "allowed_tools": list(self.allowed_tools),
             "tools": self._effective_tools(),
             "mcp_prefixes": mcp_prefixes,
@@ -782,6 +1230,9 @@ class AgentRunner:
             },
             "requires_live_browser": self.requires_live_browser,
             "preserve_browser_on_failure": self.preserve_browser_on_failure,
+            **browser_action_timeout_config({**os.environ, **effective_env}),
+            **self._browser_tool_timeout_config(),
+            "console_verbosity": self.console_verbosity,
             "tool_permission_guard": bool(self.tool_permission_guard),
             "sdk_options": {
                 "fallback_model": self.fallback_model,
@@ -859,6 +1310,74 @@ class AgentRunner:
             "enable_tool_search": value,
             "accepted": "unknown_until_sdk_or_cli_start",
             **details,
+        }
+
+    def _sdk_only_options(self) -> list[str]:
+        """Return SDK-only options currently requested by this run."""
+
+        options: list[str] = []
+        if self.tool_permission_guard:
+            options.append("tool_permission_guard/can_use_tool")
+        if self.reasoning_budget is not None:
+            options.append("reasoning_budget/max_thinking_tokens")
+        if self.max_buffer_size is not None:
+            options.append("max_buffer_size")
+        if self.user:
+            options.append("user")
+        if self.permission_prompt_tool_name:
+            options.append("permission_prompt_tool_name")
+        if self.enable_file_checkpointing:
+            options.append("enable_file_checkpointing")
+        if self.sandbox:
+            options.append("sandbox")
+        if self.hooks:
+            options.append("hooks")
+        if self.agents:
+            options.append("agents")
+        if self.skills is not None:
+            options.append("skills")
+        if self.plugins:
+            options.append("plugins")
+        if self.session_store:
+            options.append("session_store")
+        if self.fork_session:
+            options.append("fork_session")
+        return options
+
+    def _queue_execution_state(self) -> dict[str, Any]:
+        """Describe whether this run will use queue or direct SDK execution."""
+
+        queue_enabled = False
+        if AGENT_QUEUE_AVAILABLE:
+            try:
+                queue_enabled = bool(should_use_agent_queue())
+            except Exception as exc:
+                logger.debug("Unable to resolve agent queue setting for diagnostics: %s", exc)
+                queue_enabled = False
+        sdk_only_options = self._sdk_only_options()
+        queue_eligible = bool(
+            AGENT_QUEUE_AVAILABLE
+            and queue_enabled
+            and not self.force_direct_execution
+            and not sdk_only_options
+        )
+        blocked_by: list[str] = []
+        if not AGENT_QUEUE_AVAILABLE:
+            blocked_by.append("queue_unavailable")
+        if not queue_enabled:
+            blocked_by.append("queue_disabled")
+        if self.force_direct_execution:
+            blocked_by.append("force_direct_execution")
+        blocked_by.extend(sdk_only_options)
+        return {
+            "execution_path": "queue" if queue_eligible else "direct_sdk",
+            "queue_available": AGENT_QUEUE_AVAILABLE,
+            "queue_enabled": queue_enabled,
+            "queue_eligible": queue_eligible,
+            "force_direct_execution": self.force_direct_execution,
+            "sdk_only_options": sdk_only_options,
+            "blocked_by": blocked_by,
+            "requires_live_browser": self.requires_live_browser,
         }
 
     def _is_browser_mcp_run(self) -> bool:
@@ -1037,21 +1556,7 @@ class AgentRunner:
 
     def _requires_direct_sdk_execution(self) -> bool:
         """Return true when a requested option has no queue/CLI equivalent."""
-        return bool(
-            self.tool_permission_guard
-            or self.reasoning_budget is not None
-            or self.max_buffer_size is not None
-            or self.user
-            or self.permission_prompt_tool_name
-            or self.enable_file_checkpointing
-            or self.sandbox
-            or self.hooks
-            or self.agents
-            or self.skills is not None
-            or self.plugins
-            or self.session_store
-            or self.fork_session
-        )
+        return bool(self._sdk_only_options())
 
     def _infer_model_tier(self) -> RuntimeModelTier:
         tools = self._effective_tools()
@@ -1087,6 +1592,204 @@ class AgentRunner:
             logger.debug(
                 f"Unable to refresh active AI settings for agent runner: {exc}"
             )
+
+    @staticmethod
+    def _settings_runtime_env_vars() -> dict[str, str]:
+        try:
+            from orchestrator.api import settings as settings_api
+
+            env_vars = settings_api.runtime_env_vars()
+        except Exception as exc:
+            logger.debug("Unable to load Settings-backed runtime env vars: %s", exc)
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in (env_vars or {}).items()
+            if key and value is not None
+        }
+
+    @staticmethod
+    def _runtime_auth_mode(env_vars: dict[str, str] | None) -> str:
+        if not env_vars:
+            return ""
+        auth_mode = str(env_vars.get("QUORVEX_LLM_AUTH_MODE") or "").strip().lower()
+        provider = str(env_vars.get("QUORVEX_LLM_PROVIDER") or "").strip().lower()
+        if auth_mode == "api_key":
+            return "api_key"
+        if auth_mode in {"claude_code", "claude-code", "claude_code_subscription"}:
+            return "claude_code_subscription"
+        if provider == "claude_code_subscription":
+            return "claude_code_subscription"
+        if auth_mode or provider:
+            return "api_key"
+        return ""
+
+    @staticmethod
+    def _api_key_credential_set(env_vars: dict[str, str] | None) -> bool:
+        if not env_vars:
+            return False
+        for key in API_KEY_CREDENTIAL_ENV_KEYS:
+            value = env_vars.get(key, "")
+            if key == "QUORVEX_LLM_API_KEYS":
+                value = value.split(",", 1)[0].strip()
+            if str(value or "").strip():
+                return True
+        return False
+
+    @staticmethod
+    def _oauth_credential_set(env_vars: dict[str, str] | None) -> bool:
+        if not env_vars:
+            return False
+        return any(str(env_vars.get(key) or "").strip() for key in OAUTH_CREDENTIAL_ENV_KEYS)
+
+    @classmethod
+    def _runtime_env_for_selection(cls, env_vars: dict[str, str] | None) -> dict[str, str] | None:
+        if not env_vars:
+            return env_vars
+        if cls._runtime_auth_mode(env_vars) != "claude_code_subscription":
+            return env_vars
+        selection_env = dict(env_vars)
+        for key in API_KEY_CREDENTIAL_ENV_KEYS:
+            selection_env[key] = ""
+        return selection_env
+
+    @classmethod
+    def _empty_credential_is_intentional(
+        cls,
+        key: str,
+        *,
+        explicit_env: dict[str, str] | None,
+        current_env: dict[str, str],
+    ) -> bool:
+        explicit_mode = cls._runtime_auth_mode(explicit_env)
+        current_mode = cls._runtime_auth_mode(current_env)
+        selected_mode = explicit_mode or current_mode
+        if selected_mode == "claude_code_subscription" and key in API_KEY_CREDENTIAL_ENV_KEYS:
+            return True
+        if selected_mode == "api_key" and key in OAUTH_CREDENTIAL_ENV_KEYS:
+            return True
+        return False
+
+    @classmethod
+    def _should_apply_empty_credential(
+        cls,
+        key: str,
+        *,
+        current_env: dict[str, str],
+        explicit_env: dict[str, str] | None = None,
+    ) -> bool:
+        if cls._empty_credential_is_intentional(
+            key,
+            explicit_env=explicit_env,
+            current_env=current_env,
+        ):
+            return True
+        if key in API_KEY_CREDENTIAL_ENV_KEYS and cls._api_key_credential_set(current_env):
+            return False
+        if key in OAUTH_CREDENTIAL_ENV_KEYS and cls._oauth_credential_set(current_env):
+            return False
+        return True
+
+    @classmethod
+    def _apply_runtime_env_overlay(
+        cls,
+        target: dict[str, str],
+        overlay: dict[str, str],
+        *,
+        explicit: bool = False,
+    ) -> None:
+        overlay_auth_mode = cls._runtime_auth_mode(overlay)
+        for key, value in overlay.items():
+            if not key or key.startswith("TESTDATA_"):
+                continue
+            if (
+                not explicit
+                and key in CANONICAL_RUNTIME_MODEL_ENV_KEYS
+                and cls._runtime_auth_mode(target) == "api_key"
+                and cls._api_key_credential_set(target)
+                and str(target.get(key) or "").strip()
+            ):
+                continue
+            if (
+                not explicit
+                and key in LEGACY_RUNTIME_MODEL_ENV_KEYS
+                and any(str(target.get(model_key) or "").strip() for model_key in CANONICAL_RUNTIME_MODEL_ENV_KEYS)
+            ):
+                continue
+            if key in CREDENTIAL_ENV_KEYS:
+                selected_mode = overlay_auth_mode or cls._runtime_auth_mode(target)
+                if (
+                    not explicit
+                    and value
+                    and selected_mode == "claude_code_subscription"
+                    and key in API_KEY_CREDENTIAL_ENV_KEYS
+                ):
+                    continue
+                if (
+                    not explicit
+                    and value
+                    and selected_mode == "api_key"
+                    and key in OAUTH_CREDENTIAL_ENV_KEYS
+                ):
+                    continue
+                if value == "":
+                    if selected_mode == "claude_code_subscription" and key in API_KEY_CREDENTIAL_ENV_KEYS:
+                        target.pop(key, None)
+                        continue
+                    if selected_mode == "api_key" and key in OAUTH_CREDENTIAL_ENV_KEYS:
+                        target.pop(key, None)
+                        continue
+                    if not cls._should_apply_empty_credential(
+                        key,
+                        current_env=target,
+                        explicit_env=overlay,
+                    ):
+                        continue
+            target[key] = value
+
+    def _effective_runtime_env_vars(self) -> dict[str, str]:
+        """Return Settings + process + per-run env for direct and queued runs."""
+        env_vars = self._settings_runtime_env_vars()
+        process_env = {
+            key: os.environ[key]
+            for key in RUNTIME_ENV_PASSTHROUGH_KEYS
+            if key in os.environ and (not env_vars or key not in SETTINGS_OWNED_RUNTIME_ENV_KEYS)
+        }
+        self._apply_runtime_env_overlay(env_vars, process_env)
+        self._apply_runtime_env_overlay(env_vars, self.env_vars, explicit=True)
+        if self._runtime_auth_mode(env_vars) == "claude_code_subscription":
+            for key in API_KEY_CREDENTIAL_ENV_KEYS:
+                env_vars.pop(key, None)
+        for key in list(env_vars):
+            if (
+                key in CREDENTIAL_ENV_KEYS
+                and env_vars.get(key) == ""
+                and (
+                    self._runtime_auth_mode(env_vars) == "claude_code_subscription"
+                    or not self._empty_credential_is_intentional(
+                        key,
+                        explicit_env=self.env_vars,
+                        current_env=env_vars,
+                    )
+                )
+            ):
+                env_vars.pop(key, None)
+
+        tool_search = self._effective_tool_search_env()
+        if tool_search:
+            env_vars["ENABLE_TOOL_SEARCH"] = tool_search
+        else:
+            env_vars.pop("ENABLE_TOOL_SEARCH", None)
+        return env_vars
+
+    def _apply_runtime_ai_settings_for_run(self):
+        """Resolve and apply AI settings, preferring explicit per-run env vars."""
+        env_vars = self._effective_runtime_env_vars()
+        return resolve_runtime_ai_selection(
+            self.model_tier,
+            env_vars=self._runtime_env_for_selection(env_vars) or None,
+            model_override=self.model,
+        )
 
     def _validate_mcp_config_for_allowed_tools(self, cwd: Path | None = None) -> None:
         """Fail fast when MCP tools are requested but no matching server is configured."""
@@ -1171,6 +1874,7 @@ class AgentRunner:
                         "planner_save_plan",
                         "generator_write_test",
                         "browser_navigate",
+                        "browser_handle_dialog",
                         "browser_snapshot",
                         "test_debug",
                         "test_run",
@@ -1189,6 +1893,7 @@ class AgentRunner:
                         "generator_setup_page",
                         "generator_read_log",
                         "generator_write_test",
+                        "browser_handle_dialog",
                         "test_debug",
                         "test_run",
                     },
@@ -1240,8 +1945,7 @@ class AgentRunner:
         start_time = datetime.now()
         if await self._check_cancelled():
             return self._cancelled_result(start_time=start_time)
-        self._apply_active_ai_settings(self.model, self.model_tier)
-        selection = apply_runtime_env_aliases(None, tier=self.model_tier, model_override=self.model)
+        selection = self._apply_runtime_ai_settings_for_run()
         if not self.model:
             self.model = selection.model
         self._validate_mcp_config_for_allowed_tools(self.cwd)
@@ -1319,8 +2023,139 @@ class AgentRunner:
         session_id: str | None = None
         total_cost_usd: float | None = None
         provider_usage: dict[str, Any] = {}
-        pending_tools: dict[str, tuple[str, datetime, dict[str, Any]]] = {}
+        pending_tools: dict[str, _PendingToolCall] = {}
+        stream_tool_ids_by_index: dict[int, str] = {}
         pending_tool_counter = 0
+        browser_tool_timeout_seconds = self._browser_tool_timeout_seconds()
+
+        def _pending_tool_from_delta(
+            delta: ParsedInputJsonDelta | ParsedContentBlockStop,
+        ) -> _PendingToolCall | None:
+            if delta.tool_use_id and delta.tool_use_id in pending_tools:
+                return pending_tools[delta.tool_use_id]
+            if delta.index is not None:
+                tool_use_id = stream_tool_ids_by_index.get(delta.index)
+                if tool_use_id:
+                    return pending_tools.get(tool_use_id)
+            if len(pending_tools) == 1:
+                return next(iter(pending_tools.values()))
+            return None
+
+        def _apply_input_json_delta(delta: ParsedInputJsonDelta) -> None:
+            pending_tool = _pending_tool_from_delta(delta)
+            if not pending_tool:
+                return
+            pending_tool.input_json_fragments.append(delta.partial_json)
+
+        def _emit_native_setup_seed_defaulted(tool_name: str) -> None:
+            suffix = _native_tool_suffix(tool_name)
+            self._emit_progress(
+                {
+                    "phase": "tool_use",
+                    "status": "warning",
+                    "message": (
+                        f"{suffix} omitted seedFile; defaulted to "
+                        f"{NATIVE_SETUP_SEED_FILE}."
+                    ),
+                    "last_tool": tool_name,
+                    "native_setup_seed_file_defaulted": True,
+                    "seedFile": NATIVE_SETUP_SEED_FILE,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        def _finalize_pending_tool_input(delta: ParsedContentBlockStop) -> None:
+            pending_tool = _pending_tool_from_delta(delta)
+            if pending_tool:
+                pending_tool.input = pending_tool.best_input()
+                if _validate_native_setup_seed_file(
+                    pending_tool.name, pending_tool.input
+                ):
+                    _emit_native_setup_seed_defaulted(pending_tool.name)
+
+        def _flush_pending_tools(
+            *,
+            success: bool = True,
+            error: str | None = None,
+            error_type: str | None = None,
+        ) -> None:
+            for tool_use_id, pending_tool in list(pending_tools.items()):
+                is_browser_tool = _is_browser_tool_name(pending_tool.name)
+                tool_input = pending_tool.best_input()
+                if _validate_native_setup_seed_file(pending_tool.name, tool_input):
+                    _emit_native_setup_seed_defaulted(pending_tool.name)
+                tool_calls.append(
+                    ToolCall(
+                        name=pending_tool.name,
+                        timestamp=pending_tool.started_at,
+                        duration_ms=None,
+                        success=success if not is_browser_tool else False if error else success,
+                        error=error,
+                        input=tool_input,
+                    )
+                )
+                pending_tools.pop(tool_use_id, None)
+            stream_tool_ids_by_index.clear()
+
+        def _oldest_timed_out_browser_tool() -> tuple[str, _PendingToolCall, float] | None:
+            if browser_tool_timeout_seconds <= 0:
+                return None
+            now = datetime.now()
+            timed_out: tuple[str, _PendingToolCall, float] | None = None
+            for tool_use_id, pending_tool in pending_tools.items():
+                if not _is_browser_tool_name(pending_tool.name):
+                    continue
+                elapsed = max(0.0, (now - pending_tool.started_at).total_seconds())
+                if elapsed < browser_tool_timeout_seconds:
+                    continue
+                if timed_out is None or elapsed > timed_out[2]:
+                    timed_out = (tool_use_id, pending_tool, elapsed)
+            return timed_out
+
+        async def _browser_tool_watchdog() -> None:
+            if browser_tool_timeout_seconds <= 0:
+                return
+            while True:
+                await asyncio.sleep(min(1.0, max(0.05, browser_tool_timeout_seconds / 10)))
+                timed_out = _oldest_timed_out_browser_tool()
+                if timed_out is None:
+                    continue
+                tool_use_id, pending_tool, elapsed = timed_out
+                error = DirectBrowserToolTimeoutError(
+                    tool_name=pending_tool.name,
+                    elapsed_seconds=elapsed,
+                    timeout_seconds=browser_tool_timeout_seconds,
+                )
+                tool_input = pending_tool.best_input()
+                if _validate_native_setup_seed_file(pending_tool.name, tool_input):
+                    _emit_native_setup_seed_defaulted(pending_tool.name)
+                tool_calls.append(
+                    ToolCall(
+                        name=pending_tool.name,
+                        timestamp=pending_tool.started_at,
+                        duration_ms=elapsed * 1000,
+                        success=False,
+                        error=str(error),
+                        input=tool_input,
+                    )
+                )
+                pending_tools.pop(tool_use_id, None)
+                telemetry = error.telemetry()
+                self._emit_progress(
+                    {
+                        "phase": "browser_tool_timeout",
+                        "status": "failed",
+                        "message": str(error),
+                        "tool_calls": len(tool_calls) + len(pending_tools),
+                        "pending_tool_calls": len(pending_tools),
+                        "browser_tool_calls": len([tc for tc in tool_calls if _is_browser_tool_name(tc.name)])
+                        + len([tool for tool in pending_tools.values() if _is_browser_tool_name(tool.name)]),
+                        "last_tool": pending_tool.name,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        **telemetry,
+                    }
+                )
+                raise error
 
         # Snapshot child PIDs before query for orphan cleanup
         pre_query_pids = snapshot_child_pids()
@@ -1347,11 +2182,7 @@ class AgentRunner:
                     if not include_pending:
                         return completed
                     return completed + len(
-                        [
-                            name
-                            for name, _started_at, _tool_input in pending_tools.values()
-                            if name.startswith("mcp__playwright")
-                        ]
+                        [tool for tool in pending_tools.values() if tool.name.startswith("mcp__playwright")]
                     )
 
                 def _progress_snapshot(phase: str = "streaming") -> dict[str, Any]:
@@ -1408,19 +2239,38 @@ class AgentRunner:
                     nonlocal pending_tool_counter
                     tool_name = tool_use.name
                     tool_input = dict(tool_use.input or {})
+                    seed_defaulted = _validate_native_setup_seed_file(
+                        tool_name, tool_input
+                    )
+                    if tool_use.id and tool_use.id in pending_tools:
+                        if tool_input or seed_defaulted:
+                            pending_tools[tool_use.id].input = tool_input
+                        if seed_defaulted:
+                            _emit_native_setup_seed_defaulted(tool_name)
+                        if tool_use.index is not None:
+                            stream_tool_ids_by_index[tool_use.index] = tool_use.id
+                        return
                     pending_tool_counter += 1
                     tool_use_id = tool_use.id or f"pending-tool-{pending_tool_counter}"
-                    pending_tools[tool_use_id] = (tool_name, datetime.now(), tool_input)
+                    pending_tools[tool_use_id] = _PendingToolCall(
+                        name=tool_name,
+                        started_at=datetime.now(),
+                        input=tool_input,
+                    )
+                    if tool_use.index is not None:
+                        stream_tool_ids_by_index[tool_use.index] = tool_use_id
 
-                    if self.log_tools:
+                    if self.log_tools and self._console_enabled("tools"):
                         if tool_name.startswith("mcp__playwright"):
                             action = tool_name.split("__")[-1] if "__" in tool_name else tool_name
-                            print(f"   🔧 {action}...", flush=True)
+                            self._console_print(f"   🔧 {action}...", level="tools")
                         else:
-                            print(f"   🔧 {tool_name}...", flush=True)
+                            self._console_print(f"   🔧 {tool_name}...", level="tools")
 
                     if self.on_tool_use:
                         self.on_tool_use(tool_name, tool_input)
+                    if seed_defaulted:
+                        _emit_native_setup_seed_defaulted(tool_name)
                     self._emit_progress(
                         {
                             "phase": "tool_use",
@@ -1432,7 +2282,7 @@ class AgentRunner:
                         }
                     )
 
-                def _pop_pending_tool(tool_result: ParsedToolResult) -> tuple[str, datetime, dict[str, Any]] | None:
+                def _pop_pending_tool(tool_result: ParsedToolResult) -> _PendingToolCall | None:
                     if tool_result.tool_use_id and tool_result.tool_use_id in pending_tools:
                         return pending_tools.pop(tool_result.tool_use_id)
                     if not tool_result.tool_use_id and len(pending_tools) == 1:
@@ -1443,17 +2293,22 @@ class AgentRunner:
                 def _handle_tool_result(tool_result: ParsedToolResult) -> None:
                     pending_tool = _pop_pending_tool(tool_result)
                     if pending_tool:
-                        tool_name, tool_start, tool_input = pending_tool
+                        tool_name = pending_tool.name
+                        tool_start = pending_tool.started_at
+                        tool_input = pending_tool.best_input()
+                        if _validate_native_setup_seed_file(tool_name, tool_input):
+                            _emit_native_setup_seed_defaulted(tool_name)
                         duration = (datetime.now() - tool_start).total_seconds() * 1000
+                        result_text = tool_result_text(tool_result.content)
                         tool_calls.append(
                             ToolCall(
                                 name=tool_name,
                                 timestamp=tool_start,
                                 duration_ms=duration,
                                 success=not tool_result.is_error,
-                                error=tool_result_text(tool_result.content)[:200] if tool_result.is_error else None,
+                                error=result_text[:200] if tool_result.is_error else None,
                                 input=tool_input,
-                                result_preview=tool_result_text(tool_result.content)[:1000],
+                                result_preview=result_text[:1000],
                             )
                         )
                         completed_browser_calls = len(
@@ -1463,16 +2318,18 @@ class AgentRunner:
                                 if tc.success and tc.name.startswith("mcp__") and "__browser_" in tc.name
                             ]
                         )
-                        self._emit_progress(
-                            {
-                                "phase": "tool_result",
-                                "tool_calls": len(tool_calls),
-                                "browser_tool_calls": _browser_tool_count(),
-                                "interactions": len(tool_calls),
-                                "last_tool": tool_name,
-                                "updated_at": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
+                        progress = {
+                            "phase": "tool_result",
+                            "tool_calls": len(tool_calls),
+                            "browser_tool_calls": _browser_tool_count(),
+                            "interactions": len(tool_calls),
+                            "last_tool": tool_name,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        dialog_recovery = browser_dialog_recovery_telemetry_from_text(result_text)
+                        if dialog_recovery:
+                            progress.update(dialog_recovery)
+                        self._emit_progress(progress)
                         if (
                             self.max_browser_tool_calls is not None
                             and completed_browser_calls >= self.max_browser_tool_calls
@@ -1481,6 +2338,31 @@ class AgentRunner:
                                 f"Browser tool budget reached ({completed_browser_calls}/"
                                 f"{self.max_browser_tool_calls})"
                             )
+                        browser_failure = classify_browser_failure(
+                            result_text,
+                            tool_name=tool_name,
+                            error_type="browser_tool_timeout"
+                            if tool_result.is_error and "timeout" in result_text.lower()
+                            else None,
+                        )
+                        if (
+                            browser_failure
+                            and tool_result.is_error
+                            and self._is_browser_mcp_run()
+                        ):
+                            telemetry = browser_failure.telemetry()
+                            self._emit_progress(
+                                {
+                                    "status": "failed",
+                                    "message": browser_failure.message,
+                                    "tool_calls": len(tool_calls) + len(pending_tools),
+                                    "pending_tool_calls": len(pending_tools),
+                                    "browser_tool_calls": _browser_tool_count(include_pending=True),
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                    **telemetry,
+                                }
+                            )
+                            raise BrowserSessionFailedError(browser_failure)
 
                 options_kwargs = self._claude_options_kwargs()
 
@@ -1512,15 +2394,15 @@ class AgentRunner:
 
                     # Print periodic progress for long-running agents
                     if messages_received == 1:
-                        print(
+                        self._console_print(
                             "   📨 First message received (agent is responding)",
-                            flush=True,
+                            level="debug",
                         )
                     elif messages_received % 50 == 0:
                         elapsed = (datetime.now() - start_time).total_seconds()
-                        print(
+                        self._console_print(
                             f"   📨 {messages_received} messages ({elapsed:.0f}s elapsed)",
-                            flush=True,
+                            level="debug",
                         )
 
                     # Handle tool use
@@ -1533,6 +2415,12 @@ class AgentRunner:
 
                         for tool_result in event_tool_results(message):
                             _handle_tool_result(tool_result)
+
+                        for input_delta in event_input_json_deltas(message):
+                            _apply_input_json_delta(input_delta)
+
+                        for block_stop in event_content_block_stops(message):
+                            _finalize_pending_tool_input(block_stop)
 
                         text_blocks = event_text_blocks(message)
                         if text_blocks:
@@ -1553,6 +2441,13 @@ class AgentRunner:
                     # Capture the final result
                     if hasattr(message, "result"):
                         result_parts.append(message.result)
+
+                    auth_error_message = claude_code_auth_error_message(
+                        message,
+                        "\n".join(result_parts),
+                    )
+                    if auth_error_message:
+                        raise ClaudeCodeAuthRequiredError(auth_error_message)
 
                     message_api_error_status = getattr(
                         message, "api_error_status", None
@@ -1575,12 +2470,34 @@ class AgentRunner:
                     # Periodic progress logging
                     if messages_received > 0 and messages_received % 25 == 0:
                         total_chars = sum(len(p) for p in result_parts)
-                        logger.info(
+                        logger.debug(
                             f"Agent progress: {messages_received} msgs, {text_blocks_received} text, "
                             f"{len(tool_calls)} tools, {total_chars} chars"
                         )
                         self._emit_progress(_progress_snapshot())
                         _check_unproductive_stream()
+
+            async def _run_query_with_browser_watchdog() -> None:
+                query_task = asyncio.create_task(_run_query())
+                watchdog_task = asyncio.create_task(_browser_tool_watchdog())
+                tasks = {query_task, watchdog_task}
+                try:
+                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        exc = task.exception()
+                        if exc is not None:
+                            for pending_task in pending:
+                                pending_task.cancel()
+                            raise exc
+                    if query_task.done():
+                        watchdog_task.cancel()
+                        return
+                    await query_task
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
             # Run with timeout, retrying with key rotation on 429
             rotator = get_api_key_rotator() if get_api_key_rotator else None
@@ -1602,7 +2519,7 @@ class AgentRunner:
                 while provider_attempt <= max_provider_attempts:
                     try:
                         with self._scoped_explicit_env():
-                            await asyncio.wait_for(_run_query(), timeout=timeout)
+                            await asyncio.wait_for(_run_query_with_browser_watchdog(), timeout=timeout)
 
                         # Report success
                         if rotator and rotator.key_count > 0:
@@ -1633,6 +2550,7 @@ class AgentRunner:
                             total_cost_usd = None
                             provider_usage.clear()
                             pending_tools.clear()
+                            stream_tool_ids_by_index.clear()
                             wait_seconds = provider_retry_delay_seconds(provider_attempt)
                             logger.warning(
                                 "Transient provider error during SDK agent run "
@@ -1684,6 +2602,7 @@ class AgentRunner:
                             session_id = None
                             total_cost_usd = None
                             pending_tools.clear()
+                            stream_tool_ids_by_index.clear()
                             rotate_key = True
                             break
                         raise  # Non-retryable error or no more retries — propagate
@@ -1696,6 +2615,7 @@ class AgentRunner:
 
             # Calculate duration
             duration = (datetime.now() - start_time).total_seconds()
+            _flush_pending_tools()
             output = "\n".join(result_parts)
             token_telemetry = self._build_token_telemetry(
                 prompt=final_prompt_for_telemetry,
@@ -1710,6 +2630,10 @@ class AgentRunner:
 
             logger.info(
                 f"Agent completed: {messages_received} messages, {len(tool_calls)} tool calls, {duration:.1f}s"
+            )
+            self._console_print(
+                f"Agent completed: {messages_received} messages, {len(tool_calls)} tool calls, {duration:.1f}s",
+                level="final",
             )
 
             agent_result = AgentResult(
@@ -1727,11 +2651,41 @@ class AgentRunner:
                 token_telemetry=token_telemetry,
             )
 
+        except DirectBrowserToolTimeoutError as e:
+            duration = (datetime.now() - start_time).total_seconds()
+            error_msg = str(e)
+            logger.warning(error_msg)
+            self._console_print(f"⚠️ {error_msg}", level="warning")
+            _flush_pending_tools(error=error_msg, error_type="browser_tool_timeout")
+
+            agent_result = AgentResult(
+                success=False,
+                output="\n".join(result_parts),
+                error=error_msg,
+                error_type="browser_tool_timeout",
+                duration_seconds=duration,
+                tool_calls=tool_calls,
+                messages_received=messages_received,
+                text_blocks_received=text_blocks_received,
+                timed_out=True,
+                api_error_status=api_error_status,
+                stop_reason=stop_reason,
+                session_id=session_id,
+                total_cost_usd=total_cost_usd,
+                hook_events_received=hook_events_received,
+                token_telemetry=self._build_token_telemetry(
+                    prompt=final_prompt_for_telemetry,
+                    output="\n".join(result_parts),
+                    provider_usage=provider_usage,
+                ),
+            )
+
         except asyncio.TimeoutError:
             duration = (datetime.now() - start_time).total_seconds()
             error_msg = f"Agent timed out after {timeout} seconds"
             logger.warning(error_msg)
-            print(f"⚠️ {error_msg}", flush=True)
+            self._console_print(f"⚠️ {error_msg}", level="warning")
+            _flush_pending_tools(error=error_msg, error_type="timeout")
 
             agent_result = AgentResult(
                 success=False,
@@ -1757,6 +2711,7 @@ class AgentRunner:
 
         except asyncio.CancelledError:
             logger.info("Agent run cancelled cooperatively")
+            _flush_pending_tools(error="Agent run cancelled", error_type="cancelled")
             agent_result = self._cancelled_result(
                 start_time=start_time,
                 output_parts=result_parts,
@@ -1792,6 +2747,10 @@ class AgentRunner:
 
             # Handle known SDK cleanup errors gracefully
             if "cancel scope" in error_str or "cancelled" in error_str:
+                _flush_pending_tools(
+                    error="SDK cleanup/cancellation before tool result",
+                    error_type="cancelled",
+                )
                 output = "\n".join(result_parts)
                 has_output = bool(output.strip())
                 logger.info(
@@ -1799,7 +2758,7 @@ class AgentRunner:
                     f"(output={'present' if has_output else 'EMPTY'}, "
                     f"{messages_received} msgs, {len(tool_calls)} tool calls)"
                 )
-                print("ℹ️ SDK cleanup warning (ignored)", flush=True)
+                self._console_print("ℹ️ SDK cleanup warning (ignored)", level="warning")
                 agent_result = AgentResult(
                     success=has_output,
                     output=output,
@@ -1827,7 +2786,8 @@ class AgentRunner:
             else:
                 # Actual error
                 logger.error(f"Agent error: {e}")
-                print(f"❌ Agent error: {e}", flush=True)
+                self._console_print(f"❌ Agent error: {e}", level="error")
+                _flush_pending_tools(error=str(e), error_type=error_type)
 
                 agent_result = AgentResult(
                     success=False,
@@ -1893,7 +2853,17 @@ class AgentRunner:
             last_tool = agent_result.tool_calls[-1].name if agent_result.tool_calls else None
             self._emit_progress(
                 {
-                    "phase": "completed" if agent_result.success else "failed",
+                    "phase": (
+                        "completed"
+                        if agent_result.success
+                        else "browser_session_failed"
+                        if classify_browser_failure(
+                            agent_result.error,
+                            tool_name=last_tool,
+                            error_type=agent_result.error_type,
+                        )
+                        else "failed"
+                    ),
                     "status": "completed" if agent_result.success else "failed",
                     "messages_received": agent_result.messages_received,
                     "text_blocks_received": agent_result.text_blocks_received,
@@ -1904,9 +2874,25 @@ class AgentRunner:
                     "last_tool": last_tool,
                     "output_chars": len(agent_result.output or ""),
                     "elapsed_seconds": agent_result.duration_seconds,
-                    "unproductive_stream": agent_result.error_type == "unproductive_stream",
+                    "unproductive_stream": (
+                        agent_result.error_type == "unproductive_stream"
+                        and not agent_result.tool_calls
+                    ),
                     "error_type": agent_result.error_type,
                     "error": agent_result.error,
+                    **(
+                        classify_browser_failure(
+                            agent_result.error,
+                            tool_name=last_tool,
+                            error_type=agent_result.error_type,
+                        ).telemetry()
+                        if classify_browser_failure(
+                            agent_result.error,
+                            tool_name=last_tool,
+                            error_type=agent_result.error_type,
+                        )
+                        else {}
+                    ),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -1961,7 +2947,8 @@ class AgentRunner:
         return candidates
 
     def _parse_tool_calls_from_jsonl(self, path: Path) -> list[ToolCall]:
-        pending: dict[str, tuple[str, datetime, dict[str, Any]]] = {}
+        pending: dict[str, _PendingToolCall] = {}
+        stream_tool_ids_by_index: dict[int, str] = {}
         completed: list[ToolCall] = []
         fallback_counter = 0
         try:
@@ -1981,11 +2968,44 @@ class AgentRunner:
             for tool_use in event_tool_uses(event):
                 fallback_counter += 1
                 tool_use_id = tool_use.id or f"recovered-tool-{fallback_counter}"
-                pending[tool_use_id] = (
-                    tool_use.name,
-                    datetime.now(),
-                    dict(tool_use.input or {}),
+                tool_input = dict(tool_use.input or {})
+                _validate_native_setup_seed_file(tool_use.name, tool_input)
+                pending[tool_use_id] = _PendingToolCall(
+                    name=tool_use.name,
+                    started_at=datetime.now(),
+                    input=tool_input,
                 )
+                if tool_use.index is not None:
+                    stream_tool_ids_by_index[tool_use.index] = tool_use_id
+
+            for input_delta in event_input_json_deltas(event):
+                pending_tool = None
+                if input_delta.tool_use_id and input_delta.tool_use_id in pending:
+                    pending_tool = pending[input_delta.tool_use_id]
+                elif input_delta.index is not None:
+                    tool_use_id = stream_tool_ids_by_index.get(input_delta.index)
+                    if tool_use_id:
+                        pending_tool = pending.get(tool_use_id)
+                elif len(pending) == 1:
+                    pending_tool = next(iter(pending.values()))
+                if pending_tool:
+                    pending_tool.input_json_fragments.append(input_delta.partial_json)
+
+            for block_stop in event_content_block_stops(event):
+                pending_tool = None
+                if block_stop.tool_use_id and block_stop.tool_use_id in pending:
+                    pending_tool = pending[block_stop.tool_use_id]
+                elif block_stop.index is not None:
+                    tool_use_id = stream_tool_ids_by_index.get(block_stop.index)
+                    if tool_use_id:
+                        pending_tool = pending.get(tool_use_id)
+                elif len(pending) == 1:
+                    pending_tool = next(iter(pending.values()))
+                if pending_tool:
+                    pending_tool.input = pending_tool.best_input()
+                    _validate_native_setup_seed_file(
+                        pending_tool.name, pending_tool.input
+                    )
 
             for tool_result in event_tool_results(event):
                 pending_item = None
@@ -1996,7 +3016,9 @@ class AgentRunner:
                     pending_item = pending.pop(key)
                 if not pending_item:
                     continue
-                tool_name, started_at, tool_input = pending_item
+                tool_name = pending_item.name
+                started_at = pending_item.started_at
+                tool_input = pending_item.best_input()
                 completed.append(
                         ToolCall(
                             name=tool_name,
@@ -2011,14 +3033,14 @@ class AgentRunner:
                         )
                     )
 
-        for tool_name, started_at, tool_input in pending.values():
+        for pending_tool in pending.values():
             completed.append(
                     ToolCall(
-                        name=tool_name,
-                        timestamp=started_at,
+                        name=pending_tool.name,
+                        timestamp=pending_tool.started_at,
                         duration_ms=None,
                         success=True,
-                        input=tool_input,
+                        input=pending_tool.best_input(),
                 )
             )
 
@@ -2114,83 +3136,11 @@ class AgentRunner:
         but the worker runs in a separate process and only reads .env.
         This bridges the gap by forwarding current env vars with the task.
         """
-        keys = [
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_AUTH_TOKENS",
-            "ANTHROPIC_API_KEY",
-            "ZAI_API_KEY",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_CHAT_MODEL",
-            "QUORVEX_LLM_PROVIDER",
-            "QUORVEX_LLM_BASE_URL",
-            "QUORVEX_LLM_API_KEY",
-            "QUORVEX_LLM_API_KEYS",
-            "QUORVEX_LLM_LIGHT_MODEL",
-            "QUORVEX_LLM_STANDARD_MODEL",
-            "QUORVEX_LLM_DEEP_MODEL",
-            "QUORVEX_LLM_TOOL_DEEP_MODEL",
-            "QUORVEX_LLM_CHAT_MODEL",
-            "QUORVEX_EMBEDDING_MODEL",
-            "API_TIMEOUT_MS",
-            "DISPLAY",
-            "VNC_ENABLED",
-            "HEADLESS",
-            "PLAYWRIGHT_HEADLESS",
-            "PLAYWRIGHT_BROWSERS_PATH",
-            "PLAYWRIGHT_WORKERS",
-            "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
-            "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
-            "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
-            "QUORVEX_TEST_DATA_FILE",
-            "CLAUDE_CODE_ENABLE_TELEMETRY",
-            "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
-            "ENABLE_ENHANCED_TELEMETRY_BETA",
-            "CLAUDE_CODE_PROPAGATE_TRACEPARENT",
-            "TRACEPARENT",
-            "TRACESTATE",
-            "OTEL_METRICS_EXPORTER",
-            "OTEL_LOGS_EXPORTER",
-            "OTEL_TRACES_EXPORTER",
-            "OTEL_EXPORTER_OTLP_PROTOCOL",
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_HEADERS",
-            "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
-            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
-            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-            "OTEL_METRIC_EXPORT_INTERVAL",
-            "OTEL_LOGS_EXPORT_INTERVAL",
-            "OTEL_TRACES_EXPORT_INTERVAL",
-            "OTEL_SERVICE_NAME",
-            "OTEL_RESOURCE_ATTRIBUTES",
-            "OTEL_LOG_USER_PROMPTS",
-            "OTEL_LOG_TOOL_DETAILS",
-            "OTEL_LOG_TOOL_CONTENT",
-            "ENABLE_TOOL_SEARCH",
-        ]
-        env_vars: dict[str, str] = {}
-        for key in keys:
-            val = os.environ.get(key)
-            if val:
-                env_vars[key] = val
-        env_vars.update(
-            {
-                key: value
-                for key, value in self.env_vars.items()
-                if not key.startswith("TESTDATA_")
-            }
-        )
+        env_vars = self._effective_runtime_env_vars()
         try:
-            selection = apply_runtime_env_aliases(
-                env_vars or None,
-                tier=self.model_tier,
+            selection = resolve_runtime_ai_selection(
+                self.model_tier,
+                env_vars=self._runtime_env_for_selection(env_vars) or None,
                 model_override=self.model,
             )
             env_vars["ANTHROPIC_MODEL"] = selection.model
@@ -2203,28 +3153,50 @@ class AgentRunner:
                     env_vars["ANTHROPIC_API_KEY"] = selection.api_key
         except Exception as exc:
             logger.debug("Unable to collect resolved model env vars: %s", exc)
-        tool_search = self._effective_tool_search_env()
-        if tool_search:
-            env_vars["ENABLE_TOOL_SEARCH"] = tool_search
-        else:
-            env_vars.pop("ENABLE_TOOL_SEARCH", None)
+        if self._runtime_auth_mode(env_vars) == "claude_code_subscription":
+            for key in API_KEY_CREDENTIAL_ENV_KEYS:
+                env_vars.pop(key, None)
         return env_vars if env_vars else None
 
     @contextmanager
     def _scoped_explicit_env(self):
-        effective_env = dict(self.env_vars)
-        tool_search = self._effective_tool_search_env()
-        if tool_search:
-            effective_env.setdefault("ENABLE_TOOL_SEARCH", tool_search)
+        effective_env = self._effective_runtime_env_vars()
         if not effective_env:
             yield
             return
         saved_env: dict[str, str | None] = {}
+        if self._runtime_auth_mode(effective_env) == "claude_code_subscription":
+            for key in API_KEY_CREDENTIAL_ENV_KEYS:
+                saved_env[key] = os.environ.get(key)
+                os.environ.pop(key, None)
+        try:
+            selection = resolve_runtime_ai_selection(
+                self.model_tier,
+                env_vars=self._runtime_env_for_selection(effective_env) or None,
+                model_override=self.model,
+            )
+            alias_values = {
+                "QUORVEX_LLM_BASE_URL": selection.base_url,
+                "ANTHROPIC_BASE_URL": selection.base_url,
+                "ANTHROPIC_MODEL": selection.model,
+                "QUORVEX_LLM_ACTIVE_TIER": selection.tier,
+                "QUORVEX_LLM_ACTIVE_MODEL": selection.model,
+            }
+            for key, value in alias_values.items():
+                if key not in saved_env:
+                    saved_env[key] = os.environ.get(key)
+                os.environ[key] = value
+        except Exception as exc:
+            logger.debug("Unable to scope resolved runtime aliases: %s", exc)
         for key, value in effective_env.items():
             if key.startswith("TESTDATA_"):
                 continue
-            saved_env[key] = os.environ.get(key)
+            if key not in saved_env:
+                saved_env[key] = os.environ.get(key)
             os.environ[key] = value
+        if "alias_values" in locals():
+            for key, value in alias_values.items():
+                os.environ[key] = value
         try:
             yield
         finally:
@@ -2334,9 +3306,9 @@ class AgentRunner:
                         f"No agent workers alive — task will likely get stuck. "
                         f"queue_depth={queue_depth}, running={running}"
                     )
-                    print(
+                    self._console_print(
                         "   ⚠️ No agent workers detected — task may wait indefinitely",
-                        flush=True,
+                        level="warning",
                     )
                 elif self.requires_live_browser and live_workers == 0:
                     logger.warning(
@@ -2346,9 +3318,9 @@ class AgentRunner:
                         queue_depth,
                         running,
                     )
-                    print(
+                    self._console_print(
                         "   ⚠️ No live-browser-capable agent workers detected — check DISPLAY/VNC worker setup",
-                        flush=True,
+                        level="warning",
                     )
                 elif queue_depth > 0:
                     logger.info(
@@ -2358,7 +3330,7 @@ class AgentRunner:
                 logger.debug(f"Pre-enqueue diagnostics failed (non-fatal): {diag_err}")
 
             logger.info(f"Enqueueing task via agent queue (timeout={timeout}s)")
-            print("   📤 Enqueueing agent task...", flush=True)
+            self._console_print("   📤 Enqueueing agent task...", level="summary")
 
             owner_metadata = self._queue_owner_metadata()
             task_id = await queue.enqueue_task(
@@ -2370,7 +3342,10 @@ class AgentRunner:
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")
-            print(f"   ⏳ Task {task_id} enqueued, waiting for worker...", flush=True)
+            self._console_print(
+                f"   ⏳ Task {task_id} enqueued, waiting for worker...",
+                level="summary",
+            )
 
             # Notify caller of task_id for progress tracking
             if self.on_task_enqueued:
@@ -2390,9 +3365,9 @@ class AgentRunner:
                 short_tool = (
                     last_tool.rsplit("__", 1)[-1] if "__" in last_tool else last_tool
                 )
-                print(
+                self._console_print(
                     f"   🔄 Worker progress: {tool_calls} tools, {interactions} interactions, last={short_tool}",
-                    flush=True,
+                    level="tools",
                 )
                 self._emit_progress(progress)
 
@@ -2422,8 +3397,6 @@ class AgentRunner:
                     f"Agent queue returned very short result ({result_len} chars): {result[:100]}"
                 )
 
-            print(f"   ✅ Agent completed via queue ({duration:.1f}s)", flush=True)
-
             output = result or ""
             stripped_output = output.strip()
             has_output = bool(stripped_output)
@@ -2435,6 +3408,14 @@ class AgentRunner:
                 for marker in ("error", "failed", "exception", "traceback")
             )
             invalid_session_output = classify_agent_error_type(stripped_output) == "invalid_session_resume"
+            claude_code_auth_output = (
+                classify_agent_error_type(stripped_output) == CLAUDE_CODE_AUTH_ERROR_TYPE
+            )
+            browser_failure = classify_browser_failure(
+                telemetry.get("last_browser_error") or telemetry.get("error") or output,
+                tool_name=str(telemetry.get("last_tool") or "") or None,
+                error_type=str(telemetry.get("error_type") or "") or None,
+            )
 
             tool_call_count = int(telemetry.get("tool_calls", 0) or 0)
             tool_names = telemetry.get("tool_names") or []
@@ -2541,6 +3522,73 @@ class AgentRunner:
             if self.session_dir:
                 self._save_debug_output(output, synthetic_tool_calls, messages_received)
 
+            self._console_print(
+                f"Agent completed via queue: {messages_received} messages, "
+                f"{len(synthetic_tool_calls)} tool calls, {duration:.1f}s",
+                level="final",
+            )
+
+            if browser_failure:
+                logger.warning(
+                    "Queue result reported a failed browser session: %s",
+                    browser_failure.message,
+                )
+                return AgentResult(
+                    success=False,
+                    output=output,
+                    error=browser_failure.message,
+                    error_type=browser_failure.error_type,
+                    duration_seconds=duration,
+                    tool_calls=synthetic_tool_calls,
+                    messages_received=messages_received,
+                    text_blocks_received=text_blocks_received,
+                    timed_out=browser_failure.error_type == "browser_tool_timeout",
+                    api_error_status=api_error_status,
+                    stop_reason=(
+                        str(telemetry.get("stop_reason"))
+                        if telemetry.get("stop_reason")
+                        else None
+                    ),
+                    session_id=(
+                        str(telemetry.get("session_id"))
+                        if telemetry.get("session_id")
+                        else None
+                    ),
+                    total_cost_usd=total_cost_usd,
+                    hook_events_received=hook_events_received,
+                    token_telemetry=token_telemetry,
+                )
+
+            if claude_code_auth_output:
+                logger.warning(
+                    "Agent queue returned Claude Code auth failure: %s",
+                    stripped_output[:200],
+                )
+                return AgentResult(
+                    success=False,
+                    output=output,
+                    error=stripped_output[:1000],
+                    error_type=CLAUDE_CODE_AUTH_ERROR_TYPE,
+                    duration_seconds=duration,
+                    tool_calls=synthetic_tool_calls,
+                    messages_received=messages_received,
+                    text_blocks_received=text_blocks_received,
+                    api_error_status=api_error_status,
+                    stop_reason=(
+                        str(telemetry.get("stop_reason"))
+                        if telemetry.get("stop_reason")
+                        else None
+                    ),
+                    session_id=(
+                        str(telemetry.get("session_id"))
+                        if telemetry.get("session_id")
+                        else None
+                    ),
+                    total_cost_usd=total_cost_usd,
+                    hook_events_received=hook_events_received,
+                    token_telemetry=token_telemetry,
+                )
+
             if has_error_markers or invalid_session_output:
                 logger.warning(
                     f"Short output appears to be an error message ({len(stripped_output)} chars): "
@@ -2609,7 +3657,7 @@ class AgentRunner:
             duration = (datetime.now() - start_time).total_seconds()
             error_msg = f"Agent timed out after {timeout} seconds (queue mode)"
             logger.warning(error_msg)
-            print(f"⚠️ {error_msg}", flush=True)
+            self._console_print(f"⚠️ {error_msg}", level="warning")
 
             return AgentResult(
                 success=False,
@@ -2676,6 +3724,13 @@ class AgentRunner:
                 for record in tool_call_records
                 if isinstance(record, dict)
             ]
+            browser_failure = classify_browser_failure(
+                telemetry.get("last_browser_error") or error_msg,
+                tool_name=str(telemetry.get("last_tool") or "") or None,
+                error_type=error_type,
+            )
+            if browser_failure:
+                error_type = browser_failure.error_type
 
             # Classify the error for clearer user feedback
             if (
@@ -2683,16 +3738,16 @@ class AgentRunner:
                 or "no agent workers" in error_msg.lower()
             ):
                 logger.error(f"Agent task not picked up: {error_msg}")
-                print(f"❌ No worker picked up the task: {error_msg}", flush=True)
+                self._console_print(f"❌ No worker picked up the task: {error_msg}", level="error")
             elif "heartbeat lost" in error_msg.lower():
                 logger.error(f"Agent worker crashed: {error_msg}")
-                print(f"❌ Agent worker crashed mid-execution: {error_msg}", flush=True)
+                self._console_print(f"❌ Agent worker crashed mid-execution: {error_msg}", level="error")
             elif "rate limit" in error_msg.lower() or "429" in error_msg:
                 logger.error(f"Agent rate limited: {error_msg}")
-                print(f"❌ Rate limited: {error_msg}", flush=True)
+                self._console_print(f"❌ Rate limited: {error_msg}", level="error")
             else:
                 logger.error(f"Agent failed via queue: {error_msg}")
-                print(f"❌ Agent failed: {error_msg}", flush=True)
+                self._console_print(f"❌ Agent failed: {error_msg}", level="error")
 
             return AgentResult(
                 success=False,
@@ -2701,6 +3756,7 @@ class AgentRunner:
                 error_type=error_type,
                 duration_seconds=duration,
                 tool_calls=synthetic_tool_calls,
+                timed_out=error_type == "browser_tool_timeout",
                 messages_received=int(telemetry.get("assistant_messages") or telemetry.get("stream_events") or 0),
                 text_blocks_received=int(telemetry.get("text_blocks") or 0),
                 api_error_status=api_error_status,
@@ -2719,7 +3775,7 @@ class AgentRunner:
         except Exception as e:
             duration = (datetime.now() - start_time).total_seconds()
             logger.error(f"Unexpected queue error: {e}", exc_info=True)
-            print(f"❌ Queue error: {e}", flush=True)
+            self._console_print(f"❌ Queue error: {e}", level="error")
 
             return AgentResult(
                 success=False,

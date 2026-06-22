@@ -27,6 +27,7 @@ export interface GenerationResult {
     browserActivitySeen?: boolean;
     browserActive?: boolean;
     browserLastTool?: string | null;
+    suspectedBrowserDialogBlock?: boolean;
     runtimeMessage?: string | null;
     displayDiagnostics?: BrowserDisplayDiagnostics | null;
     agentTaskId?: string | null;

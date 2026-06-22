@@ -164,6 +164,7 @@ class GenerationStatusResponse(BaseModel):
     browser_activity_seen: bool = False
     browser_active: bool = False
     browser_last_tool: str | None = None
+    suspected_browser_dialog_block: bool = False
     runtime_message: str | None = None
     display_diagnostics: dict[str, Any] | None = None
     agent_task_id: str | None = None
@@ -927,6 +928,7 @@ def _generation_status_response(gen: PrdGenerationResult) -> GenerationStatusRes
         browser_activity_seen=browser_activity_seen,
         browser_active=browser_active,
         browser_last_tool=browser_last_tool,
+        suspected_browser_dialog_block=bool(queue_telemetry.get("suspected_browser_dialog_block")),
         runtime_message=queue_telemetry.get("runtime_message") or runtime.get("runtime_message"),
         display_diagnostics=runtime.get("display_diagnostics"),
         agent_task_id=getattr(gen, "agent_task_id", None),
@@ -1763,6 +1765,7 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
             "browser_activity_seen": False,
             "browser_active": False,
             "browser_last_tool": None,
+            "suspected_browser_dialog_block": False,
             "runtime_message": initial_runtime.get("runtime_message")
             if live_browser_requested
             else "PRD-only generation. Provide a Target URL to enable live browser validation.",

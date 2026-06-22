@@ -8,6 +8,7 @@ import {
   MODEL_ID,
   OPENAI_MODEL_ID,
   reportRateLimit,
+  usesClaudeCodeSubscription,
 } from '@/lib/ai/provider';
 import { buildSystemPrompt } from '@/lib/ai/system-prompt';
 import { createAssistantTools } from '@/lib/ai/tools';
@@ -123,6 +124,22 @@ function textToUIMessageResponse(text: string) {
   });
 
   return createUIMessageStreamResponse({ stream });
+}
+
+function buildClaudeCodeBridgePrompt(messages: any[]): string {
+  return messages
+    .map((message) => {
+      const role = typeof message?.role === 'string' ? message.role : 'message';
+      const text = extractMessageText(message);
+      return text ? `${role.toUpperCase()}:\n${text}` : '';
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function claudeCodeSubscriptionErrorMessage(error?: string) {
+  const detail = error ? ` Backend detail: ${error}` : '';
+  return `Claude Code subscription token is configured, but Claude rejected the request. Check subscription availability or run claude setup-token again.${detail}`;
 }
 
 function toolInputUIMessageResponse(text: string, toolName: string, input: Record<string, unknown>) {
@@ -1031,7 +1048,8 @@ export async function POST(req: Request) {
   const authToken = authHeader?.replace('Bearer ', '') || undefined;
   const latestUserText = extractLatestUserText(messages);
   const runtimeSettings = await getChatRuntimeSettings(authToken);
-  const useAnthropic = hasDirectAnthropicChatCredential(runtimeSettings);
+  const useClaudeCode = usesClaudeCodeSubscription(runtimeSettings);
+  const useAnthropic = !useClaudeCode && hasDirectAnthropicChatCredential(runtimeSettings);
   const useOpenAI = !useAnthropic && hasOpenAIChatCredential(runtimeSettings);
   let routedModelId: string | undefined;
 
@@ -1114,6 +1132,25 @@ export async function POST(req: Request) {
 
   const tools = createAssistantTools(authToken, projectId);
   const recentMessages = getRecentMessages(messages);
+
+  if (useClaudeCode) {
+    const bridgeRes = await backendFetch<{ text?: string }>('/chat/claude-code', {
+      method: 'POST',
+      authToken,
+      timeoutMs: 120000,
+      body: {
+        prompt: buildClaudeCodeBridgePrompt(recentMessages) || latestUserText,
+        system_prompt: systemPrompt,
+        timeout_seconds: 120,
+      },
+    });
+
+    if (bridgeRes.ok && bridgeRes.data?.text) {
+      return textToUIMessageResponse(bridgeRes.data.text);
+    }
+
+    return textToUIMessageResponse(claudeCodeSubscriptionErrorMessage(bridgeRes.error));
+  }
 
   if (!useAnthropic && !useOpenAI) {
     return textToUIMessageResponse(

@@ -21,6 +21,11 @@ from .models_db import (  # noqa: F401
     AgentMemory,
     AgentRun,
     AgentRunEvent,
+    AgentRunEvidence,
+    AgentRunFinding,
+    AgentRunNote,
+    AgentRunTaskContract,
+    AgentRunWorkItem,
     AgentToolDefinition,
     AgentTraceSnapshot,
     AgentTraceSpan,
@@ -396,15 +401,187 @@ def _run_migrations():
             if "agent_task_id" not in agentrun_columns:
                 conn.execute(text("ALTER TABLE agentrun ADD COLUMN agent_task_id VARCHAR"))
                 logger.info("Added column: agentrun.agent_task_id")
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            native_agentrun_columns = {
+                "state_json": "TEXT",
+                "contract_status": "VARCHAR",
+                "finalization_status": "VARCHAR",
+                "reporter_status": "VARCHAR",
+                "verifier_status": "VARCHAR",
+                "updated_at": timestamp_type,
+            }
+            for column_name, column_type in native_agentrun_columns.items():
+                if column_name not in agentrun_columns:
+                    conn.execute(text(f"ALTER TABLE agentrun ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: agentrun.%s", column_name)
             for index_sql in (
                 "CREATE INDEX IF NOT EXISTS ix_agentrun_project_created_id ON agentrun (project_id, created_at, id)",
                 "CREATE INDEX IF NOT EXISTS ix_agentrun_project_status_created_id ON agentrun (project_id, status, created_at, id)",
                 "CREATE INDEX IF NOT EXISTS ix_agentrun_project_agent_type_created_id ON agentrun (project_id, agent_type, created_at, id)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_contract_status ON agentrun (contract_status)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_finalization_status ON agentrun (finalization_status)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_reporter_status ON agentrun (reporter_status)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_verifier_status ON agentrun (verifier_status)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_updated_at ON agentrun (updated_at)",
             ):
                 try:
                     conn.execute(text(index_sql))
                 except Exception as e:
                     logger.debug(f"Index may already exist on agentrun: {e}")
+
+        if "agent_run_events" in inspector.get_table_names():
+            event_columns = {col["name"] for col in inspector.get_columns("agent_run_events")}
+            if "idempotency_key" not in event_columns:
+                conn.execute(text("ALTER TABLE agent_run_events ADD COLUMN idempotency_key VARCHAR"))
+                logger.info("Added column: agent_run_events.idempotency_key")
+            for index_sql in (
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_events_idempotency_key ON agent_run_events (idempotency_key)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_run_events_run_idempotency_key ON agent_run_events (run_id, idempotency_key)",
+            ):
+                try:
+                    conn.execute(text(index_sql))
+                except Exception as e:
+                    logger.debug(f"Index may already exist on agent_run_events: {e}")
+
+        if "agentrun" in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            bool_false = "FALSE" if db_type == "postgresql" else "0"
+            native_tables = {
+                "agent_run_task_contracts": f"""
+                    CREATE TABLE IF NOT EXISTS agent_run_task_contracts (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR REFERENCES projects(id),
+                        run_id VARCHAR NOT NULL REFERENCES agentrun(id),
+                        objective TEXT NOT NULL,
+                        scope TEXT,
+                        success_criteria_json TEXT NOT NULL DEFAULT '[]',
+                        allowed_tools_json TEXT NOT NULL DEFAULT '[]',
+                        output_expectations_json TEXT NOT NULL DEFAULT '{{}}',
+                        source VARCHAR NOT NULL DEFAULT 'runtime',
+                        created_at {timestamp_type} NOT NULL,
+                        CONSTRAINT uq_agent_run_task_contracts_run_id UNIQUE (run_id)
+                    )
+                """,
+                "agent_run_work_items": f"""
+                    CREATE TABLE IF NOT EXISTS agent_run_work_items (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR REFERENCES projects(id),
+                        run_id VARCHAR NOT NULL REFERENCES agentrun(id),
+                        parent_work_item_id VARCHAR REFERENCES agent_run_work_items(id),
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        status VARCHAR NOT NULL DEFAULT 'open',
+                        priority INTEGER NOT NULL DEFAULT 0,
+                        owner VARCHAR,
+                        metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                        created_at {timestamp_type} NOT NULL,
+                        updated_at {timestamp_type} NOT NULL,
+                        completed_at {timestamp_type}
+                    )
+                """,
+                "agent_run_notes": f"""
+                    CREATE TABLE IF NOT EXISTS agent_run_notes (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR REFERENCES projects(id),
+                        run_id VARCHAR NOT NULL REFERENCES agentrun(id),
+                        agent_task_id VARCHAR,
+                        sequence INTEGER NOT NULL,
+                        note_type VARCHAR NOT NULL DEFAULT 'observation',
+                        level VARCHAR NOT NULL DEFAULT 'info',
+                        title TEXT NOT NULL,
+                        body TEXT,
+                        source VARCHAR,
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        confidence FLOAT,
+                        url VARCHAR,
+                        tool_name VARCHAR,
+                        artifact_path VARCHAR,
+                        actionable BOOLEAN NOT NULL DEFAULT {bool_false},
+                        related_event_sequence INTEGER,
+                        related_trace_span_id VARCHAR REFERENCES agent_trace_spans(id),
+                        idempotency_key VARCHAR,
+                        payload_json TEXT NOT NULL DEFAULT '{{}}',
+                        created_at {timestamp_type} NOT NULL,
+                        CONSTRAINT uq_agent_run_notes_run_sequence UNIQUE (run_id, sequence),
+                        CONSTRAINT uq_agent_run_notes_run_idempotency_key UNIQUE (run_id, idempotency_key)
+                    )
+                """,
+                "agent_run_evidence": f"""
+                    CREATE TABLE IF NOT EXISTS agent_run_evidence (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR REFERENCES projects(id),
+                        run_id VARCHAR NOT NULL REFERENCES agentrun(id),
+                        note_id VARCHAR REFERENCES agent_run_notes(id),
+                        evidence_type VARCHAR NOT NULL DEFAULT 'artifact',
+                        title TEXT,
+                        summary TEXT,
+                        stable_key VARCHAR NOT NULL,
+                        artifact_path VARCHAR,
+                        url VARCHAR,
+                        tool_name VARCHAR,
+                        trace_span_id VARCHAR REFERENCES agent_trace_spans(id),
+                        event_sequence INTEGER,
+                        payload_json TEXT NOT NULL DEFAULT '{{}}',
+                        created_at {timestamp_type} NOT NULL,
+                        CONSTRAINT uq_agent_run_evidence_run_stable_key UNIQUE (run_id, stable_key)
+                    )
+                """,
+                "agent_run_findings": f"""
+                    CREATE TABLE IF NOT EXISTS agent_run_findings (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR REFERENCES projects(id),
+                        run_id VARCHAR NOT NULL REFERENCES agentrun(id),
+                        note_id VARCHAR REFERENCES agent_run_notes(id),
+                        stable_key VARCHAR NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        severity VARCHAR,
+                        confidence VARCHAR,
+                        status VARCHAR NOT NULL DEFAULT 'candidate',
+                        evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+                        diagnostics_json TEXT NOT NULL DEFAULT '{{}}',
+                        created_at {timestamp_type} NOT NULL,
+                        updated_at {timestamp_type} NOT NULL,
+                        CONSTRAINT uq_agent_run_findings_run_stable_key UNIQUE (run_id, stable_key)
+                    )
+                """,
+            }
+            for table_name, create_sql in native_tables.items():
+                conn.execute(text(create_sql))
+                logger.debug("Ensured native agent run table exists: %s", table_name)
+            native_indexes = (
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_task_contracts_run_id ON agent_run_task_contracts (run_id)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_task_contracts_project_created ON agent_run_task_contracts (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_work_items_run_status ON agent_run_work_items (run_id, status)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_work_items_project_created ON agent_run_work_items (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_run_sequence ON agent_run_notes (run_id, sequence)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_project_created ON agent_run_notes (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_type_level ON agent_run_notes (note_type, level)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_agent_task_id ON agent_run_notes (agent_task_id)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_note_type ON agent_run_notes (note_type)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_level ON agent_run_notes (level)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_source ON agent_run_notes (source)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_tool_name ON agent_run_notes (tool_name)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_actionable ON agent_run_notes (actionable)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_notes_idempotency_key ON agent_run_notes (idempotency_key)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_evidence_run_kind ON agent_run_evidence (run_id, evidence_type)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_evidence_project_created ON agent_run_evidence (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_evidence_note_id ON agent_run_evidence (note_id)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_evidence_stable_key ON agent_run_evidence (stable_key)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_evidence_tool_name ON agent_run_evidence (tool_name)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_run_status ON agent_run_findings (run_id, status)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_project_created ON agent_run_findings (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_note_id ON agent_run_findings (note_id)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_stable_key ON agent_run_findings (stable_key)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_severity ON agent_run_findings (severity)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_confidence ON agent_run_findings (confidence)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_findings_status ON agent_run_findings (status)",
+            )
+            for index_sql in native_indexes:
+                try:
+                    conn.execute(text(index_sql))
+                except Exception as e:
+                    logger.debug(f"Native agent run index may already exist: {e}")
 
         # Repair agent memory tables created before typed/scoped memory fields.
         if "agent_memories" in inspector.get_table_names():

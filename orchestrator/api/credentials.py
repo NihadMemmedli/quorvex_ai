@@ -178,6 +178,7 @@ def get_env_credentials() -> dict[str, str]:
                 "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_AUTH_TOKENS",
                 "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "JWT_SECRET_KEY",
             ]:

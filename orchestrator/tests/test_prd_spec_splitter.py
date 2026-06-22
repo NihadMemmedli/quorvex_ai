@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.utils.prd_spec_splitter import PRDSpecSplitter
+from orchestrator.workflows.full_native_pipeline import FullNativePipeline
 
 PARENT_TARGET_URL = "https://pre.wetravel.to/"
 PARENT_ORIGIN = "https://pre.wetravel.to"
@@ -183,6 +184,7 @@ def test_child_with_explicit_url_preserves_it():
         )
     )
 
+    assert "Target URL: https://pre.wetravel.to/itinerary_builder/create" in spec
     assert "- URL: https://pre.wetravel.to/itinerary_builder/create" in spec
     assert "1. Navigate to https://pre.wetravel.to/itinerary_builder/create" in spec
 
@@ -194,9 +196,18 @@ def test_relative_navigation_step_is_resolved():
         )
     )
 
+    assert "Target URL: https://pre.wetravel.to/itinerary_builder/create" in spec
     assert "- URL: https://pre.wetravel.to/itinerary_builder/create" in spec
     assert "1. Navigate to https://pre.wetravel.to/itinerary_builder/create" in spec
     assert "Navigate to /itinerary_builder/create" not in spec
+
+
+def test_native_pipeline_extracts_url_from_split_child_target_url_line():
+    spec = _render_rich(_rich_case(_url="/dashboard"))
+    pipeline = object.__new__(FullNativePipeline)
+
+    assert "Target URL: https://pre.wetravel.to/dashboard" in spec
+    assert pipeline._extract_url(spec) == "https://pre.wetravel.to/dashboard"
 
 
 def test_auth_required_non_login_child_keeps_login_and_testdata_context():

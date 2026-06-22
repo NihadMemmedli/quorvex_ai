@@ -20,6 +20,11 @@ export interface AgentRun {
     result?: any;
     project_id?: string;
     progress?: any;
+    state?: any;
+    contract_status?: string | null;
+    finalization_status?: string | null;
+    reporter_status?: string | null;
+    verifier_status?: string | null;
     agent_task_id?: string | null;
     temporal_workflow_id?: string | null;
     temporal_run_id?: string | null;
@@ -28,6 +33,7 @@ export interface AgentRun {
     health?: AgentRunHealth;
     started_at?: string | null;
     completed_at?: string | null;
+    updated_at?: string | null;
 }
 
 export interface AgentHistoryCounts {
@@ -101,8 +107,34 @@ export interface AgentRunEvent {
     level: string;
     message: string;
     payload?: Record<string, any>;
+    idempotency_key?: string | null;
     created_at: string;
     agent_task_id?: string | null;
+}
+
+export type AgentRunNoteType = 'observation' | 'decision' | 'finding' | 'blocker' | 'handoff' | 'verifier_note' | 'reporter_note';
+
+export interface AgentRunNote {
+    id: string;
+    project_id?: string | null;
+    run_id: string;
+    agent_task_id?: string | null;
+    sequence: number;
+    note_type: AgentRunNoteType | string;
+    level: string;
+    title: string;
+    body?: string | null;
+    source?: string | null;
+    tags?: string[];
+    confidence?: number | null;
+    url?: string | null;
+    tool_name?: string | null;
+    artifact_path?: string | null;
+    actionable?: boolean;
+    related_event_sequence?: number | null;
+    related_trace_span_id?: string | null;
+    payload?: Record<string, any>;
+    created_at: string;
 }
 
 export interface AgentTraceSnapshot {
@@ -158,6 +190,70 @@ export interface AgentTraceBundle {
     artifacts: AgentArtifact[];
     temporal?: AgentRunTemporal | null;
     correlation?: Record<string, any>;
+}
+
+export function agentRunNoteFromEvent(event: AgentRunEvent): AgentRunNote | null {
+    if (event.event_type !== 'agent_note') return null;
+    const payload = event.payload || {};
+    return {
+        id: event.id,
+        project_id: payload.project_id ?? null,
+        run_id: event.run_id || String(payload.run_id || ''),
+        agent_task_id: event.agent_task_id ?? null,
+        sequence: event.sequence,
+        note_type: String(payload.note_type || 'observation'),
+        level: event.level || 'info',
+        title: String(payload.title || event.message || 'Agent note'),
+        body: typeof payload.body === 'string' ? payload.body : null,
+        source: typeof payload.source === 'string' ? payload.source : null,
+        tags: Array.isArray(payload.tags) ? payload.tags.map(String) : [],
+        confidence: typeof payload.confidence === 'number' ? payload.confidence : null,
+        url: typeof payload.url === 'string' ? payload.url : null,
+        tool_name: typeof payload.tool_name === 'string' ? payload.tool_name : null,
+        artifact_path: typeof payload.artifact_path === 'string' ? payload.artifact_path : null,
+        actionable: Boolean(payload.actionable),
+        related_event_sequence: event.sequence,
+        related_trace_span_id: typeof payload.related_trace_span_id === 'string' ? payload.related_trace_span_id : null,
+        payload,
+        created_at: event.created_at,
+    };
+}
+
+export function mergeAgentRunNotes(existing: AgentRunNote[], incoming: AgentRunNote[]) {
+    const bySequence = new Map<number, AgentRunNote>();
+    [...existing, ...incoming].forEach(note => {
+        if (Number.isFinite(note.sequence)) bySequence.set(note.sequence, note);
+    });
+    return Array.from(bySequence.values()).sort((a, b) => a.sequence - b.sequence);
+}
+
+export function filterAgentRunNotes(notes: AgentRunNote[], filters: {
+    search?: string;
+    noteType?: string;
+    level?: string;
+    source?: string;
+    actionableOnly?: boolean;
+    sort?: 'newest' | 'chronological';
+}) {
+    const query = (filters.search || '').trim().toLowerCase();
+    const filtered = notes.filter(note => {
+        if (filters.noteType && filters.noteType !== 'all' && note.note_type !== filters.noteType) return false;
+        if (filters.level && filters.level !== 'all' && note.level !== filters.level) return false;
+        if (filters.source && filters.source !== 'all' && (note.source || 'runtime') !== filters.source) return false;
+        if (filters.actionableOnly && !note.actionable) return false;
+        if (!query) return true;
+        return [
+            note.title,
+            note.body,
+            note.source,
+            note.tool_name,
+            note.url,
+            ...(note.tags || []),
+        ].filter(Boolean).join(' ').toLowerCase().includes(query);
+    });
+    return [...filtered].sort((a, b) => (
+        filters.sort === 'newest' ? b.sequence - a.sequence : a.sequence - b.sequence
+    ));
 }
 
 export interface AgentTool {
@@ -316,6 +412,7 @@ export interface AgentQueueStatus {
 
 export interface AgentReportSearchItem {
     run_id: string;
+    project_id?: string | null;
     agent_name?: string;
     created_at?: string;
     type: 'finding' | 'test_idea' | 'requirement' | 'page' | 'evidence' | 'action' | string;
@@ -328,6 +425,7 @@ export const DEFAULT_CUSTOM_AGENT_SYSTEM_PROMPT =
 export const DEFAULT_CUSTOM_AGENT_TOOL_IDS = [
     'read_file',
     'list_files',
+    'agent_note',
     'browser_navigate',
     'browser_snapshot',
     'browser_network',
@@ -412,17 +510,22 @@ export function reportSearchResultTab(type: AgentReportSearchItem['type']): Cust
     }
 }
 
-export function reportSearchResultHref(result: AgentReportSearchItem) {
-    const params = new URLSearchParams({
-        runId: result.run_id,
-        view: 'run',
-        resultTab: reportSearchResultTab(result.type),
-    });
+export function reportSearchResultHref(result: AgentReportSearchItem, currentParams?: URLSearchParams | string) {
+    const fallbackParams = typeof window !== 'undefined' ? window.location.search : undefined;
+    const sourceParams = currentParams ?? fallbackParams;
+    const params = new URLSearchParams(typeof sourceParams === 'string' ? sourceParams : sourceParams?.toString());
+    params.set('runId', result.run_id);
+    params.set('view', 'run');
+    params.set('resultTab', reportSearchResultTab(result.type));
+    if (result.project_id) params.set('project_id', result.project_id);
     const itemId = result.item?.id != null ? String(result.item.id) : '';
 
     if ((result.type === 'finding' || result.type === 'test_idea') && itemId) {
         params.set('specItemId', itemId);
         params.set('specItemType', result.type);
+    } else {
+        params.delete('specItemId');
+        params.delete('specItemType');
     }
 
     return `/agents?${params.toString()}`;
@@ -435,6 +538,12 @@ export function formatToolName(toolName?: string) {
 }
 
 export function customAgentCurrentActivity(progress: any = {}) {
+    if (String(progress.auth_preflight_status || '').toLowerCase() === 'failed') {
+        const reason = String(progress.auth_preflight_failure_reason || progress.message || '');
+        return /challenge|security|cloudflare|captcha|verify you are human|just a moment/i.test(reason)
+            ? 'Auth challenge'
+            : 'Session validation failed';
+    }
     if (progress.current_tool_label || progress.last_tool_label || progress.current_tool || progress.last_tool) {
         return progress.current_tool_label || progress.last_tool_label || formatToolName(progress.current_tool || progress.last_tool);
     }
@@ -496,17 +605,49 @@ export function reportSpecBrowserAuthBody(mode: ReportSpecBrowserAuthMode, sessi
     return { skip_browser_auth: true };
 }
 
+function safeReportObject(value: unknown): Record<string, any> {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function safeReportArray<T = any>(value: unknown): T[] {
+    return Array.isArray(value) ? value as T[] : [];
+}
+
 export function getStructuredReport(run: AgentRun): StructuredAgentReport {
-    return run.result?.structured_report || {
-        summary: run.result?.summary || 'Custom agent completed. Review the raw output for details.',
-        scope: run.config?.prompt || run.config?.url || '',
-        pages_checked: [],
-        findings: [],
-        test_ideas: [],
-        requirements: [],
-        evidence: [],
-        follow_up_actions: [],
-        parse_status: 'raw',
+    const result = safeReportObject(run.result);
+    const config = safeReportObject(run.config);
+    const report = safeReportObject(result.structured_report);
+    const hasStructuredReport = Object.keys(report).length > 0;
+    const fallbackSummary = typeof result.summary === 'string' && result.summary.trim()
+        ? result.summary
+        : 'Custom agent completed. Review the raw output for details.';
+    const fallbackScope = String(config.prompt || config.url || '');
+
+    if (!hasStructuredReport) {
+        return {
+            summary: fallbackSummary,
+            scope: fallbackScope,
+            pages_checked: [],
+            findings: [],
+            test_ideas: [],
+            requirements: [],
+            evidence: [],
+            follow_up_actions: [],
+            parse_status: 'raw',
+        };
+    }
+
+    return {
+        ...report,
+        summary: typeof report.summary === 'string' ? report.summary : fallbackSummary,
+        scope: typeof report.scope === 'string' ? report.scope : fallbackScope,
+        pages_checked: safeReportArray<ReportPage>(report.pages_checked),
+        findings: safeReportArray<ReportFinding>(report.findings),
+        test_ideas: safeReportArray<ReportTestIdea>(report.test_ideas),
+        requirements: safeReportArray<ReportRequirement>(report.requirements),
+        evidence: safeReportArray<ReportEvidence>(report.evidence),
+        follow_up_actions: safeReportArray(report.follow_up_actions),
+        parse_status: typeof report.parse_status === 'string' ? report.parse_status : undefined,
     };
 }
 
@@ -554,6 +695,22 @@ export function isAgentRunTerminal(status?: string) {
     return TERMINAL_AGENT_STATUSES.has(String(status || '').toLowerCase());
 }
 
+export function agentRunPartialReason(run?: AgentRun | null) {
+    if (!run || run.status !== 'completed_partial') return '';
+    const result = run.result || {};
+    const diagnostics = result.diagnostics || {};
+    const finalizer = diagnostics.finalizer || {};
+    const candidates = [
+        result.partial_reason,
+        result.partial_completion_reason,
+        result.recovery_reason,
+        finalizer.browser_timeout_recovery_reason,
+        diagnostics.browser_timeout_recovery_reason,
+        Array.isArray(result.contract_warnings) ? result.contract_warnings[0] : '',
+    ];
+    return String(candidates.find(value => typeof value === 'string' && value.trim()) || '').trim();
+}
+
 export function agentStatusTone(status?: string) {
     if (status === 'completed') return { bg: 'var(--success-muted)', color: 'var(--success)' };
     if (status === 'completed_partial') return { bg: 'var(--warning-muted)', color: 'var(--warning)' };
@@ -575,13 +732,16 @@ export function agentRunResultTitle(run: AgentRun) {
 
 export function customAgentExecutionStarted(run: AgentRun) {
     const progress = run.progress || {};
+    if (String(progress.auth_preflight_status || '').toLowerCase() === 'failed') {
+        return true;
+    }
     if (
-        run.agent_task_id ||
-        progress.agent_task_id ||
         progress.last_tool ||
+        progress.browser_activity_seen ||
         Number(progress.tool_calls || 0) > 0 ||
         Number(progress.browser_tool_calls || 0) > 0 ||
-        ['tool_use', 'tool_result', 'running', 'completed', 'failed'].includes(String(progress.phase || '')) ||
+        Number(progress.interactions || 0) > 0 ||
+        ['tool_use', 'tool_result', 'running', 'browser_slot', 'retrying', 'completed', 'failed'].includes(String(progress.phase || '')) ||
         (run.health?.latest_heartbeat_at)
     ) {
         return true;
@@ -595,10 +755,13 @@ export function customAgentExecutionStarted(run: AgentRun) {
 export function customAgentWorkerMessage(run: AgentRun) {
     const temporalError = run.temporal?.error || run.temporal?.summary?.last_workflow_task_failure;
     if (temporalError) return temporalError;
+    if (String((run.progress || {}).auth_preflight_status || '').toLowerCase() === 'failed') {
+        return (run.progress || {}).auth_preflight_failure_reason || 'Saved browser session validation failed before the agent started.';
+    }
     if ((run.progress || {}).browser_runtime === 'headless_worker' || (run.progress || {}).live_view_available === false) {
         return 'Browser execution is running outside the VNC display. Follow the latest screenshots and activity timeline.';
     }
-    if ((run.progress || {}).phase === 'queued') return 'Agent task is queued for a worker. Browser evidence will appear when the worker starts the task.';
+    if (['queued', 'worker_wait'].includes(String((run.progress || {}).phase || ''))) return 'Agent task is queued for a worker. Browser evidence will appear when the worker starts the task.';
     const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
     if (executeActivity?.status === 'scheduled') {
         return `Temporal scheduled agent execution. Waiting for a custom workflow worker on ${run.temporal?.task_queue || 'the workflow task queue'}.`;

@@ -274,6 +274,9 @@ async function routeAgentsApi(page: Page, options: {
   onRunFetch?: (run: any, fetchCount: number) => any;
   queueStatus?: Record<string, unknown>;
   runOverride?: Record<string, any>;
+  runNotes?: Array<Record<string, unknown>>;
+  runEvents?: Array<Record<string, unknown>>;
+  traceSpans?: Array<Record<string, unknown>>;
 } = {}) {
   let run = { ...clone(completedCustomRun()), ...options.runOverride };
   let definitions = [...(options.definitions || [])];
@@ -469,8 +472,8 @@ async function routeAgentsApi(page: Page, options: {
           created_at: '2026-06-08T10:00:00',
           updated_at: '2026-06-08T10:00:00',
         },
-        spans: [],
-        events: [],
+        spans: options.traceSpans || [],
+        events: options.runEvents || [],
         memory_injections: [],
         artifacts: [],
         temporal: null,
@@ -478,7 +481,8 @@ async function routeAgentsApi(page: Page, options: {
       },
     }),
   );
-  await page.route(`${API_BASE}/api/agents/runs/${run.id}/events**`, route => route.fulfill({ status: 200, json: [] }));
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}/notes**`, route => route.fulfill({ status: 200, json: options.runNotes || [] }));
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}/events**`, route => route.fulfill({ status: 200, json: options.runEvents || [] }));
   await page.route(`${API_BASE}/api/agents/exploratory/${run.id}/specs`, route => route.fulfill({ status: 200, json: { specs: [] } }));
   await page.route(`${API_BASE}/api/agents/exploratory/flow-spec-jobs/report-spec-job`, route => route.fulfill({
     status: 200,
@@ -625,6 +629,63 @@ async function routeAgentsApi(page: Page, options: {
 }
 
 test.describe('Agents custom report requirements', () => {
+  test('shows agent-authored notes only in the observability notes tab', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      runNotes: [{
+        id: 'note-agent-1',
+        run_id: 'custom-run-reqs',
+        sequence: 12,
+        note_type: 'finding',
+        level: 'warning',
+        title: 'Checkout validation gap',
+        body: 'Postal code submission did not show validation feedback.',
+        source: 'agent',
+        tags: ['checkout'],
+        actionable: true,
+        confidence: 0.84,
+        created_at: '2026-06-08T10:02:00',
+      }],
+      runEvents: [{
+        id: 'evt-tool-1',
+        run_id: 'custom-run-reqs',
+        sequence: 11,
+        event_type: 'tool_call',
+        level: 'info',
+        message: 'Using browser_evaluate.',
+        payload: { tool_name: 'mcp__playwright-test__browser_evaluate' },
+        created_at: '2026-06-08T10:01:00',
+      }],
+      traceSpans: [{
+        id: 'span-tool-1',
+        run_id: 'custom-run-reqs',
+        trace_id: 'atrace-e2e',
+        sequence: 11,
+        span_type: 'tool_call',
+        name: 'browser_evaluate',
+        tool_name: 'mcp__playwright-test__browser_evaluate',
+        message: 'Using browser_evaluate.',
+        level: 'info',
+        success: true,
+        duration_ms: 42,
+        input_preview: { expression: 'document.title' },
+        output_preview: { value: 'Checkout' },
+        payload: {},
+        created_at: '2026-06-08T10:01:00',
+      }],
+    });
+
+    await page.goto('/agents?agent=custom&runId=custom-run-reqs&traceTab=notes');
+
+    await expect(page.getByText('Checkout validation gap')).toBeVisible();
+    await expect(page.getByText('Postal code submission did not show validation feedback.')).toBeVisible();
+    await expect(page.getByText('Live Notes')).toHaveCount(1);
+    await expect(page.getByText('Using browser_evaluate.')).toHaveCount(0);
+
+    await page.getByRole('button', { name: /^Tools$/ }).click();
+    await expect(page.getByText('evaluate', { exact: true })).toBeVisible();
+  });
+
   test('renders requirement tab, imports candidates, and keeps spec actions available', async ({ page }) => {
     await authenticate(page);
     await routeAgentsApi(page);

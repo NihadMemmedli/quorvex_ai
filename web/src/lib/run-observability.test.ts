@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractLinkedAgentRunId, formatAge, resolveRunHealth } from './run-observability';
+import { extractLinkedAgentRunId, formatAge, resolveLinkedAgentRunId, resolveRunHealth } from './run-observability';
 
 describe('run observability', () => {
   it('formats compact ages', () => {
@@ -25,7 +25,7 @@ describe('run observability', () => {
     expect(health.stuck_warning).toContain('No new execution.log output');
   });
 
-  it('warns when Temporal has a started activity and stale history', () => {
+  it('does not warn when Temporal has a started activity and recent run output', () => {
     const health = resolveRunHealth({
       status: 'running',
       health: {
@@ -37,6 +37,58 @@ describe('run observability', () => {
     }, new Date('2026-06-20T16:05:30.000Z'));
 
     expect(health.has_recent_output).toBe(true);
+    expect(health.stuck_warning).toBeNull();
+    expect(health.warnings).toEqual([]);
+  });
+
+  it('does not warn when artifacts are moving even if execution.log and Temporal history are stale', () => {
+    const health = resolveRunHealth({
+      status: 'running',
+      health: {
+        last_log_at: '2026-06-20T16:00:00.000Z',
+        last_artifact_at: '2026-06-20T16:05:10.000Z',
+        last_temporal_event_at: '2026-06-20T16:00:00.000Z',
+        temporal_started_activities: [{ activity_type: 'execute_test_run', status: 'started' }],
+        stale_after_seconds: 120,
+      },
+    }, new Date('2026-06-20T16:05:30.000Z'));
+
+    expect(health.has_recent_output).toBe(true);
+    expect(health.stuck_warning).toBeNull();
+    expect(health.warnings).toEqual([]);
+  });
+
+  it('does not warn when log age is unknown but artifact output is recent', () => {
+    const health = resolveRunHealth({
+      status: 'running',
+      health: {
+        last_log_age_seconds: null,
+        last_artifact_at: '2026-06-20T16:05:10.000Z',
+        stale_after_seconds: 120,
+      },
+    }, new Date('2026-06-20T16:05:30.000Z'));
+
+    expect(health.last_log_age_seconds).toBeNull();
+    expect(health.last_artifact_age_seconds).toBe(20);
+    expect(health.has_recent_output).toBe(true);
+    expect(health.stuck_warning).toBeNull();
+    expect(health.warnings).toEqual([]);
+  });
+
+  it('warns when Temporal history and inner run output are stale', () => {
+    const health = resolveRunHealth({
+      status: 'running',
+      health: {
+        last_log_at: '2026-06-20T16:00:00.000Z',
+        last_artifact_at: '2026-06-20T16:00:30.000Z',
+        last_temporal_event_at: '2026-06-20T16:00:00.000Z',
+        temporal_started_activities: [{ activity_type: 'execute_test_run', status: 'started' }],
+        stale_after_seconds: 120,
+      },
+    }, new Date('2026-06-20T16:05:30.000Z'));
+
+    expect(health.has_recent_output).toBe(false);
+    expect(health.stuck_warning).toContain('No new execution.log output');
     expect(health.warnings?.join('\n')).toContain('Temporal activity is started');
   });
 
@@ -71,5 +123,12 @@ describe('run observability', () => {
         planner: { agent_run_id: 'agent-run-123' },
       },
     })).toBe('agent-run-123');
+  });
+
+  it('prefers explicit linked agent run IDs over nested summary IDs', () => {
+    expect(resolveLinkedAgentRunId({
+      linked_agent_run_id: 'test-run-1',
+      agentic_summary: { agent_run_id: 'old-summary-run' },
+    })).toBe('test-run-1');
   });
 });

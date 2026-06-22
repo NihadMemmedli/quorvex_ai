@@ -42,6 +42,14 @@ AGENT_TOOL_CATALOG: list[dict[str, Any]] = [
     ),
     agent_tool("bash", "Shell command", "Run shell commands in the agent workspace.", "Workspace", "Bash", "destructive"),
     agent_tool(
+        "agent_note",
+        "Record note",
+        "Record meaningful agent observations, findings, decisions, blockers, or handoff notes.",
+        "Notes",
+        "mcp__quorvex-agent__quorvex_record_note",
+        requires_mcp_server="quorvex-agent",
+    ),
+    agent_tool(
         "browser_navigate",
         "Browser navigate",
         "Open web pages in an isolated Playwright browser.",

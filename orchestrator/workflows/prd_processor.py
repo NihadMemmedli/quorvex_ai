@@ -2,11 +2,13 @@
 PRD Processor Workflow - Converts PDF PRDs to structured features and chunks
 """
 
+import asyncio
 import json
 import os
 import re
 import shutil
 import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -20,9 +22,17 @@ import logging
 import httpx
 
 from orchestrator.services.ai_runtime_config import RuntimeAISelection, resolve_model, resolve_runtime_ai_selection
+from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils.string_utils import slugify
 
 logger = logging.getLogger(__name__)
+
+CLAUDE_CODE_SUBSCRIPTION = "claude_code_subscription"
+PRD_MISSING_CREDENTIALS_MESSAGE = (
+    "No AI API key is configured for PRD extraction. Save a provider API key in Settings, "
+    "or configure a Claude Code subscription OAuth token in Settings, then use Test connection "
+    "before uploading the PRD again."
+)
 
 
 @dataclass
@@ -166,6 +176,67 @@ class _PRDExtractionClient:
         if detail:
             message = f"{message} {detail}"
         raise PRDProcessingError(message)
+
+
+class _PRDAgentExtractionClient:
+    """Synchronous JSON-completion client backed by the configured agent runtime."""
+
+    def __init__(self, env_vars: dict[str, str] | None):
+        self.env_vars = env_vars
+
+    def complete_json(self, prompt: str) -> str:
+        runner = AgentRunner(
+            timeout_seconds=300,
+            allowed_tools=[],
+            log_tools=False,
+            model_tier="deep",
+            env_vars=self.env_vars,
+        )
+        result = _run_agent_sync(runner.run(prompt))
+        if not result or not getattr(result, "success", False):
+            error = getattr(result, "error", None) or "Claude Code returned no successful result"
+            raise PRDProcessingError(
+                "Claude Code PRD extraction failed. Check the Claude Code CLI, subscription login, "
+                f"and OAuth token configuration in Settings. Details: {error}"
+            )
+        text = getattr(result, "output", "") or ""
+        if not text.strip():
+            raise PRDProcessingError("Claude Code PRD extraction returned an empty response.")
+        return text
+
+
+def _run_agent_sync(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - re-raised below
+            result["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _env_value(env_vars: dict[str, str] | None, key: str) -> str:
+    if env_vars is not None and key in env_vars:
+        return env_vars.get(key, "")
+    return os.environ.get(key, "")
+
+
+def _is_claude_code_subscription_env(env_vars: dict[str, str] | None) -> bool:
+    auth_mode = _env_value(env_vars, "QUORVEX_LLM_AUTH_MODE").strip().lower()
+    provider = _env_value(env_vars, "QUORVEX_LLM_PROVIDER").strip().lower()
+    return auth_mode in {"claude_code", "claude-code", CLAUDE_CODE_SUBSCRIPTION} or provider == CLAUDE_CODE_SUBSCRIPTION
 
 
 def _sanitize_provider_error(value: str, limit: int = 260) -> str:
@@ -510,11 +581,18 @@ class PRDProcessor:
 
     def _create_prd_ai_client(self) -> "_PRDExtractionClient":
         env_vars = self._runtime_env_vars()
+        if _is_claude_code_subscription_env(env_vars):
+            if not _env_value(env_vars, "CLAUDE_CODE_OAUTH_TOKEN").strip():
+                raise PRDProcessingError(
+                    PRD_MISSING_CREDENTIALS_MESSAGE,
+                    status_code=400,
+                )
+            return _PRDAgentExtractionClient(env_vars)
+
         selection = resolve_runtime_ai_selection("deep", env_vars=env_vars)
         if not selection.api_key:
             raise PRDProcessingError(
-                "No AI API key is configured for PRD extraction. Save a provider API key in Settings, "
-                "then use Test connection before uploading the PRD again.",
+                PRD_MISSING_CREDENTIALS_MESSAGE,
                 status_code=400,
             )
         return _PRDExtractionClient(selection)
@@ -642,7 +720,10 @@ Each feature must have:
             # Truncate very long texts to avoid token limits
             batch = [t[:8000] for t in batch]
 
-            response = client.embeddings.create(model=resolve_model("embedding"), input=batch)
+            response = client.embeddings.create(
+                model=resolve_model("embedding", env_vars=self._runtime_env_vars()),
+                input=batch,
+            )
             batch_embeddings = [item.embedding for item in response.data]
             all_embeddings.extend(batch_embeddings)
 

@@ -11,6 +11,7 @@ Tests cover:
 Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_api_endpoints.py -v
 """
 
+import asyncio
 import json
 import os
 import shutil
@@ -233,6 +234,57 @@ class TestRunEndpoints:
                     session.delete(run)
                     session.commit()
 
+    def test_get_run_returns_linked_agent_run_id_when_agent_run_exists(self, client):
+        """GET /runs/{id} should expose the durable AgentRun link for native notes."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        run_id = f"linked-agent-run-{uuid4()}"
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="linked-agent-run.md",
+                    status="passed",
+                    created_at=datetime.utcnow(),
+                    test_name="Linked agent run",
+                    project_id="default",
+                )
+            )
+            session.add(
+                AgentRun(
+                    id=run_id,
+                    agent_type="spec_generation",
+                    status="completed",
+                    project_id="default",
+                    config_json="{}",
+                    progress_json="{}",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "status.txt").write_text("passed")
+
+            response = client.get(f"/runs/{run_id}?project_id=default")
+            assert response.status_code == 200
+            assert response.json()["linked_agent_run_id"] == run_id
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                agent_run = session.get(AgentRun, run_id)
+                if agent_run:
+                    session.delete(agent_run)
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                session.commit()
+
     def test_get_completed_run_uses_failed_validation_status(self, client):
         """GET /runs/{id} should use validation failure once the DB run is finalized."""
         from orchestrator.api import main as main_module
@@ -275,9 +327,20 @@ class TestRunEndpoints:
 
 
 class TestAgentRunHistoryEndpoints:
+    def _agent_run_roots(self) -> set[Path]:
+        from orchestrator.api import agent_run_observability, spec_files
+        from orchestrator.api import main as main_module
+
+        return {
+            Path(root)
+            for root in (main_module.RUNS_DIR, spec_files.RUNS_DIR, agent_run_observability.RUNS_DIR)
+            if root
+        }
+
     def _cleanup(self, run_ids: list[str]) -> None:
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AgentRun, AgentRunEvent, AgentTraceSnapshot, AgentTraceSpan
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent, AgentRunNote, AgentTraceSnapshot, AgentTraceSpan
+        from orchestrator.api.models_db import TestRun as DBTestRun
 
         with Session(engine) as session:
             for run_id in run_ids:
@@ -285,12 +348,20 @@ class TestAgentRunHistoryEndpoints:
                     session.delete(span)
                 for snapshot in session.exec(select(AgentTraceSnapshot).where(AgentTraceSnapshot.run_id == run_id)).all():
                     session.delete(snapshot)
+                for note in session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all():
+                    session.delete(note)
                 for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
                     session.delete(event)
                 run = session.get(AgentRun, run_id)
                 if run:
                     session.delete(run)
+                test_run = session.get(DBTestRun, run_id)
+                if test_run:
+                    session.delete(test_run)
             session.commit()
+        for run_id in run_ids:
+            for root in self._agent_run_roots():
+                shutil.rmtree(root / run_id, ignore_errors=True)
 
     def _seed_history_runs(self, marker: str) -> list[str]:
         from orchestrator.api.db import engine
@@ -365,6 +436,145 @@ class TestAgentRunHistoryEndpoints:
             assert set(first_ids).isdisjoint(second_ids)
         finally:
             self._cleanup(run_ids)
+
+    def _seed_test_run_session_activity(self, run_id: str, *, durable: bool = False) -> None:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent, AgentRunNote
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        self._cleanup([run_id])
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="recovered-agent-run.md",
+                    status="passed",
+                    created_at=datetime.utcnow(),
+                    test_name="Recovered agent run",
+                    project_id="default",
+                )
+            )
+            agent_run = AgentRun(
+                id=run_id,
+                agent_type="spec_generation",
+                status="completed",
+                project_id="default",
+                config_json=json.dumps({"source": "test_run", "test_run_id": run_id}),
+                progress_json=json.dumps({"source": "test_run", "test_run_id": run_id}),
+            )
+            session.add(agent_run)
+            if durable:
+                session.add(
+                    AgentRunNote(
+                        id=f"durable-note-{run_id}",
+                        run_id=run_id,
+                        project_id="default",
+                        sequence=1,
+                        note_type="finding",
+                        level="info",
+                        title="Durable note",
+                        body="Durable rows win.",
+                        source="runtime",
+                        created_at=datetime.utcnow(),
+                    )
+                )
+                event = AgentRunEvent(
+                    id=f"durable-event-{run_id}",
+                    run_id=run_id,
+                    project_id="default",
+                    sequence=1,
+                    event_type="tool_call",
+                    level="info",
+                    message="Durable tool event",
+                    created_at=datetime.utcnow(),
+                )
+                event.payload = {"tool_name": "durable_tool"}
+                session.add(event)
+            session.commit()
+
+        lines = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Recovered prose from Claude session artifacts."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "mcp__playwright__browser_click",
+                            "input": {"selector": "button[type=submit]"},
+                        },
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": "Clicked submit",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+        ]
+        payload = "\n".join(json.dumps(line) for line in lines)
+        for root in self._agent_run_roots():
+            session_dir = root / run_id / "projects" / "example"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / "session.jsonl").write_text(payload, encoding="utf-8")
+
+    def test_agent_run_detail_recovers_test_run_session_activity(self, client):
+        run_id = f"2026-06-22_14-59-{uuid4().hex[:2]}"
+        self._seed_test_run_session_activity(run_id)
+        try:
+            response = client.get(f"/api/agents/runs/{run_id}?project_id=default")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["health"]["event_count"] >= 2
+            assert data["health"]["tool_event_count"] >= 2
+            assert data["progress"]["tool_calls"] >= 1
+            assert data["progress"]["browser_tool_calls"] >= 1
+            assert data["progress"]["recent_tools"]
+        finally:
+            self._cleanup([run_id])
+
+    def test_agent_run_notes_and_events_recover_test_run_session_activity(self, client):
+        run_id = f"2026-06-22_15-00-{uuid4().hex[:2]}"
+        self._seed_test_run_session_activity(run_id)
+        try:
+            notes_response = client.get(f"/api/agents/runs/{run_id}/notes?project_id=default")
+            assert notes_response.status_code == 200
+            notes = notes_response.json()
+            assert notes[0]["source"] == "session_jsonl"
+            assert notes[0]["synthetic"] is True
+            assert "Recovered prose" in notes[0]["body"]
+
+            events_response = client.get(f"/api/agents/runs/{run_id}/events?project_id=default")
+            assert events_response.status_code == 200
+            events = events_response.json()
+            assert [event["event_type"] for event in events] == ["browser_action", "browser_action"]
+            assert all(event["payload"]["source"] == "session_jsonl" for event in events)
+            assert all(event["synthetic"] is True for event in events)
+        finally:
+            self._cleanup([run_id])
+
+    def test_durable_agent_notes_and_tool_events_take_precedence_over_recovered_activity(self, client):
+        run_id = f"2026-06-22_15-01-{uuid4().hex[:2]}"
+        self._seed_test_run_session_activity(run_id, durable=True)
+        try:
+            notes_response = client.get(f"/api/agents/runs/{run_id}/notes?project_id=default")
+            assert notes_response.status_code == 200
+            assert [note["title"] for note in notes_response.json()] == ["Durable note"]
+
+            events_response = client.get(f"/api/agents/runs/{run_id}/events?project_id=default")
+            assert events_response.status_code == 200
+            assert [event["message"] for event in events_response.json()] == ["Durable tool event"]
+        finally:
+            self._cleanup([run_id])
 
     def test_agent_run_detail_keeps_full_result_and_health(self, client):
         marker = f"detail-{uuid4().hex[:8]}"
@@ -1044,7 +1254,13 @@ class TestAgentDefinitionEndpoints:
     def test_run_agent_definition_creates_queued_temporal_agent_run(self, client, monkeypatch):
         from orchestrator.api import main as main_module
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+        from orchestrator.api.models_db import (
+            AgentDefinition,
+            AgentRun,
+            AgentRunEvent,
+            AgentRunNote,
+            AgentRunTaskContract,
+        )
 
         class FakeAgentStatus:
             active = 1
@@ -1107,11 +1323,25 @@ class TestAgentDefinitionEndpoints:
                 assert run.project_id == "default"
                 config = json.loads(run.config_json)
                 assert config["agent_definition_id"] == definition_id
-                assert config["allowed_tools"] == ["Read"]
-                assert config["selected_tools"][0]["id"] == "read_file"
+                assert config["allowed_tools"] == ["Read", "mcp__quorvex-agent__quorvex_record_note"]
+                assert [tool["id"] for tool in config["selected_tools"]] == ["read_file", "agent_note"]
+                notes = session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all()
+                note_events = session.exec(
+                    select(AgentRunEvent)
+                    .where(AgentRunEvent.run_id == run_id)
+                    .where(AgentRunEvent.event_type == "agent_note")
+                ).all()
+                assert len(notes) == 1
+                assert notes[0].title == "Custom agent run accepted"
+                assert len(note_events) == 1
+                assert (run.progress or {})["live_notes_tail"][0]["title"] == "Custom agent run accepted"
         finally:
             with Session(engine) as session:
                 if run_id:
+                    for contract in session.exec(select(AgentRunTaskContract).where(AgentRunTaskContract.run_id == run_id)).all():
+                        session.delete(contract)
+                    for note in session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all():
+                        session.delete(note)
                     for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
                         session.delete(event)
                     run = session.get(AgentRun, run_id)
@@ -1159,7 +1389,13 @@ class TestAgentDefinitionEndpoints:
     def test_run_agent_definition_with_browser_tools_stores_valid_target_url(self, client, monkeypatch):
         from orchestrator.api import main as main_module
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+        from orchestrator.api.models_db import (
+            AgentDefinition,
+            AgentRun,
+            AgentRunEvent,
+            AgentRunNote,
+            AgentRunTaskContract,
+        )
 
         class FakeAgentStatus:
             active = 0
@@ -1216,6 +1452,136 @@ class TestAgentDefinitionEndpoints:
         finally:
             with Session(engine) as session:
                 if run_id:
+                    for contract in session.exec(select(AgentRunTaskContract).where(AgentRunTaskContract.run_id == run_id)).all():
+                        session.delete(contract)
+                    for note in session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all():
+                        session.delete(note)
+                    for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                        session.delete(event)
+                    run = session.get(AgentRun, run_id)
+                    if run:
+                        session.delete(run)
+                definition = session.get(AgentDefinition, definition_id)
+                if definition:
+                    session.delete(definition)
+                session.commit()
+
+    @pytest.mark.parametrize(
+        ("run_payload", "expected_session_id"),
+        [
+            (
+                {
+                    "project_id": "default",
+                    "prompt": "Inspect the dashboard",
+                    "url": "https://example.com/dashboard",
+                    "browser_auth_session_id": "session-top-level",
+                },
+                "session-top-level",
+            ),
+            (
+                {
+                    "project_id": "default",
+                    "prompt": "Inspect the dashboard",
+                    "url": "https://example.com/dashboard",
+                    "config": {"browser_auth_session_id": "session-nested"},
+                },
+                "session-nested",
+            ),
+        ],
+    )
+    def test_run_agent_definition_with_browser_tools_stores_browser_auth_session_id(
+        self,
+        client,
+        monkeypatch,
+        run_payload,
+        expected_session_id,
+    ):
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import (
+            AgentDefinition,
+            AgentRun,
+            AgentRunEvent,
+            AgentRunNote,
+            AgentRunTaskContract,
+        )
+
+        class FakeAgentStatus:
+            active = 0
+            max_slots = 3
+            queued = 0
+
+        class FakeResourceManager:
+            def get_agent_status(self):
+                return FakeAgentStatus()
+
+        async def fake_get_resource_manager():
+            return FakeResourceManager()
+
+        async def fake_start_agent_run_temporal_or_fail(run, session, *, workflow_attempt=None):
+            run.temporal_workflow_id = f"agent-workflow-{run.id}"
+            run.temporal_run_id = "temporal-run-1"
+            session.add(run)
+            session.commit()
+
+        monkeypatch.setattr(main_module, "get_resource_manager", fake_get_resource_manager)
+        monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
+        monkeypatch.setattr(
+            main_module,
+            "browser_runtime_status",
+            lambda: {
+                "browser_runtime": "temporal_vnc_worker",
+                "live_view_available": True,
+                "vnc_url": "ws://localhost:6080/websockify",
+            },
+        )
+
+        create_response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": f"Browser Auth Stored {uuid4().hex}",
+                "system_prompt": "Inspect the target.",
+                "runtime": "claude_sdk",
+                "tool_ids": ["browser_navigate"],
+            },
+        )
+        assert create_response.status_code == 200, create_response.text
+        definition_id = create_response.json()["id"]
+        run_id = None
+
+        try:
+            run_response = client.post(
+                f"/api/agents/definitions/{definition_id}/runs",
+                json=run_payload,
+            )
+
+            assert run_response.status_code == 200, run_response.text
+            data = run_response.json()
+            run_id = data["run_id"]
+            assert data["agent_definition_id"] == definition_id
+            assert data["temporal_workflow_id"] == f"agent-workflow-{run_id}"
+            assert data["temporal_run_id"] == "temporal-run-1"
+            assert data["agent_runtime"] == "claude_sdk"
+            assert data["browser_runtime"] == "temporal_vnc_worker"
+            assert data["live_view_available"] is True
+            assert data["vnc_url"] == "ws://localhost:6080/websockify"
+            assert data["agent_slots"] == {"active": 0, "max": 3, "queued": 1}
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                config = json.loads(run.config_json)
+                assert config["browser_auth_session_id"] == expected_session_id
+                assert config["url"] == "https://example.com/dashboard"
+                assert "mcp__playwright-test__browser_navigate" in config["allowed_tools"]
+        finally:
+            with Session(engine) as session:
+                if run_id:
+                    for contract in session.exec(select(AgentRunTaskContract).where(AgentRunTaskContract.run_id == run_id)).all():
+                        session.delete(contract)
+                    for note in session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all():
+                        session.delete(note)
                     for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
                         session.delete(event)
                     run = session.get(AgentRun, run_id)
@@ -1229,7 +1595,13 @@ class TestAgentDefinitionEndpoints:
     def test_run_agent_definition_without_browser_tools_accepts_blank_target_url(self, client, monkeypatch):
         from orchestrator.api import main as main_module
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+        from orchestrator.api.models_db import (
+            AgentDefinition,
+            AgentRun,
+            AgentRunEvent,
+            AgentRunNote,
+            AgentRunTaskContract,
+        )
 
         class FakeAgentStatus:
             active = 0
@@ -1280,6 +1652,10 @@ class TestAgentDefinitionEndpoints:
         finally:
             with Session(engine) as session:
                 if run_id:
+                    for contract in session.exec(select(AgentRunTaskContract).where(AgentRunTaskContract.run_id == run_id)).all():
+                        session.delete(contract)
+                    for note in session.exec(select(AgentRunNote).where(AgentRunNote.run_id == run_id)).all():
+                        session.delete(note)
                     for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
                         session.delete(event)
                     run = session.get(AgentRun, run_id)
@@ -1411,6 +1787,90 @@ class TestAgentDefinitionEndpoints:
             assert "Browser Pool" in data["log"]
             assert data["blocker_message"] == "Planner agent is waiting for browser slot held by parent run."
             assert any(section["title"] == "Browser Pool" for section in data["log_sections"])
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_run_log_prefers_substantive_session_activity_over_newest_debug_jsonl(self, client):
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        run_id = f"session-activity-run-log-{uuid4()}"
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="session-activity-run-log.md",
+                    status="passed",
+                    created_at=datetime.utcnow(),
+                    test_name="Session activity run log",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            real_dir = run_dir / "projects" / "real"
+            debug_dir = run_dir / "projects" / "debug"
+            real_dir.mkdir(parents=True, exist_ok=True)
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            real_file = real_dir / "session.jsonl"
+            debug_file = debug_dir / "session.jsonl"
+            real_file.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Recovered meaningful agent prose for checkout validation.",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            debug_file.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "planner_draft_debug_status\nroot_cause: none",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            old_mtime = (datetime.utcnow() - timedelta(minutes=10)).timestamp()
+            new_mtime = datetime.utcnow().timestamp()
+            os.utime(real_file, (old_mtime, old_mtime))
+            os.utime(debug_file, (new_mtime, new_mtime))
+
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            agent_note_sections = [
+                section
+                for section in data["log_sections"]
+                if section["title"] in {"Agent Notes", "Raw Agent Notes"}
+            ]
+            assert agent_note_sections
+            assert "Recovered meaningful agent prose" in agent_note_sections[0]["content"]
+            assert "planner_draft_debug_status" not in agent_note_sections[0]["content"]
+            assert data["diagnostics"]["agent_progress"]["source"] == "projects/real/session.jsonl"
         finally:
             shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
             with Session(engine) as session:
@@ -1561,7 +2021,10 @@ class TestAgentDefinitionEndpoints:
         try:
             run_dir = main_module.RUNS_DIR / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / "execution.log").write_text("planner waiting\n")
+            log_path = run_dir / "execution.log"
+            log_path.write_text("planner waiting\n")
+            stale_mtime = (datetime.utcnow() - timedelta(minutes=6)).timestamp()
+            os.utime(log_path, (stale_mtime, stale_mtime))
             response = client.get(f"/runs/{run_id}")
             assert response.status_code == 200
             data = response.json()
@@ -1869,6 +2332,63 @@ class TestSpecEndpoints:
         """GET /specs/list with project_id filter should work."""
         response = client.get("/specs/list?project_id=default")
         assert response.status_code == 200
+
+    def test_list_specs_marks_generated_tests_automated_from_repo_and_run_artifacts(
+        self, client, tmp_path, monkeypatch
+    ):
+        """GET /specs/list should resolve repo-level and run-local generated tests."""
+        from orchestrator.api import specs as specs_module
+
+        specs_dir = tmp_path / "specs"
+        runs_dir = tmp_path / "runs"
+        repo_generated_dir = tmp_path / "tests" / "generated" / "nested"
+        run_generated_dir = runs_dir / "run-1" / "tests" / "generated"
+        specs_dir.mkdir()
+        repo_generated_dir.mkdir(parents=True)
+        run_generated_dir.mkdir(parents=True)
+
+        repo_spec_name = "repo-generated-flow.md"
+        run_spec_name = (
+            "autopilot/session-1/authenticated-session-persists-across-core-page-navigation-25.md"
+        )
+        (specs_dir / repo_spec_name).write_text("# Repo Generated Flow\n", encoding="utf-8")
+        (specs_dir / "autopilot" / "session-1").mkdir(parents=True)
+        (specs_dir / run_spec_name).write_text("# Authenticated Session Persists\n", encoding="utf-8")
+
+        repo_code_path = repo_generated_dir / "repo-generated-flow.spec.ts"
+        run_code_path = (
+            run_generated_dir / "authenticated-session-persists-across-core-page-navigation-25.spec.ts"
+        )
+        repo_code_path.write_text("import { test } from '@playwright/test';\n", encoding="utf-8")
+        run_code_path.write_text("import { test } from '@playwright/test';\n", encoding="utf-8")
+
+        monkeypatch.setattr(specs_module, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(specs_module, "RUNS_DIR", runs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
+
+        response = client.get("/specs/list")
+        assert response.status_code == 200
+        data = response.json()
+        items = {item["name"]: item for item in data["items"]}
+
+        assert items[repo_spec_name]["is_automated"] is True
+        assert items[repo_spec_name]["code_path"] == str(repo_code_path)
+        assert items[run_spec_name]["is_automated"] is True
+        assert items[run_spec_name]["code_path"] == str(run_code_path)
+        assert data["summary"]["automated_count"] == 2
+
+        automated_response = client.get("/specs/list?automated_only=true")
+        assert automated_response.status_code == 200
+        automated_names = {item["name"] for item in automated_response.json()["items"]}
+        assert run_spec_name in automated_names
+
+        search_response = client.get("/specs/list?search=authenticated-session-persists")
+        assert search_response.status_code == 200
+        search_items = search_response.json()["items"]
+        assert len(search_items) == 1
+        assert search_items[0]["name"] == run_spec_name
+        assert search_items[0]["is_automated"] is True
+        assert search_items[0]["code_path"] == str(run_code_path)
 
     def test_split_spec_regex_returns_extraction_metadata(self, client, tmp_path, monkeypatch):
         """POST /specs/split should report regex extraction when explicitly selected."""
@@ -2562,9 +3082,9 @@ class TestAISettings:
         assert fake_rotator.initialized is True
 
         env_vars = settings_api._read_env_file()
-        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "new-key-123456"
-        assert env_vars["ANTHROPIC_API_KEY"] == "new-key-123456"
-        assert env_vars["ANTHROPIC_AUTH_TOKENS"] == ""
+        assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+        assert "ANTHROPIC_API_KEY" not in env_vars
+        assert "ANTHROPIC_AUTH_TOKENS" not in env_vars
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
         assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
         assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"
@@ -2575,6 +3095,301 @@ class TestAISettings:
         assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
         assert not any(key.startswith("HERMES_") for key in env_vars)
         assert not (tmp_path / "data" / "hermes").exists()
+
+    def test_update_settings_switches_to_claude_code_subscription_and_clears_api_keys(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Claude Code subscription mode should use OAuth auth without stale API-key aliases."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "QUORVEX_LLM_PROVIDER=zai",
+                    "QUORVEX_LLM_AUTH_MODE=api_key",
+                    "QUORVEX_LLM_API_KEY=old-zai-key",
+                    "QUORVEX_LLM_API_KEYS=old-zai-key,backup-key",
+                    "ANTHROPIC_AUTH_TOKEN=old-zai-key",
+                    "ANTHROPIC_API_KEY=old-zai-key",
+                    "ANTHROPIC_AUTH_TOKENS=old-zai-key,backup-key",
+                    "CLAUDE_CODE_OAUTH_TOKEN=",
+                    "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.setenv("QUORVEX_LLM_API_KEY", "old-zai-key")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "old-zai-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "old-zai-key")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKENS", "old-zai-key,backup-key")
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "claude_code_subscription",
+                "auth_mode": "claude_code_subscription",
+                "claude_code_oauth_token": "oauth-token-123456",
+                "base_url": "https://api.anthropic.com",
+                "model_name": "claude-opus-4-7",
+                "light_model": "claude-sonnet-4-6",
+                "standard_model": "claude-opus-4-7",
+                "deep_model": "claude-opus-4-7",
+                "tool_deep_model": "claude-opus-4-7",
+                "chat_model": "claude-sonnet-4-6",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()["settings"]
+        assert data["llm_provider"] == "claude_code_subscription"
+        assert data["auth_mode"] == "claude_code_subscription"
+        assert data["api_key"] == ""
+        assert data["claude_code_oauth_token"] == "oaut**********3456"
+        assert "QUORVEX_LLM_API_KEY" not in os.environ
+        assert "ANTHROPIC_AUTH_TOKEN" not in os.environ
+        assert "ANTHROPIC_API_KEY" not in os.environ
+        assert "ANTHROPIC_AUTH_TOKENS" not in os.environ
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-123456"
+        assert os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+
+        env_vars = settings_api._read_env_file()
+        assert env_vars["QUORVEX_LLM_PROVIDER"] == "anthropic"
+        assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "claude_code_subscription"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+        assert "ANTHROPIC_API_KEY" not in env_vars
+        assert "ANTHROPIC_AUTH_TOKENS" not in env_vars
+
+        runtime_response = client.get(
+            "/settings/runtime-chat",
+            headers={"X-Quorvex-Internal-Caller": "web-chat"},
+        )
+
+        assert runtime_response.status_code == 200
+        runtime = runtime_response.json()
+        assert runtime["route_provider"] == "anthropic"
+        assert runtime["auth_mode"] == "claude_code_subscription"
+        assert runtime["api_key"] == ""
+        assert runtime["claude_code_oauth_token"] == "oauth-token-123456"
+
+        zai_response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "zai",
+                "auth_mode": "api_key",
+                "api_key": "new-zai-key",
+                "base_url": "https://api.z.ai/api/anthropic",
+                "model_name": "glm-5.1",
+            },
+        )
+
+        assert zai_response.status_code == 200
+        env_vars = settings_api._read_env_file()
+        assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "api_key"
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["QUORVEX_LLM_API_KEY"] == "new-zai-key"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+
+        switch_back_response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "claude_code_subscription",
+                "auth_mode": "claude_code_subscription",
+                "base_url": "https://api.anthropic.com",
+                "model_name": "claude-opus-4-7",
+            },
+        )
+
+        assert switch_back_response.status_code == 200
+        env_vars = settings_api._read_env_file()
+        assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "claude_code_subscription"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-123456"
+
+    def test_update_settings_masked_claude_code_token_preserves_existing_secret(self, client, tmp_path, monkeypatch):
+        """Submitting a masked Claude Code token should keep the real OAuth token."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "QUORVEX_LLM_PROVIDER=anthropic",
+                    "QUORVEX_LLM_AUTH_MODE=claude_code_subscription",
+                    "CLAUDE_CODE_OAUTH_TOKEN=real-oauth-token",
+                    "QUORVEX_LLM_API_KEY=",
+                    "ANTHROPIC_AUTH_TOKEN=",
+                    "ANTHROPIC_API_KEY=",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                    "ANTHROPIC_MODEL=claude-opus-4-7",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "claude_code_subscription",
+                "auth_mode": "claude_code_subscription",
+                "claude_code_oauth_token": "real********oken",
+                "base_url": "https://api.anthropic.com",
+                "model_name": "claude-sonnet-4-6",
+            },
+        )
+
+        assert response.status_code == 200
+        env_vars = settings_api._read_env_file()
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-oauth-token"
+        assert env_vars["ANTHROPIC_MODEL"] == "claude-sonnet-4-6"
+
+    def test_claude_code_setup_token_saves_token_without_returning_raw_secret(self, client, tmp_path, monkeypatch):
+        """POST /settings/claude-code/setup-token should save parsed CLI tokens safely."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "QUORVEX_LLM_PROVIDER=zai",
+                    "QUORVEX_LLM_AUTH_MODE=api_key",
+                    "QUORVEX_LLM_API_KEY=inactive-zai-key",
+                    "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic",
+                    "ANTHROPIC_MODEL=glm-5.1",
+                ]
+            )
+            + "\n"
+        )
+        raw_token = "oauth-token-secret-1234567890"
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.setattr(settings_api, "_resolve_claude_cli", lambda: "/usr/local/bin/claude")
+
+        async def fake_run(cli_path, timeout_seconds=settings_api.CLAUDE_CODE_SETUP_TIMEOUT_SECONDS):
+            return 0, f"CLAUDE_CODE_OAUTH_TOKEN={raw_token}\n"
+
+        monkeypatch.setattr(settings_api, "_run_claude_setup_token", fake_run)
+
+        response = client.post("/settings/claude-code/setup-token")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["status"] == "success"
+        assert data["token_configured"] is True
+        assert raw_token not in json.dumps(data)
+        assert data["masked_token"].startswith("oaut")
+
+        env_vars = settings_api._read_env_file()
+        assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "claude_code_subscription"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == raw_token
+
+        zai_response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "zai",
+                "auth_mode": "api_key",
+                "base_url": "https://api.z.ai/api/anthropic",
+                "model_name": "glm-5.1",
+            },
+        )
+        assert zai_response.status_code == 200
+        env_vars = settings_api._read_env_file()
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["QUORVEX_LLM_API_KEY"] == "inactive-zai-key"
+
+    def test_claude_code_setup_token_missing_cli_returns_manual_fallback(self, client, monkeypatch):
+        from orchestrator.api import settings as settings_api
+
+        monkeypatch.setattr(settings_api, "_resolve_claude_cli", lambda: None)
+
+        response = client.post("/settings/claude-code/setup-token")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["status"] == "cli_missing"
+        assert data["fallback_command"] == "claude setup-token"
+        assert "paste the token" in data["message"]
+
+    def test_claude_code_setup_token_timeout_returns_manual_fallback(self, client, monkeypatch):
+        from orchestrator.api import settings as settings_api
+
+        monkeypatch.setattr(settings_api, "_resolve_claude_cli", lambda: "/usr/local/bin/claude")
+
+        async def fake_run(cli_path, timeout_seconds=settings_api.CLAUDE_CODE_SETUP_TIMEOUT_SECONDS):
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(settings_api, "_run_claude_setup_token", fake_run)
+
+        response = client.post("/settings/claude-code/setup-token")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["status"] == "timeout"
+        assert data["fallback_command"] == "claude setup-token"
+        assert data["cli_path"] == "/usr/local/bin/claude"
+
+    def test_claude_code_setup_token_non_token_output_returns_safe_fallback(self, client, monkeypatch):
+        from orchestrator.api import settings as settings_api
+
+        monkeypatch.setattr(settings_api, "_resolve_claude_cli", lambda: "/usr/local/bin/claude")
+
+        async def fake_run(cli_path, timeout_seconds=settings_api.CLAUDE_CODE_SETUP_TIMEOUT_SECONDS):
+            return 1, "Please login to Claude Code first."
+
+        monkeypatch.setattr(settings_api, "_run_claude_setup_token", fake_run)
+
+        response = client.post("/settings/claude-code/setup-token")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["status"] == "login_required"
+        assert data["fallback_command"] == "claude setup-token"
+        assert "Please login" not in json.dumps(data)
+
+    def test_claude_code_chat_bridge_uses_agent_runner_without_tools(self, client, monkeypatch):
+        runner_calls = []
+
+        class FakeResult:
+            success = True
+            output = "Hello from Claude Code."
+            error = None
+
+        class FakeRunner:
+            def __init__(self, timeout_seconds, allowed_tools, log_tools, model_tier=None):
+                runner_calls.append(
+                    {
+                        "timeout_seconds": timeout_seconds,
+                        "allowed_tools": allowed_tools,
+                        "log_tools": log_tools,
+                        "model_tier": model_tier,
+                    }
+                )
+
+            async def run(self, prompt):
+                runner_calls.append({"prompt": prompt})
+                return FakeResult()
+
+        monkeypatch.setattr("orchestrator.utils.agent_runner.AgentRunner", FakeRunner)
+
+        response = client.post("/chat/claude-code", json={"prompt": "hi", "system_prompt": "Be brief."})
+
+        assert response.status_code == 200
+        assert response.json() == {"text": "Hello from Claude Code."}
+        assert runner_calls[0]["allowed_tools"] == []
+        assert runner_calls[0]["log_tools"] is False
+        assert runner_calls[0]["model_tier"] == "chat"
+        assert "User request:\nhi" in runner_calls[1]["prompt"]
 
     def test_update_settings_coerces_legacy_hermes_runtime_and_openrouter_provider(self, client, tmp_path, monkeypatch):
         """Settings should save direct provider values and coerce legacy Hermes runtime selections."""
@@ -2642,7 +3457,8 @@ class TestAISettings:
         assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
         assert env_vars["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
         assert env_vars["QUORVEX_LLM_PROVIDER"] == "openai"
-        assert env_vars["OPENAI_API_KEY"] == "sk-openai-test"
+        assert "OPENAI_API_KEY" not in env_vars
+        assert os.environ["OPENAI_API_KEY"] == "sk-openai-test"
         assert env_vars["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
         assert not any(key.startswith("HERMES_") for key in env_vars)
         assert not (tmp_path / "data" / "hermes").exists()
@@ -2744,8 +3560,10 @@ class TestAISettings:
 
         assert response.status_code == 200
         env_vars = settings_api._read_env_file()
-        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
-        assert env_vars["ANTHROPIC_API_KEY"] == "real-existing-key"
+        assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+        assert "ANTHROPIC_API_KEY" not in env_vars
+        assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
+        assert os.environ["ANTHROPIC_API_KEY"] == "real-existing-key"
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
         assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
         assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"

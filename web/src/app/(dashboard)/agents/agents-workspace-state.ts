@@ -1,7 +1,7 @@
 export type AgentWorkspaceMode = 'exploratory' | 'writer' | 'custom';
 export type AgentWorkspaceView = 'run' | 'history' | 'library' | 'reports' | 'queue';
 export type AgentResultTab = 'overview' | 'findings' | 'test_ideas' | 'requirements' | 'evidence' | 'raw';
-export type AgentTraceTab = 'timeline' | 'context' | 'tools' | 'memory' | 'runtime' | 'artifacts';
+export type AgentTraceTab = 'notes' | 'timeline' | 'context' | 'tools' | 'memory' | 'runtime' | 'artifacts';
 export type AgentHistoryStatusFilter = 'all' | 'active' | 'completed' | 'failed' | 'cancelled' | 'paused';
 export type AgentHistoryTypeFilter = 'all' | 'exploratory' | 'custom' | 'writer' | 'spec_generation';
 export type ReportReviewFilter = 'all' | 'unreviewed' | 'needs_action' | 'imported' | 'spec_created';
@@ -73,7 +73,7 @@ export const DEFAULT_AGENT_WORKSPACE_QUERY: AgentWorkspaceQueryState = {
 const WORKSPACE_VIEWS = new Set<AgentWorkspaceView>(['run', 'history', 'library', 'reports', 'queue']);
 const AGENT_MODES = new Set<AgentWorkspaceMode>(['exploratory', 'writer', 'custom']);
 const RESULT_TABS = new Set<AgentResultTab>(['overview', 'findings', 'test_ideas', 'requirements', 'evidence', 'raw']);
-const TRACE_TABS = new Set<AgentTraceTab>(['timeline', 'context', 'tools', 'memory', 'runtime', 'artifacts']);
+const TRACE_TABS = new Set<AgentTraceTab>(['notes', 'timeline', 'context', 'tools', 'memory', 'runtime', 'artifacts']);
 const STATUS_FILTERS = new Set<AgentHistoryStatusFilter>(['all', 'active', 'completed', 'failed', 'cancelled', 'paused']);
 const TYPE_FILTERS = new Set<AgentHistoryTypeFilter>(['all', 'exploratory', 'custom', 'writer', 'spec_generation']);
 const REPORT_REVIEW_FILTERS = new Set<ReportReviewFilter>(['all', 'unreviewed', 'needs_action', 'imported', 'spec_created']);

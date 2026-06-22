@@ -1,4 +1,8 @@
+import asyncio
 import os
+import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -28,7 +32,9 @@ RUNTIME_SETTINGS_KEY = "ai_runtime_settings"
 
 class Settings(BaseModel):
     llm_provider: str
+    auth_mode: str | None = None
     api_key: str | None = None
+    claude_code_oauth_token: str | None = None
     base_url: str | None = None
     model_name: str | None = None
     light_model: str | None = None
@@ -50,6 +56,17 @@ class SettingsConnectionResult(BaseModel):
     latency_ms: int | None = None
 
 
+class ClaudeCodeSetupTokenResult(BaseModel):
+    ok: bool
+    status: str
+    message: str
+    fallback_command: str = "claude setup-token"
+    cli_path: str | None = None
+    masked_token: str | None = None
+    token_configured: bool = False
+    settings: dict[str, Any] | None = None
+
+
 # Project .env file path. In containers, QUORVEX_SETTINGS_ENV_FILE points this
 # at a writable shared data volume instead of the read-only application root.
 ENV_FILE = Path(__file__).parent.parent.parent / ".env"
@@ -62,6 +79,12 @@ MODEL_ENV_KEYS = (
     *CANONICAL_MODEL_ENV.values(),
 )
 DEFAULT_ANTHROPIC_BASE_URL = DEFAULT_BASE_URL
+CLAUDE_CODE_PROVIDER = "claude_code_subscription"
+AUTH_MODE_API_KEY = "api_key"
+AUTH_MODE_CLAUDE_CODE = "claude_code_subscription"
+CLAUDE_CODE_BASE_URL = "https://api.anthropic.com"
+CLAUDE_CODE_SETUP_TOKEN_COMMAND = "claude setup-token"
+CLAUDE_CODE_SETUP_TIMEOUT_SECONDS = 45
 RUNTIME_ALIASES = {
     "claude": "claude_sdk",
     "claude_sdk": "claude_sdk",
@@ -76,6 +99,24 @@ ASSISTANT_RUNTIME_ALIASES = {
     "openai_sdk": "openai",
     "openai-sdk": "openai",
 }
+PERSISTED_ENV_FILE_KEYS = (
+    "QUORVEX_LLM_PROVIDER",
+    "QUORVEX_LLM_AUTH_MODE",
+    "QUORVEX_LLM_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_MODEL",
+    "OPENAI_MODEL_ID",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_CHAT_MODEL",
+    "OPENAI_CHAT_MODEL",
+    "EMBEDDING_MODEL",
+    "QUORVEX_AGENT_RUNTIME",
+    "QUORVEX_ASSISTANT_RUNTIME",
+    *CANONICAL_MODEL_ENV.values(),
+)
 
 
 def _env_file_path() -> Path:
@@ -119,39 +160,20 @@ def _ensure_default_project(session: Session) -> Project:
 
 
 def _write_env_file(env_vars: dict):
-    """Write key-value pairs to .env file, preserving comments and structure"""
+    """Write non-secret runtime settings to the env file.
+
+    Credential values are persisted through encrypted Settings rows and applied to
+    the current process environment, but they are not written back to clear-text
+    env files.
+    """
     env_file = _env_file_path()
     env_file.parent.mkdir(parents=True, exist_ok=True)
     lines = []
-    existing_keys = set()
-
-    # Read existing file to preserve structure and comments
-    if env_file.exists():
-        with open(env_file) as f:
-            for line in f:
-                stripped = line.strip()
-                # Keep comments and empty lines as-is
-                if not stripped or stripped.startswith("#"):
-                    lines.append(line.rstrip("\n"))
-                    continue
-                if "=" in stripped:
-                    key = stripped.split("=", 1)[0].strip()
-                    existing_keys.add(key)
-                    # Update if we have a new value for this key
-                    if key in env_vars:
-                        lines.append(f"{key}={env_vars[key]}")
-                    else:
-                        lines.append(line.rstrip("\n"))
-                else:
-                    lines.append(line.rstrip("\n"))
-
-    # Add any new keys that weren't in the file
-    for key, value in env_vars.items():
-        if key not in existing_keys:
+    for key in PERSISTED_ENV_FILE_KEYS:
+        value = env_vars.get(key)
+        if value is not None:
             lines.append(f"{key}={value}")
-
-    with open(env_file, "w") as f:
-        f.write("\n".join(lines) + "\n")
+    env_file.write_text("\n".join(lines) + "\n")
 
 
 def _mask_api_key(api_key: str | None) -> str:
@@ -168,6 +190,20 @@ def _is_masked_api_key(api_key: str | None) -> bool:
     if not api_key:
         return False
     return set(api_key) == {"*"} or "*" in api_key
+
+
+def _normalize_auth_mode(value: str | None, provider: str | None = None) -> str:
+    raw = (value or "").strip().lower()
+    provider_value = (provider or "").strip().lower()
+    if raw in {"claude_code", "claude-code", AUTH_MODE_CLAUDE_CODE} or provider_value == CLAUDE_CODE_PROVIDER:
+        return AUTH_MODE_CLAUDE_CODE
+    return AUTH_MODE_API_KEY
+
+
+def _oauth_token_from_env(env_vars: dict[str, str] | None = None) -> str:
+    if env_vars is not None and "CLAUDE_CODE_OAUTH_TOKEN" in env_vars:
+        return env_vars.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+    return os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
 
 
 def _encrypt_runtime_secret(value: str) -> str:
@@ -212,6 +248,99 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
+def _strip_ansi(value: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", value)
+
+
+def _parse_claude_setup_token(output: str) -> str | None:
+    """Extract a Claude Code OAuth token from CLI output without logging it."""
+    text = _strip_ansi(output)
+    patterns = (
+        r"(?:export\s+)?CLAUDE_CODE_OAUTH_TOKEN\s*=\s*['\"]?([A-Za-z0-9._:/+=-]{20,})",
+        r"(?:oauth\s+token|access\s+token|token)\s*[:=]\s*['\"]?([A-Za-z0-9._:/+=-]{20,})",
+        r"\b(sk-ant-[A-Za-z0-9._:/+=-]{20,})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip().strip("'\"")
+
+    for line in text.splitlines():
+        value = line.strip().strip("'\"")
+        if len(value) >= 40 and not re.search(r"\s", value) and re.search(r"[A-Za-z]", value) and re.search(r"\d", value):
+            return value
+    return None
+
+
+def _resolve_claude_cli() -> str | None:
+    configured = os.environ.get("CLAUDE_CODE_CLI_PATH", "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    path_cli = shutil.which("claude")
+    if path_cli:
+        candidates.append(Path(path_cli))
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            repo_root / "node_modules" / ".bin" / "claude",
+            repo_root / "web" / "node_modules" / ".bin" / "claude",
+        ]
+    )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate_str in seen:
+            continue
+        seen.add(candidate_str)
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return candidate_str
+    return None
+
+
+async def _run_claude_setup_token(cli_path: str, timeout_seconds: int = CLAUDE_CODE_SETUP_TIMEOUT_SECONDS) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        cli_path,
+        "setup-token",
+        stdin=subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise
+    output = "\n".join(
+        part.decode("utf-8", errors="replace")
+        for part in (stdout, stderr)
+        if part
+    )
+    return proc.returncode or 0, output
+
+
+def _save_claude_code_oauth_token(session: Session, token: str) -> dict[str, Any]:
+    existing = dict(_db_runtime_settings(session) or {})
+    runtime_settings = existing or _settings_from_active(_active_settings_from_env(runtime_env_vars(session)))
+    runtime_settings["llm_provider"] = CLAUDE_CODE_PROVIDER
+    runtime_settings["auth_mode"] = AUTH_MODE_CLAUDE_CODE
+    runtime_settings["base_url"] = CLAUDE_CODE_BASE_URL
+    runtime_settings["claude_code_oauth_token_encrypted"] = _encrypt_runtime_secret(token)
+    if "api_key_encrypted" not in runtime_settings:
+        runtime_settings["api_key_encrypted"] = existing.get("api_key_encrypted", "")
+
+    env_vars = _settings_to_env_vars(runtime_settings)
+    _save_db_runtime_settings(session, runtime_settings)
+    _write_env_file(env_vars)
+    _apply_runtime_settings(env_vars)
+    return _settings_response(env_vars)
+
+
 
 
 def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[str, str]:
@@ -224,6 +353,10 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
     provider_label = env_vars.get("QUORVEX_LLM_PROVIDER") or ""
     if provider_label in {"anthropic_compatible", "openai_compatible", "hermes", "hermes_agent", "hermes-agent"}:
         provider_label = _infer_provider(base_url)
+    auth_mode = _normalize_auth_mode(env_vars.get("QUORVEX_LLM_AUTH_MODE"), provider_label)
+    claude_code_oauth_token = _oauth_token_from_env(env_vars)
+    if auth_mode == AUTH_MODE_API_KEY and claude_code_oauth_token and not selection.api_key and _infer_provider(base_url) == "anthropic":
+        auth_mode = AUTH_MODE_CLAUDE_CODE
     if selection.provider == "anthropic_compatible":
         model_name = (
             env_vars.get("QUORVEX_LLM_DEEP_MODEL")
@@ -231,8 +364,8 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
             or env_vars.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
             or selection.model
         )
-    api_key = selection.api_key
-    if not api_key:
+    api_key = "" if auth_mode == AUTH_MODE_CLAUDE_CODE else selection.api_key
+    if auth_mode == AUTH_MODE_API_KEY and not api_key:
         if provider_label == "openai":
             api_key = (
                 env_vars.get("QUORVEX_LLM_API_KEY")
@@ -252,6 +385,9 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
                 or os.environ.get("ANTHROPIC_API_KEY", "")
             )
     agent_runtime = _normalize_runtime(env_vars.get("QUORVEX_AGENT_RUNTIME") or os.environ.get("QUORVEX_AGENT_RUNTIME"))
+    display_provider = provider_label or _infer_provider(base_url)
+    if auth_mode == AUTH_MODE_CLAUDE_CODE:
+        display_provider = CLAUDE_CODE_PROVIDER
     return {
         "base_url": base_url,
         "model_name": model_name,
@@ -262,7 +398,9 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
         "chat_model": tiers["chat"],
         "embedding_model": tiers["embedding"],
         "api_key": api_key,
-        "llm_provider": provider_label or _infer_provider(base_url),
+        "claude_code_oauth_token": claude_code_oauth_token,
+        "auth_mode": auth_mode,
+        "llm_provider": display_provider,
         "agent_runtime": agent_runtime,
         "assistant_runtime": _normalize_assistant_runtime(
             env_vars.get("QUORVEX_ASSISTANT_RUNTIME")
@@ -277,15 +415,32 @@ def _settings_to_env_vars(settings: dict[str, Any]) -> dict[str, str]:
     provider = str(settings.get("llm_provider") or "zai")
     if provider in {"hermes", "hermes_agent", "hermes-agent"}:
         provider = "zai"
+    auth_mode = _normalize_auth_mode(str(settings.get("auth_mode") or ""), provider)
+    if auth_mode == AUTH_MODE_CLAUDE_CODE:
+        provider = "anthropic"
     base_url = str(settings.get("base_url") or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
+    if auth_mode == AUTH_MODE_CLAUDE_CODE and (not base_url or "api.z.ai" in base_url):
+        base_url = CLAUDE_CODE_BASE_URL
     api_key = _decrypt_runtime_secret(str(settings.get("api_key_encrypted") or ""))
+    claude_code_oauth_token = _decrypt_runtime_secret(str(settings.get("claude_code_oauth_token_encrypted") or ""))
 
     env_vars["QUORVEX_LLM_PROVIDER"] = provider
+    env_vars["QUORVEX_LLM_AUTH_MODE"] = auth_mode
     env_vars["QUORVEX_LLM_BASE_URL"] = base_url
     env_vars["ANTHROPIC_BASE_URL"] = base_url
     if provider == "openai":
         env_vars["OPENAI_BASE_URL"] = base_url
-    if api_key:
+    if auth_mode == AUTH_MODE_CLAUDE_CODE:
+        env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = claude_code_oauth_token
+        env_vars["QUORVEX_LLM_API_KEY"] = ""
+        env_vars["QUORVEX_LLM_API_KEYS"] = ""
+        env_vars["ANTHROPIC_AUTH_TOKEN"] = ""
+        env_vars["ANTHROPIC_API_KEY"] = ""
+        env_vars["ANTHROPIC_AUTH_TOKENS"] = ""
+        env_vars["OPENAI_API_KEY"] = ""
+    else:
+        env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = ""
+    if auth_mode == AUTH_MODE_API_KEY and api_key:
         env_vars["QUORVEX_LLM_API_KEY"] = api_key
         env_vars["QUORVEX_LLM_API_KEYS"] = ""
         if provider == "openai":
@@ -332,6 +487,7 @@ def _settings_to_env_vars(settings: dict[str, Any]) -> dict[str, str]:
 def _settings_from_active(active: dict[str, str]) -> dict[str, Any]:
     return {
         "llm_provider": active["llm_provider"],
+        "auth_mode": active.get("auth_mode") or AUTH_MODE_API_KEY,
         "base_url": active["base_url"],
         "model_name": active["model_name"],
         "light_model": active["light_model"],
@@ -341,6 +497,9 @@ def _settings_from_active(active: dict[str, str]) -> dict[str, Any]:
         "chat_model": active["chat_model"],
         "embedding_model": active["embedding_model"],
         "api_key_encrypted": _encrypt_runtime_secret(active["api_key"]) if active.get("api_key") else "",
+        "claude_code_oauth_token_encrypted": _encrypt_runtime_secret(active["claude_code_oauth_token"])
+        if active.get("claude_code_oauth_token")
+        else "",
         "agent_runtime": active["agent_runtime"],
         "assistant_runtime": active["assistant_runtime"],
     }
@@ -410,10 +569,15 @@ def _apply_runtime_settings(env_vars: dict[str, str], new_api_key: str | None = 
     """Apply persisted settings to this running backend process."""
     for key in (
         "QUORVEX_LLM_PROVIDER",
+        "QUORVEX_LLM_AUTH_MODE",
         "QUORVEX_LLM_BASE_URL",
         "QUORVEX_LLM_API_KEY",
         "QUORVEX_LLM_API_KEYS",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKENS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_BASE_URL",
         "OPENAI_API_KEY",
         "OPENAI_MODEL_ID",
@@ -422,9 +586,20 @@ def _apply_runtime_settings(env_vars: dict[str, str], new_api_key: str | None = 
     ):
         value = env_vars.get(key)
         if value is not None:
-            os.environ[key] = value
+            if value == "" and key in {
+                "QUORVEX_LLM_API_KEY",
+                "QUORVEX_LLM_API_KEYS",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKENS",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "OPENAI_API_KEY",
+            }:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
-    if new_api_key:
+    if new_api_key and env_vars.get("QUORVEX_LLM_AUTH_MODE") != AUTH_MODE_CLAUDE_CODE:
         os.environ["QUORVEX_LLM_API_KEY"] = new_api_key
         if env_vars.get("QUORVEX_LLM_PROVIDER") == "openai":
             os.environ["OPENAI_API_KEY"] = new_api_key
@@ -462,6 +637,7 @@ def _settings_response(env_vars: dict[str, str] | None = None) -> dict[str, Any]
     active = _active_settings(env_vars)
     return {
         "llm_provider": active["llm_provider"],
+        "auth_mode": active.get("auth_mode") or AUTH_MODE_API_KEY,
         "base_url": active["base_url"],
         "model_name": active["model_name"],
         "light_model": active["light_model"],
@@ -479,6 +655,8 @@ def _settings_response(env_vars: dict[str, str] | None = None) -> dict[str, Any]
             "embedding": active["embedding_model"],
         },
         "api_key": _mask_api_key(active["api_key"]),
+        "claude_code_oauth_token": _mask_api_key(active.get("claude_code_oauth_token")),
+        "claude_code_oauth_token_configured": bool(active.get("claude_code_oauth_token")),
         "agent_runtime": active["agent_runtime"],
         "assistant_runtime": active["assistant_runtime"],
     }
@@ -512,13 +690,22 @@ def _update_settings(new_settings: Settings, session: Session):
     active = _active_settings_from_env(env_vars)
 
     runtime_settings = _settings_from_active(active)
+    for secret_key in ("api_key_encrypted", "claude_code_oauth_token_encrypted"):
+        if existing.get(secret_key) and not runtime_settings.get(secret_key):
+            runtime_settings[secret_key] = existing[secret_key]
     provider_value = new_settings.llm_provider or runtime_settings.get("llm_provider") or "zai"
     if provider_value in {"hermes", "hermes_agent", "hermes-agent"}:
         provider_value = "zai"
+    auth_mode = _normalize_auth_mode(new_settings.auth_mode or str(runtime_settings.get("auth_mode") or ""), provider_value)
+    if provider_value == CLAUDE_CODE_PROVIDER:
+        auth_mode = AUTH_MODE_CLAUDE_CODE
     runtime_settings["llm_provider"] = provider_value
+    runtime_settings["auth_mode"] = auth_mode
 
     if new_settings.base_url:
         runtime_settings["base_url"] = new_settings.base_url.rstrip("/")
+    elif auth_mode == AUTH_MODE_CLAUDE_CODE:
+        runtime_settings["base_url"] = CLAUDE_CODE_BASE_URL
     if new_settings.model_name:
         runtime_settings["model_name"] = new_settings.model_name
 
@@ -575,6 +762,12 @@ def _update_settings(new_settings: Settings, session: Session):
         runtime_settings["api_key_encrypted"] = _encrypt_runtime_secret(new_settings.api_key)
     elif "api_key_encrypted" not in runtime_settings:
         runtime_settings["api_key_encrypted"] = ""
+    if new_settings.claude_code_oauth_token and not _is_masked_api_key(new_settings.claude_code_oauth_token):
+        runtime_settings["claude_code_oauth_token_encrypted"] = _encrypt_runtime_secret(
+            new_settings.claude_code_oauth_token
+        )
+    elif "claude_code_oauth_token_encrypted" not in runtime_settings:
+        runtime_settings["claude_code_oauth_token_encrypted"] = ""
 
     env_vars = _settings_to_env_vars(runtime_settings)
 
@@ -591,6 +784,74 @@ def _update_settings(new_settings: Settings, session: Session):
     }
 
 
+@router.post("/settings/claude-code/setup-token", response_model=ClaudeCodeSetupTokenResult)
+async def setup_claude_code_token(session: Session = Depends(get_session)):
+    """Generate and save a Claude Code OAuth token when the local CLI is available."""
+    cli_path = _resolve_claude_cli()
+    if not cli_path:
+        return ClaudeCodeSetupTokenResult(
+            ok=False,
+            status="cli_missing",
+            message=(
+                "Claude Code CLI was not found from CLAUDE_CODE_CLI_PATH, PATH, or the bundled npm install. "
+                "Run the fallback command on the host where Claude Code is logged in, then paste the token here."
+            ),
+        )
+
+    try:
+        returncode, output = await _run_claude_setup_token(cli_path)
+    except asyncio.TimeoutError:
+        return ClaudeCodeSetupTokenResult(
+            ok=False,
+            status="timeout",
+            cli_path=cli_path,
+            message=(
+                "Claude Code did not return a token before the timeout. It may be waiting for an interactive login "
+                "or cannot access the host Claude Code session. Run the fallback command in your terminal, then paste the token."
+            ),
+        )
+    except OSError as exc:
+        return ClaudeCodeSetupTokenResult(
+            ok=False,
+            status="cli_error",
+            cli_path=cli_path,
+            message=f"Claude Code CLI could not be started: {exc}. Run the fallback command, then paste the token.",
+        )
+
+    token = _parse_claude_setup_token(output)
+    if not token:
+        status = "login_required" if re.search(r"login|auth|sign\s*in|not\s+authenticated", output, re.I) else "token_not_found"
+        detail = (
+            "Claude Code did not return an OAuth token. The backend may not be logged in or may not be able to access "
+            "the host Claude Code state. Run the fallback command in your terminal, then paste the token."
+        )
+        if returncode != 0:
+            detail = f"{detail} Claude Code exited with status {returncode}."
+        return ClaudeCodeSetupTokenResult(
+            ok=False,
+            status=status,
+            cli_path=cli_path,
+            message=detail,
+        )
+
+    db_session, should_close = _coerce_session(session)
+    try:
+        settings_response = _save_claude_code_oauth_token(db_session, token)
+    finally:
+        if should_close:
+            db_session.close()
+
+    return ClaudeCodeSetupTokenResult(
+        ok=True,
+        status="success",
+        cli_path=cli_path,
+        message="Claude Code OAuth token generated, saved, and applied.",
+        masked_token=_mask_api_key(token),
+        token_configured=True,
+        settings=settings_response,
+    )
+
+
 @router.post("/settings/test-connection", response_model=SettingsConnectionResult)
 async def test_settings_connection(session: Session = Depends(get_session)):
     """Test the currently active runtime AI settings without exposing secrets."""
@@ -603,6 +864,7 @@ async def test_settings_connection(session: Session = Depends(get_session)):
     active = _active_settings(env_vars)
     selection = resolve_runtime_ai_selection("chat", env_vars=env_vars)
     api_key = active["api_key"]
+    auth_mode = active.get("auth_mode") or AUTH_MODE_API_KEY
     base_url = (selection.base_url or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
     model_name = selection.model
     provider = active["llm_provider"]
@@ -616,7 +878,7 @@ async def test_settings_connection(session: Session = Depends(get_session)):
         )
 
     started = time.monotonic()
-    if not api_key and provider == "anthropic":
+    if auth_mode == AUTH_MODE_CLAUDE_CODE or (not api_key and provider == "anthropic"):
         try:
             from orchestrator.utils.agent_runner import AgentRunner
 
@@ -751,6 +1013,8 @@ def get_runtime_chat_settings(
         "agent_runtime": active["agent_runtime"],
         "base_url": active["base_url"],
         "api_key": active["api_key"],
+        "auth_mode": active.get("auth_mode") or AUTH_MODE_API_KEY,
+        "claude_code_oauth_token": active.get("claude_code_oauth_token", ""),
         "model_name": active["model_name"],
         "chat_model": active["chat_model"],
         "standard_model": active["standard_model"],

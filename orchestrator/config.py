@@ -103,6 +103,10 @@ class AppSettings(BaseSettings):
 
     # --- Agent Runtimes ---
     quorvex_agent_runtime: str = "claude_sdk"
+    quorvex_native_agent_runs_enabled: bool = False
+    quorvex_native_agent_run_types: str = "custom,exploratory"
+    quorvex_native_agent_run_shadow: bool = True
+    quorvex_native_agent_run_read_model: bool = False
 
     # --- Exploration ---
     max_explorations_per_user: int = 2

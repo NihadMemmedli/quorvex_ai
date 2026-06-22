@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -28,6 +29,7 @@ from orchestrator.utils.token_budget import clip_text
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+AGENT_CHILD_TERMINAL_STATUSES = {"completed", "completed_partial", "failed", "cancelled", "canceled", "error", "timeout"}
 ACTIVE_STATUSES = {"queued", "running", "awaiting_input", "paused"}
 RECOVERY_ACTIONS = {"fail", "retry", "skip", "pause", "notify"}
 SECRET_RE = re.compile(r"(password|token|secret|api[_-]?key|authorization|credential)", re.IGNORECASE)
@@ -705,6 +707,7 @@ def handle_workflow_step_failure(run_id: str, step_id: int | None, message: str)
 async def _execute_step(run_id: str, step_id: int | None) -> None:
     if step_id is None:
         return
+    attempt_token = f"attempt-{uuid.uuid4().hex}"
     with Session(engine) as session:
         step = session.get(WorkflowRunStep, step_id)
         run = session.get(WorkflowRun, run_id)
@@ -720,7 +723,14 @@ async def _execute_step(run_id: str, step_id: int | None) -> None:
         step.status = "running"
         step.attempt_count += 1
         step.rendered_input = rendered_input
-        step.context_snapshot = context
+        step.context_snapshot = {
+            **context,
+            "_workflow_attempt": {
+                "token": attempt_token,
+                "attempt_count": step.attempt_count,
+                "started_at": datetime.utcnow().isoformat(),
+            },
+        }
         step.input_resolution = resolution
         step.started_at = step.started_at or datetime.utcnow()
         step.updated_at = datetime.utcnow()
@@ -728,12 +738,49 @@ async def _execute_step(run_id: str, step_id: int | None) -> None:
         session.commit()
 
     result = await _dispatch_step(step_type, rendered_input, run_project_id, context, step_config)
+    if isinstance(result, dict):
+        result.setdefault("source_attempt_id", attempt_token)
     output_errors = validate_output_contract(result)
 
     with Session(engine) as session:
         step = session.get(WorkflowRunStep, step_id)
         run = session.get(WorkflowRun, run_id)
         if not step or not run:
+            return
+        snapshot = step.context_snapshot
+        active_attempt = snapshot.get("_workflow_attempt") if isinstance(snapshot, dict) else {}
+        active_token = active_attempt.get("token") if isinstance(active_attempt, dict) else None
+        if step.status != "running" or active_token != attempt_token:
+            discarded = list(snapshot.get("_discarded_attempts") or []) if isinstance(snapshot, dict) else []
+            discarded.append(
+                {
+                    "source_attempt_id": attempt_token,
+                    "discarded_at": datetime.utcnow().isoformat(),
+                    "reason": "stale_attempt_result",
+                    "current_status": step.status,
+                    "active_attempt_id": active_token,
+                    "result_preview": _short_agent_text(result, 1200),
+                }
+            )
+            step.context_snapshot = {**snapshot, "_discarded_attempts": discarded} if isinstance(snapshot, dict) else {"_discarded_attempts": discarded}
+            step.updated_at = datetime.utcnow()
+            session.add(step)
+            emit_workflow_event(
+                session,
+                event_type="workflow.step_result_discarded",
+                message=f"Discarded stale result for workflow step {step.step_key}.",
+                severity="warning",
+                run=run,
+                step_id=step.id,
+                payload={
+                    "step_key": step.step_key,
+                    "source_attempt_id": attempt_token,
+                    "active_attempt_id": active_token,
+                    "status": step.status,
+                },
+                notify=False,
+            )
+            session.commit()
             return
         if run.status == "paused":
             step.status = "paused"
@@ -746,6 +793,7 @@ async def _execute_step(run_id: str, step_id: int | None) -> None:
         if result.get("awaiting_input"):
             step.status = "awaiting_input"
             step.output = result
+            step.output_validation_errors = output_errors
             run.status = "awaiting_input"
             emit_workflow_event(
                 session,
@@ -757,6 +805,33 @@ async def _execute_step(run_id: str, step_id: int | None) -> None:
                 notify=_notify_for_run_event(session, run, "workflow.review_needed"),
             )
         else:
+            if output_errors:
+                step.status = "failed"
+                step.output = result
+                step.output_validation_errors = output_errors
+                step.error_message = "Workflow step output failed contract validation: " + "; ".join(output_errors)
+                step.completed_at = datetime.utcnow()
+                step.updated_at = datetime.utcnow()
+                run.heartbeat_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                session.add(step)
+                session.add(run)
+                emit_workflow_event(
+                    session,
+                    event_type="workflow.step_contract_failed",
+                    message=f"Workflow step {step.step_key} failed output contract validation.",
+                    severity="error",
+                    run=run,
+                    step_id=step.id,
+                    payload={
+                        "step_key": step.step_key,
+                        "source_attempt_id": attempt_token,
+                        "errors": output_errors,
+                    },
+                    notify=_notify_for_run_event(session, run, "workflow.step_failed"),
+                )
+                session.commit()
+                raise RuntimeError(step.error_message)
             step.status = "completed"
             step.output = result
             step.output_validation_errors = output_errors
@@ -1195,7 +1270,15 @@ async def _wait_for_status(data: dict[str, Any], context: dict[str, Any]) -> dic
                 await _cancel_waited_external_job(external)
                 raise
             status = str(status_payload.get("status") or "").lower()
-            if status in {"completed", "passed", "failed", "cancelled", "error", "timeout"}:
+            terminal_statuses = AGENT_CHILD_TERMINAL_STATUSES if external["external_kind"] == "agent_run" else {
+                "completed",
+                "passed",
+                "failed",
+                "cancelled",
+                "error",
+                "timeout",
+            }
+            if status in terminal_statuses:
                 result = {
                     **external,
                     "status": status,
@@ -1204,13 +1287,19 @@ async def _wait_for_status(data: dict[str, Any], context: dict[str, Any]) -> dic
                 if external["external_kind"] == "agent_run":
                     agent_result = status_payload.get("result") if isinstance(status_payload.get("result"), dict) else {}
                     structured_report = agent_result.get("structured_report") if isinstance(agent_result, dict) else None
+                    if not isinstance(structured_report, dict) and isinstance(status_payload.get("structured_report"), dict):
+                        structured_report = status_payload.get("structured_report")
                     result.update(
                         {
                             "summary": status_payload.get("summary") or agent_result.get("summary"),
+                            "contract_status": status_payload.get("contract_status")
+                            or agent_result.get("contract_status"),
                             "structured_report": structured_report,
                             "findings": (structured_report or {}).get("findings") if isinstance(structured_report, dict) else None,
                             "test_ideas": (structured_report or {}).get("test_ideas") if isinstance(structured_report, dict) else None,
-                            "artifacts": status_payload.get("artifacts") or agent_result.get("artifacts"),
+                            "requirements": (structured_report or {}).get("requirements") if isinstance(structured_report, dict) else None,
+                            "evidence": (structured_report or {}).get("evidence") if isinstance(structured_report, dict) else None,
+                            "artifacts": status_payload.get("artifacts") or agent_result.get("artifacts") or [],
                         }
                     )
                 return result

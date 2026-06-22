@@ -1514,6 +1514,7 @@ def _native_heavy_mcp_tools() -> list[str]:
         "mcp__playwright-test__generator_setup_page",
         "mcp__playwright-test__generator_read_log",
         "mcp__playwright-test__generator_write_test",
+        "mcp__playwright-test__browser_handle_dialog",
         "mcp__playwright-test__test_debug",
         "mcp__playwright-test__test_run",
     ]

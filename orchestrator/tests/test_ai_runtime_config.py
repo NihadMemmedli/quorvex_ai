@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ RUNTIME_ENV_KEYS = {
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_CHAT_MODEL",
     "QUORVEX_LLM_PROVIDER",
+    "QUORVEX_LLM_AUTH_MODE",
     "QUORVEX_LLM_BASE_URL",
     "QUORVEX_LLM_API_KEY",
     "QUORVEX_LLM_API_KEYS",
@@ -36,6 +38,7 @@ RUNTIME_ENV_KEYS = {
     "QUORVEX_EMBEDDING_MODEL",
     "QUORVEX_SETTINGS_ENV_FILE",
     "ZAI_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
 }
@@ -232,6 +235,68 @@ def test_agent_runner_uses_resolved_model_in_claude_options(monkeypatch):
     assert runner._claude_options_kwargs()["model"] == "tool-model"
 
 
+@pytest.mark.asyncio
+async def test_agent_runner_run_prefers_explicit_env_vars_for_runtime_aliases(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    captured = {}
+
+    class FakeClaudeAgentOptions:
+        def __init__(self, **kwargs):
+            captured["options"] = kwargs
+
+    class FakeMessage:
+        content = "done"
+
+    async def fake_query(prompt, options):
+        captured["prompt"] = prompt
+        captured["env_during_query"] = {
+            "ANTHROPIC_MODEL": os.environ.get("ANTHROPIC_MODEL"),
+            "QUORVEX_LLM_API_KEY": os.environ.get("QUORVEX_LLM_API_KEY"),
+            "ANTHROPIC_AUTH_TOKEN": os.environ.get("ANTHROPIC_AUTH_TOKEN"),
+            "CLAUDE_CODE_OAUTH_TOKEN": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        yield FakeMessage()
+
+    def fail_active_settings(*_args, **_kwargs):
+        raise AssertionError("explicit env_vars should bypass active Settings refresh")
+
+    monkeypatch.setenv("QUORVEX_LLM_STANDARD_MODEL", "stale-process-model")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "stale-process-model")
+    monkeypatch.setenv("QUORVEX_LLM_API_KEY", "stale-process-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-process-key")
+    monkeypatch.setattr(agent_runner_module, "AGENT_QUEUE_AVAILABLE", False)
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", FakeClaudeAgentOptions)
+    monkeypatch.setattr(AgentRunner, "_apply_active_ai_settings", staticmethod(fail_active_settings))
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        log_tools=False,
+        model_tier="standard",
+        env_vars={
+            "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token-1234567890",
+            "QUORVEX_LLM_API_KEY": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_API_KEY": "",
+            "QUORVEX_LLM_STANDARD_MODEL": "settings-standard-model",
+        },
+    )
+
+    result = await runner.run("Return done")
+
+    assert result.success is True
+    assert result.output == "done"
+    assert captured["options"]["model"] == "settings-standard-model"
+    assert captured["env_during_query"]["ANTHROPIC_MODEL"] == "settings-standard-model"
+    assert captured["env_during_query"]["QUORVEX_LLM_API_KEY"] is None
+    assert captured["env_during_query"]["ANTHROPIC_AUTH_TOKEN"] is None
+    assert captured["env_during_query"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-1234567890"
+
+
 def test_browser_dialog_policy_applies_only_when_dialog_tool_available():
     from orchestrator.utils.browser_dialog_policy import (
         append_browser_dialog_recovery_policy,
@@ -257,15 +322,17 @@ def test_browser_dialog_policy_applies_only_when_dialog_tool_available():
 
 
 def test_agent_runner_diagnostics_reports_runtime_and_memory(monkeypatch):
+    from orchestrator.api import settings as settings_api
     from orchestrator.utils.agent_runner import AgentRunner
 
     for key in (
         "QUORVEX_LLM_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
-        "ZAI_API_KEY",
-    ):
-        monkeypatch.delenv(key, raising=False)
+            "ZAI_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(settings_api, "runtime_env_vars", lambda: {})
     monkeypatch.setenv("QUORVEX_LLM_TOOL_DEEP_MODEL", "diagnostic-tool-model")
     runner = AgentRunner(
         allowed_tools=["Read", "mcp__playwright__browser_navigate"],
@@ -283,6 +350,147 @@ def test_agent_runner_diagnostics_reports_runtime_and_memory(monkeypatch):
     assert diagnostics["mcp_prefixes"] == ["mcp__playwright"]
     assert diagnostics["memory"]["inject"] is True
     assert len(diagnostics["prompt"]["hash"]) == 64
+
+
+def test_agent_runner_merges_settings_credentials_with_sparse_run_env(monkeypatch, tmp_path):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    fixture_file = tmp_path / "resolved-fixtures.json"
+    fixture_file.write_text("{}")
+    monkeypatch.setattr(
+        settings_api,
+        "runtime_env_vars",
+        lambda: {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "api_key",
+            "QUORVEX_LLM_BASE_URL": "https://settings.example/anthropic",
+            "ANTHROPIC_BASE_URL": "https://settings.example/anthropic",
+            "QUORVEX_LLM_API_KEY": "settings-secret-key",
+            "QUORVEX_LLM_API_KEYS": "",
+            "ANTHROPIC_AUTH_TOKEN": "settings-secret-key",
+            "ANTHROPIC_API_KEY": "settings-secret-key",
+            "QUORVEX_LLM_LIGHT_MODEL": "settings-light",
+            "QUORVEX_LLM_STANDARD_MODEL": "settings-standard",
+            "QUORVEX_LLM_DEEP_MODEL": "settings-deep",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL": "settings-tool",
+            "QUORVEX_LLM_CHAT_MODEL": "settings-chat",
+            "QUORVEX_EMBEDDING_MODEL": "settings-embed",
+        },
+    )
+
+    runner = AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_snapshot"],
+        model_tier="tool_deep",
+        env_vars={"QUORVEX_TEST_DATA_FILE": str(fixture_file)},
+    )
+
+    env_vars = runner._collect_api_env_vars()
+    diagnostics = runner.diagnostics(prompt="use fixture")
+    diagnostics_json = json.dumps(diagnostics, sort_keys=True)
+
+    assert env_vars["QUORVEX_LLM_API_KEY"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_API_KEY"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_MODEL"] == "settings-tool"
+    assert env_vars["QUORVEX_LLM_ACTIVE_MODEL"] == "settings-tool"
+    assert env_vars["QUORVEX_TEST_DATA_FILE"] == str(fixture_file)
+    assert diagnostics["api_key_set"] is True
+    assert diagnostics["claude_code_oauth_token_set"] is False
+    assert "settings-secret-key" not in diagnostics_json
+
+
+def test_agent_runner_claude_code_settings_survive_sparse_run_env(monkeypatch, tmp_path):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    monkeypatch.setenv("QUORVEX_LLM_PROVIDER", "anthropic_compatible")
+    monkeypatch.setenv("QUORVEX_LLM_BASE_URL", "https://api.z.ai/api/anthropic")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
+    monkeypatch.setenv("QUORVEX_LLM_TOOL_DEEP_MODEL", "glm-5.1")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.1")
+    monkeypatch.setenv("QUORVEX_LLM_API_KEY", "stale-process-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-process-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-process-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+    fixture_file = tmp_path / "resolved-fixtures.json"
+    fixture_file.write_text("{}")
+    monkeypatch.setattr(
+        settings_api,
+        "runtime_env_vars",
+        lambda: {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+            "QUORVEX_LLM_BASE_URL": "https://api.anthropic.com",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+            "CLAUDE_CODE_OAUTH_TOKEN": "settings-oauth-token",
+            "QUORVEX_LLM_API_KEY": "",
+            "QUORVEX_LLM_API_KEYS": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_API_KEY": "",
+            "QUORVEX_LLM_STANDARD_MODEL": "claude-standard",
+            "QUORVEX_LLM_DEEP_MODEL": "claude-deep",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL": "claude-tool",
+        },
+    )
+
+    runner = AgentRunner(
+        model_tier="tool_deep",
+        env_vars={"QUORVEX_TEST_DATA_FILE": str(fixture_file)},
+    )
+
+    env_vars = runner._collect_api_env_vars()
+    diagnostics = runner.diagnostics(prompt="use fixture")
+
+    assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == "settings-oauth-token"
+    assert env_vars["QUORVEX_LLM_BASE_URL"] == "https://api.anthropic.com"
+    assert env_vars["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert env_vars["ANTHROPIC_MODEL"] == "claude-tool"
+    assert env_vars["QUORVEX_LLM_ACTIVE_MODEL"] == "claude-tool"
+    assert env_vars["QUORVEX_TEST_DATA_FILE"] == str(fixture_file)
+    assert "QUORVEX_LLM_API_KEY" not in env_vars
+    assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+    assert "ANTHROPIC_API_KEY" not in env_vars
+    assert diagnostics["api_key_set"] is False
+    assert diagnostics["claude_code_oauth_token_set"] is True
+    assert diagnostics["model"] == "claude-tool"
+    assert "settings-oauth-token" not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_agent_runner_empty_run_credentials_do_not_mask_settings(monkeypatch):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    monkeypatch.setattr(
+        settings_api,
+        "runtime_env_vars",
+        lambda: {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "api_key",
+            "QUORVEX_LLM_BASE_URL": "https://settings.example/anthropic",
+            "ANTHROPIC_BASE_URL": "https://settings.example/anthropic",
+            "QUORVEX_LLM_API_KEY": "settings-secret-key",
+            "ANTHROPIC_AUTH_TOKEN": "settings-secret-key",
+            "ANTHROPIC_API_KEY": "settings-secret-key",
+            "QUORVEX_LLM_STANDARD_MODEL": "settings-standard",
+        },
+    )
+    runner = AgentRunner(
+        model_tier="standard",
+        env_vars={
+            "QUORVEX_LLM_API_KEY": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_API_KEY": "",
+            "AGENT_COST_LOG": "/tmp/agent-costs.jsonl",
+        },
+    )
+
+    env_vars = runner._collect_api_env_vars()
+
+    assert env_vars["QUORVEX_LLM_API_KEY"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_API_KEY"] == "settings-secret-key"
+    assert env_vars["AGENT_COST_LOG"] == "/tmp/agent-costs.jsonl"
 
 
 def test_agent_runner_forwards_browser_runtime_env(monkeypatch):
@@ -307,14 +515,16 @@ def test_agent_runner_forwards_browser_runtime_env(monkeypatch):
 
 
 def test_agent_runner_forwards_resolved_zai_key(monkeypatch):
+    from orchestrator.api import settings as settings_api
     from orchestrator.utils.agent_runner import AgentRunner
 
     for key in (
         "QUORVEX_LLM_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-    ):
-        monkeypatch.delenv(key, raising=False)
+            "ANTHROPIC_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(settings_api, "runtime_env_vars", lambda: {})
     monkeypatch.setenv("QUORVEX_LLM_PROVIDER", "anthropic_compatible")
     monkeypatch.setenv("QUORVEX_LLM_BASE_URL", "https://api.z.ai/api/anthropic")
     monkeypatch.setenv("ZAI_API_KEY", "zai-forwarded-key")
@@ -449,10 +659,36 @@ def test_settings_update_persists_openai_assistant_runtime(tmp_path, monkeypatch
     assert response["settings"]["agent_runtime"] == "claude_sdk"
     assert response["settings"]["assistant_runtime"] == "openai"
     assert env_vars["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
-    assert env_vars["OPENAI_API_KEY"] == "sk-openai-test"
+    assert "OPENAI_API_KEY" not in env_vars
+    assert os.environ["OPENAI_API_KEY"] == "sk-openai-test"
     assert env_vars["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
     assert not any(key.startswith("HERMES_") for key in env_vars)
     assert not (tmp_path / "data" / "hermes").exists()
+
+
+def test_apply_runtime_settings_projects_agent_and_assistant_runtime(monkeypatch):
+    from orchestrator.api import settings as settings_api
+
+    monkeypatch.delenv("QUORVEX_AGENT_RUNTIME", raising=False)
+    monkeypatch.delenv("QUORVEX_ASSISTANT_RUNTIME", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.services.api_key_rotator.get_api_key_rotator",
+        lambda: type("Rotator", (), {"initialize": lambda self: None})(),
+    )
+
+    settings_api._apply_runtime_settings(
+        {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+            "QUORVEX_LLM_BASE_URL": "https://api.anthropic.com",
+            "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
+            "QUORVEX_AGENT_RUNTIME": "claude_sdk",
+            "QUORVEX_ASSISTANT_RUNTIME": "openai",
+        }
+    )
+
+    assert os.environ["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
+    assert os.environ["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
 
 
 @pytest.mark.asyncio

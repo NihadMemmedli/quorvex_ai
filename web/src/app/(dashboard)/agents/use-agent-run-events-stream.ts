@@ -79,6 +79,11 @@ export function useAgentRunEventsStream(options: {
                     attempts = 0;
                     mergeAgentEvents([data]);
                     mergeProgressFromAgentEvent(data);
+                    if (data.event_type === 'agent_note') {
+                        window.setTimeout(() => {
+                            void fetchRun(selectedRunId);
+                        }, 250);
+                    }
                 } catch {
                     source.close();
                     agentEventSourceRef.current = null;

@@ -7,5 +7,7 @@ from .claude import ClaudeAgentSdkRuntime
 
 
 def get_agent_runtime(runtime: str | None = None) -> AgentRuntime:
-    normalize_agent_runtime(runtime)
-    return ClaudeAgentSdkRuntime()
+    normalized = normalize_agent_runtime(runtime)
+    if normalized == "claude_sdk":
+        return ClaudeAgentSdkRuntime()
+    raise ValueError(f"Unsupported agent runtime {normalized!r}.")

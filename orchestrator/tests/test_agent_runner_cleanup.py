@@ -8,7 +8,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.utils import agent_runner as agent_runner_module
-from orchestrator.utils.agent_runner import AgentRunner
+from orchestrator.utils.agent_runner import (
+    AgentRunner,
+    NativeSetupSeedFileError,
+    _validate_native_setup_seed_file,
+)
 
 
 class _FakeClaudeAgentOptions:
@@ -37,6 +41,32 @@ def _patch_runner_runtime(monkeypatch, *, query_impl, killed_calls: list[set[int
         return 1
 
     monkeypatch.setattr(agent_runner_module, "kill_new_children", fake_kill)
+
+
+def test_native_generator_setup_defaults_missing_run_local_seed_file():
+    tool_input = {}
+
+    assert (
+        _validate_native_setup_seed_file(
+            "mcp__playwright-test__generator_setup_page",
+            tool_input,
+        )
+        is True
+    )
+    assert tool_input == {"seedFile": "tests/seed.spec.ts"}
+
+    _validate_native_setup_seed_file(
+        "mcp__playwright-test__generator_setup_page",
+        {"seedFile": "tests/seed.spec.ts"},
+    )
+
+
+def test_native_generator_setup_rejects_wrong_run_local_seed_file():
+    with pytest.raises(NativeSetupSeedFileError, match="generator_setup_page"):
+        _validate_native_setup_seed_file(
+            "mcp__playwright-test__generator_setup_page",
+            {"seedFile": "tests/not-seed.spec.ts"},
+        )
 
 
 @pytest.mark.asyncio

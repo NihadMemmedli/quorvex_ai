@@ -60,7 +60,9 @@ interface MobileHealth {
 
 interface AssistantSettings {
     llm_provider: string;
+    auth_mode: string;
     api_key: string;
+    claude_code_oauth_token: string;
     base_url: string;
     model_name: string;
     light_model: string;
@@ -71,6 +73,15 @@ interface AssistantSettings {
     embedding_model: string;
     agent_runtime: string;
     assistant_runtime: string;
+}
+
+type ClaudeTokenSetupPhase = 'idle' | 'checking_cli' | 'running_claude' | 'saving_token' | 'success' | 'manual_fallback';
+
+interface ClaudeTokenSetupState {
+    phase: ClaudeTokenSetupPhase;
+    message?: string;
+    fallbackCommand?: string;
+    maskedToken?: string;
 }
 
 function githubActionsQualityGateYaml(owner: string, repo: string): string {
@@ -115,7 +126,9 @@ export default function SettingsPage() {
     const { user } = useAuth();
     const [settings, setSettings] = useState<AssistantSettings>({
         llm_provider: 'zai',
+        auth_mode: 'api_key',
         api_key: '',
+        claude_code_oauth_token: '',
         base_url: 'https://api.z.ai/api/anthropic',
         model_name: 'glm-5.1',
         light_model: 'glm-4.5-air',
@@ -142,6 +155,14 @@ export default function SettingsPage() {
     const [browserPoolStatus, setBrowserPoolStatus] = useState<BrowserPoolStatus | null>(null);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [showApiKey, setShowApiKey] = useState(false);
+    const [claudeTokenCommandCopied, setClaudeTokenCommandCopied] = useState(false);
+    const [claudeTokenSetup, setClaudeTokenSetup] = useState<ClaudeTokenSetupState>({ phase: 'idle' });
+    const selectedProvider = settings.auth_mode === 'claude_code_subscription' || settings.llm_provider === 'claude_code_subscription'
+        ? 'claude_code_subscription'
+        : settings.llm_provider;
+    const isClaudeCodeSubscription = selectedProvider === 'claude_code_subscription';
+    const claudeTokenCommand = 'claude setup-token';
+    const isSettingUpClaudeToken = ['checking_cli', 'running_claude', 'saving_token'].includes(claudeTokenSetup.phase);
 
     // TestRail integration state
     const [trUrl, setTrUrl] = useState('');
@@ -483,7 +504,10 @@ export default function SettingsPage() {
 
         // Auto-populate base_url and model when provider changes
         if (name === 'llm_provider') {
-            const updates: any = { [name]: value };
+            const updates: any = {
+                llm_provider: value === 'claude_code_subscription' ? 'claude_code_subscription' : value,
+                auth_mode: value === 'claude_code_subscription' ? 'claude_code_subscription' : 'api_key',
+            };
 
             if (value === 'openrouter') {
                 updates.base_url = 'https://openrouter.ai/api';
@@ -509,6 +533,14 @@ export default function SettingsPage() {
                 updates.deep_model = 'claude-3-opus-20240229';
                 updates.tool_deep_model = 'claude-3-opus-20240229';
                 updates.chat_model = 'claude-3-5-sonnet-20240620';
+            } else if (value === 'claude_code_subscription') {
+                updates.base_url = 'https://api.anthropic.com';
+                updates.model_name = 'claude-opus-4-7';
+                updates.light_model = 'claude-sonnet-4-6';
+                updates.standard_model = 'claude-opus-4-7';
+                updates.deep_model = 'claude-opus-4-7';
+                updates.tool_deep_model = 'claude-opus-4-7';
+                updates.chat_model = 'claude-sonnet-4-6';
             } else if (value === 'openai') {
                 updates.base_url = 'https://api.openai.com/v1';
                 updates.model_name = 'gpt-4o-mini';
@@ -1213,6 +1245,91 @@ export default function SettingsPage() {
         }
     };
 
+    const copyClaudeTokenCommand = async () => {
+        try {
+            await navigator.clipboard.writeText(claudeTokenSetup.fallbackCommand || claudeTokenCommand);
+            setClaudeTokenCommandCopied(true);
+            setTimeout(() => setClaudeTokenCommandCopied(false), 1800);
+        } catch {
+            setMessage({ type: 'error', text: 'Could not copy Claude Code command' });
+            setTimeout(() => setMessage(null), 3000);
+        }
+    };
+
+    const handleGenerateClaudeToken = async () => {
+        setMessage(null);
+        setClaudeTokenSetup({
+            phase: 'checking_cli',
+            message: 'Checking for the Claude Code CLI...',
+            fallbackCommand: claudeTokenCommand,
+        });
+
+        const runningTimer = window.setTimeout(() => {
+            setClaudeTokenSetup(prev => prev.phase === 'checking_cli'
+                ? {
+                    ...prev,
+                    phase: 'running_claude',
+                    message: 'Running Claude Code token setup...',
+                }
+                : prev
+            );
+        }, 350);
+
+        try {
+            const res = await fetch(`${API_BASE}/settings/claude-code/setup-token`, { method: 'POST' });
+            const data = await res.json();
+            window.clearTimeout(runningTimer);
+            setClaudeTokenSetup({
+                phase: 'saving_token',
+                message: 'Saving token into runtime settings...',
+                fallbackCommand: data.fallback_command || claudeTokenCommand,
+            });
+
+            if (!res.ok) {
+                throw new Error(data.detail || data.message || 'Claude Code token setup failed');
+            }
+
+            if (data.ok) {
+                if (data.settings) {
+                    setSettings(prev => ({
+                        ...prev,
+                        ...data.settings,
+                        assistant_runtime: data.settings.assistant_runtime || prev.assistant_runtime,
+                    }));
+                } else if (data.masked_token) {
+                    setSettings(prev => ({
+                        ...prev,
+                        llm_provider: 'claude_code_subscription',
+                        auth_mode: 'claude_code_subscription',
+                        claude_code_oauth_token: data.masked_token,
+                    }));
+                }
+                setClaudeTokenSetup({
+                    phase: 'success',
+                    message: data.message || 'Claude Code token saved and applied.',
+                    fallbackCommand: data.fallback_command || claudeTokenCommand,
+                    maskedToken: data.masked_token,
+                });
+                setMessage({ type: 'success', text: data.message || 'Claude Code token saved and applied.' });
+                setTimeout(() => setMessage(null), 3000);
+                return;
+            }
+
+            setClaudeTokenSetup({
+                phase: 'manual_fallback',
+                message: data.message || 'Automatic setup is unavailable. Run the fallback command and paste the token.',
+                fallbackCommand: data.fallback_command || claudeTokenCommand,
+            });
+        } catch (err: any) {
+            window.clearTimeout(runningTimer);
+            setClaudeTokenSetup({
+                phase: 'manual_fallback',
+                message: err.message || 'Automatic setup is unavailable. Run the fallback command and paste the token.',
+                fallbackCommand: claudeTokenCommand,
+            });
+        }
+    };
+
     if (loading) return (
         <PageLayout tier="narrow">
             <FormPageSkeleton fields={6} />
@@ -1254,11 +1371,12 @@ export default function SettingsPage() {
                         </div>
                         <select
                             name="llm_provider"
-                            value={settings.llm_provider}
+                            value={selectedProvider}
                             onChange={handleChange}
                             className="input has-icon"
                         >
                             <option value="zai">Z.ai GLM Coding Plan</option>
+                            <option value="claude_code_subscription">Claude Code Subscription</option>
                             <option value="anthropic">Anthropic (Claude)</option>
                             <option value="openai">OpenAI</option>
                             <option value="openrouter">OpenRouter (Free Models Available)</option>
@@ -1268,18 +1386,20 @@ export default function SettingsPage() {
                 </div>
 
                 <div className="form-group">
-                    <label className="label">API Key</label>
+                    <label className="label">{isClaudeCodeSubscription ? 'Claude Code OAuth Token' : 'API Key'}</label>
                     <div className="input-group">
                         <div className="input-icon">
-                            <Key size={18} />
+                            {isClaudeCodeSubscription ? <Lock size={18} /> : <Key size={18} />}
                         </div>
                         <input
                             type={showApiKey ? "text" : "password"}
-                            name="api_key"
-                            value={settings.api_key}
+                            name={isClaudeCodeSubscription ? "claude_code_oauth_token" : "api_key"}
+                            value={isClaudeCodeSubscription ? settings.claude_code_oauth_token : settings.api_key}
                             onChange={handleChange}
                             placeholder={
-                                settings.llm_provider === 'openrouter'
+                                isClaudeCodeSubscription
+                                    ? 'Paste token from claude setup-token'
+                                    : settings.llm_provider === 'openrouter'
                                     ? 'sk-or-v1-...'
                                     : settings.llm_provider === 'zai'
                                         ? 'your_zai_api_key'
@@ -1294,14 +1414,94 @@ export default function SettingsPage() {
                             type="button"
                             className="visibility-toggle"
                             onClick={() => setShowApiKey(!showApiKey)}
-                            title={showApiKey ? "Hide API Key" : "Show API Key"}
+                            title={showApiKey ? "Hide Credential" : "Show Credential"}
                         >
                             {showApiKey ? <EyeOff size={18} /> : <Eye size={18} />}
                         </button>
                     </div>
                     <p className="helper-text">
-                        Saved securely and applied immediately.
+                        {isClaudeCodeSubscription
+                            ? 'Generate this with claude setup-token. It is stored securely and applied without API-key billing env vars.'
+                            : 'Saved securely and applied immediately.'}
                     </p>
+                    {isClaudeCodeSubscription && (
+                        <div style={{
+                            marginTop: '0.75rem',
+                            padding: '0.85rem',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius)',
+                            background: 'rgba(59, 130, 246, 0.08)',
+                            display: 'grid',
+                            gap: '0.65rem'
+                        }}>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>
+                                Generate a token from the Claude Code login available to this backend. If the CLI is unavailable here, use the manual command below and paste the token.
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={handleGenerateClaudeToken}
+                                    disabled={isSettingUpClaudeToken}
+                                    style={{ minWidth: '190px', justifyContent: 'center' }}
+                                >
+                                    {isSettingUpClaudeToken ? (
+                                        <>
+                                            <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                                            Setting up...
+                                        </>
+                                    ) : claudeTokenSetup.phase === 'success' ? (
+                                        <>
+                                            <CheckCircle size={16} />
+                                            Token Saved
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Key size={16} />
+                                            Generate and Save Token
+                                        </>
+                                    )}
+                                </button>
+                                {claudeTokenSetup.message && (
+                                    <span style={{
+                                        color: claudeTokenSetup.phase === 'success' ? 'var(--success)' : claudeTokenSetup.phase === 'manual_fallback' ? 'var(--warning, #f59e0b)' : 'var(--text-secondary)',
+                                        fontSize: '0.85rem',
+                                        lineHeight: 1.4,
+                                        flex: '1 1 240px'
+                                    }}>
+                                        {claudeTokenSetup.message}
+                                    </span>
+                                )}
+                            </div>
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                flexWrap: 'wrap'
+                            }}>
+                                <code style={{
+                                    flex: '1 1 220px',
+                                    padding: '0.6rem 0.75rem',
+                                    borderRadius: 'var(--radius)',
+                                    background: 'var(--bg-primary)',
+                                    border: '1px solid var(--border)',
+                                    color: 'var(--text-primary)',
+                                    fontSize: '0.9rem'
+                                }}>
+                                    {claudeTokenSetup.fallbackCommand || claudeTokenCommand}
+                                </code>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={copyClaudeTokenCommand}
+                                    style={{ minWidth: '112px', justifyContent: 'center' }}
+                                >
+                                    {claudeTokenCommandCopied ? <CheckCircle size={16} /> : <Copy size={16} />}
+                                    {claudeTokenCommandCopied ? 'Copied' : 'Copy'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
                 <div className="form-group">
@@ -1350,7 +1550,9 @@ export default function SettingsPage() {
                             value={settings.model_name}
                             onChange={handleChange}
                             placeholder={
-                                settings.llm_provider === 'openrouter'
+                                isClaudeCodeSubscription
+                                    ? 'claude-opus-4-7'
+                                    : settings.llm_provider === 'openrouter'
                                     ? 'meta-llama/llama-3.2-3b-instruct:free'
                                     : settings.llm_provider === 'zai'
                                         ? 'glm-5.1'

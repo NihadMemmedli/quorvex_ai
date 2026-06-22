@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-browser-auth-tests")
 os.environ.setdefault("REQUIRE_AUTH", "false")
 
@@ -38,11 +40,18 @@ if "slowapi" not in sys.modules:
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select
 
+from orchestrator.api.agent_run_runtime_support import (
+    AgentBrowserAuthPreflightError,
+    BrowserAuthPreflightResult,
+    _detect_browser_auth_preflight_failure,
+    _resolve_agent_browser_auth_storage_path,
+    update_agent_run_progress,
+)
 from orchestrator.api.credentials import set_project_credential
 from orchestrator.api.db import _run_migrations, engine
-from orchestrator.api.models_db import BrowserAuthSession, Project
+from orchestrator.api.models_db import AgentRun, AgentRunEvent, BrowserAuthSession, Project
 from orchestrator.services.browser_auth_sessions import (
     BROWSER_AUTH_CAPTURE_VERSION,
     BrowserAuthSessionError,
@@ -172,6 +181,141 @@ def test_resolve_browser_auth_for_run_writes_decrypted_state(tmp_path):
     assert resolved is not None
     assert resolved.storage_state_path.exists()
     assert "abc" in resolved.storage_state_path.read_text()
+
+
+def test_agent_browser_auth_resolution_records_preflight_metadata(tmp_path):
+    project_id = _create_project()
+    auth_session_id = _create_active_browser_auth_session(
+        project_id,
+        state={
+            "cookies": [
+                {
+                    "name": "sid",
+                    "value": "preflight-cookie",
+                    "domain": "example.com",
+                    "path": "/",
+                }
+            ],
+            "origins": [],
+        },
+    )
+    run_id = f"agent-auth-preflight-{uuid4().hex}"
+    with Session(engine) as session:
+        session.add(
+            AgentRun(
+                id=run_id,
+                project_id=project_id,
+                agent_type="custom",
+                status="running",
+                config_json="{}",
+            )
+        )
+        session.commit()
+
+    def fake_preflight(**kwargs):
+        assert Path(kwargs["storage_state_path"]).exists()
+        assert kwargs["target_url"] == "https://example.com/dashboard?token=hidden"
+        return BrowserAuthPreflightResult(
+            status="passed",
+            url="https://example.com/dashboard?token=hidden",
+            title="Dashboard",
+        )
+
+    storage_state_path = _resolve_agent_browser_auth_storage_path(
+        run_id=run_id,
+        project_id=project_id,
+        config={
+            "url": "https://example.com/dashboard?token=hidden",
+            "browser_auth_session_id": auth_session_id,
+        },
+        run_dir=tmp_path,
+        resolve_browser_auth_for_run=resolve_browser_auth_for_run,
+        update_progress=update_agent_run_progress,
+        preflight_runner=fake_preflight,
+        preflight_enabled=True,
+    )
+
+    assert storage_state_path == tmp_path / "browser-auth-storage-state.json"
+    assert "preflight-cookie" in storage_state_path.read_text()
+    with Session(engine) as session:
+        run = session.get(AgentRun, run_id)
+        assert run is not None
+        assert run.progress["storage_state_attached"] is True
+        assert run.progress["auth_preflight_status"] == "passed"
+        assert run.progress["auth_preflight_url"] == "https://example.com/dashboard"
+        assert run.progress["auth_preflight_title"] == "Dashboard"
+        events = session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all()
+        assert any(event.event_type == "auth_preflight" for event in events)
+        assert "preflight-cookie" not in str([event.payload for event in events])
+
+
+def test_agent_browser_auth_preflight_failure_marks_run_failed(tmp_path):
+    project_id = _create_project()
+    auth_session_id = _create_active_browser_auth_session(project_id)
+    run_id = f"agent-auth-preflight-failed-{uuid4().hex}"
+    with Session(engine) as session:
+        session.add(
+            AgentRun(
+                id=run_id,
+                project_id=project_id,
+                agent_type="custom",
+                status="running",
+                config_json="{}",
+            )
+        )
+        session.commit()
+
+    def fake_preflight(**kwargs):
+        return BrowserAuthPreflightResult(
+            status="failed",
+            url="https://example.com/cdn-cgi/challenge",
+            title="Just a moment...",
+            failure_kind="challenge",
+            failure_reason="Saved browser session was attached, but target opened a security challenge. Refresh the browser auth session or use a trusted browser context.",
+        )
+
+    with pytest.raises(AgentBrowserAuthPreflightError):
+        _resolve_agent_browser_auth_storage_path(
+            run_id=run_id,
+            project_id=project_id,
+            config={
+                "url": "https://example.com/dashboard",
+                "browser_auth_session_id": auth_session_id,
+            },
+            run_dir=tmp_path,
+            resolve_browser_auth_for_run=resolve_browser_auth_for_run,
+            update_progress=update_agent_run_progress,
+            preflight_runner=fake_preflight,
+            preflight_enabled=True,
+        )
+
+    with Session(engine) as session:
+        run = session.get(AgentRun, run_id)
+        assert run is not None
+        assert run.status == "failed"
+        assert run.result["failure_reason"] == "browser_auth_preflight_failed"
+        assert run.progress["auth_preflight_status"] == "failed"
+        assert run.progress["auth_preflight_failure_kind"] == "challenge"
+        events = session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all()
+        assert any(event.event_type == "auth_preflight" and event.level == "error" for event in events)
+
+
+def test_browser_auth_preflight_detector_catches_security_challenges():
+    kind, reason = _detect_browser_auth_preflight_failure(
+        final_url="https://app.example.com/",
+        title="Just a moment...",
+        body_text="Checking your browser before accessing the site.",
+    )
+    assert kind == "challenge"
+    assert "security challenge" in reason
+
+    kind, reason = _detect_browser_auth_preflight_failure(
+        final_url="https://app.example.com/security",
+        title="Security check",
+        body_text="Verify you are human",
+    )
+    assert kind == "challenge"
+    assert "security challenge" in reason
 
 
 def test_create_run_resolves_explicit_browser_auth_session_into_temporal_payload(
@@ -1142,6 +1286,130 @@ def test_refresh_browser_auth_session_falls_back_to_direct_playwright_when_mcp_o
     )
 
 
+def test_refresh_browser_auth_session_reports_direct_fallback_failure(monkeypatch):
+    from orchestrator.services import browser_auth_sessions as service
+
+    project_id = _create_project()
+    captured: dict[str, object] = {}
+
+    with Session(engine) as session:
+        assert set_project_credential(
+            project_id, "LOGIN_USERNAME", "user@example.com", session
+        )
+        assert set_project_credential(
+            project_id, "LOGIN_PASSWORD", "secret-password", session
+        )
+        row = BrowserAuthSession(
+            project_id=project_id,
+            name="Fallback failure refresh",
+            base_url="https://example.com",
+            login_url="https://example.com/login",
+            username_key="LOGIN_USERNAME",
+            password_key="LOGIN_PASSWORD",
+            status="pending",
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        def fake_mcp_capture(**kwargs):
+            captured["mcp"] = kwargs
+            raise service.BrowserAuthStorageStateMissingError(
+                "Storage state file not produced by MCP browser auth capture."
+            )
+
+        def fake_direct_capture(**kwargs):
+            captured["direct"] = kwargs
+            raise BrowserAuthSessionError(
+                "Direct Playwright storage state file was not produced."
+            )
+
+        monkeypatch.setattr(
+            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+        )
+        monkeypatch.setattr(
+            service, "create_storage_state_via_playwright", fake_direct_capture
+        )
+
+        try:
+            refresh_browser_auth_session(session, project_id, row.id)
+        except BrowserAuthSessionError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected BrowserAuthSessionError")
+
+        session.refresh(row)
+
+    assert captured["mcp"]["session_id"] == row.id
+    assert isinstance(captured["direct"]["run_dir"], Path)
+    assert row.status == "invalid"
+    assert row.failure_reason == message
+    assert "MCP browser auth capture" in message
+    assert "direct Playwright fallback failed" in message
+    assert "Direct Playwright storage state file was not produced" in message
+
+
+def test_refresh_browser_auth_session_init_page_failure_does_not_fall_back(
+    monkeypatch,
+):
+    from orchestrator.services import browser_auth_sessions as service
+
+    project_id = _create_project()
+    direct_called = False
+
+    with Session(engine) as session:
+        assert set_project_credential(
+            project_id, "LOGIN_USERNAME", "user@example.com", session
+        )
+        assert set_project_credential(
+            project_id, "LOGIN_PASSWORD", "secret-password", session
+        )
+        row = BrowserAuthSession(
+            project_id=project_id,
+            name="Init page failure refresh",
+            base_url="https://example.com",
+            login_url="https://example.com/login",
+            username_key="LOGIN_USERNAME",
+            password_key="LOGIN_PASSWORD",
+            status="pending",
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        def fake_mcp_capture(**_kwargs):
+            raise BrowserAuthSessionError(
+                "MCP failed loading --init-page browser-dialog-recovery.init.ts: "
+                "Unexpected token 'export'"
+            )
+
+        def fake_direct_capture(**_kwargs):
+            nonlocal direct_called
+            direct_called = True
+            return {"cookies": [], "origins": []}
+
+        monkeypatch.setattr(
+            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+        )
+        monkeypatch.setattr(
+            service, "create_storage_state_via_playwright", fake_direct_capture
+        )
+
+        try:
+            refresh_browser_auth_session(session, project_id, row.id)
+        except BrowserAuthSessionError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected BrowserAuthSessionError")
+
+        session.refresh(row)
+
+    assert direct_called is False
+    assert "infrastructure failed before navigation" in message
+    assert row.status == "invalid"
+    assert row.failure_reason == message
+
+
 def test_refresh_browser_auth_session_security_challenge_does_not_fall_back(
     monkeypatch,
 ):
@@ -1355,6 +1623,65 @@ def test_capture_storage_state_via_mcp_agent_accepts_run_dir_storage_state(
     assert state["cookies"][0]["value"] == "root-output"
 
 
+def test_capture_storage_state_via_mcp_agent_accepts_nested_storage_state(
+    tmp_path, monkeypatch
+):
+    from orchestrator.services import browser_auth_sessions as service
+
+    monkeypatch.setattr(service, "AUTH_SESSIONS_DIR", tmp_path)
+
+    def fake_run_async_capture(_prompt, *, run_dir, **_kwargs):
+        nested = Path(run_dir) / "artifacts" / "nested" / "storage-state-copy.json"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text(
+            '{"cookies":[{"name":"sid","value":"nested-output","domain":"example.com","path":"/"}],"origins":[]}'
+        )
+        return AgentResult(success=True, output="saved")
+
+    monkeypatch.setattr(service, "_run_async_capture", fake_run_async_capture)
+
+    state = service.capture_storage_state_via_mcp_agent(
+        session_id="session-nested-output",
+        base_url="https://example.com",
+        login_url="https://example.com/login",
+        username="user@example.com",
+        password="secret-password",
+    )
+
+    assert state["cookies"][0]["value"] == "nested-output"
+
+
+def test_capture_storage_state_via_mcp_agent_skips_invalid_candidate(
+    tmp_path, monkeypatch
+):
+    from orchestrator.services import browser_auth_sessions as service
+
+    monkeypatch.setattr(service, "AUTH_SESSIONS_DIR", tmp_path)
+
+    def fake_run_async_capture(_prompt, *, run_dir, **_kwargs):
+        artifacts = Path(run_dir) / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "storage-state.json").write_text("{not-json")
+        nested = artifacts / "nested" / "storage-state-valid.json"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text(
+            '{"cookies":[{"name":"sid","value":"valid-output","domain":"example.com","path":"/"}],"origins":[]}'
+        )
+        return AgentResult(success=True, output="saved")
+
+    monkeypatch.setattr(service, "_run_async_capture", fake_run_async_capture)
+
+    state = service.capture_storage_state_via_mcp_agent(
+        session_id="session-skip-invalid-output",
+        base_url="https://example.com",
+        login_url="https://example.com/login",
+        username="user@example.com",
+        password="secret-password",
+    )
+
+    assert state["cookies"][0]["value"] == "valid-output"
+
+
 def test_capture_storage_state_via_mcp_agent_missing_file_normalizes_failure(
     tmp_path, monkeypatch
 ):
@@ -1391,6 +1718,19 @@ def test_mcp_capture_normalizes_old_direct_helper_error_text(monkeypatch):
     assert "locator.fill" not in normalized
     assert "[eval]" not in normalized
     assert "MCP browser auth capture failed" in normalized
+
+
+def test_mcp_capture_normalizes_init_page_load_error():
+    from orchestrator.services import browser_auth_sessions as service
+
+    normalized = service._normalize_capture_error(
+        "MCP server failed loading --init-page /app/runs/browser-dialog-recovery.init.ts: "
+        "Unexpected token 'export'"
+    )
+
+    assert "infrastructure failed before navigation" in normalized
+    assert "init page could not load" in normalized
+    assert "Storage state file not produced" not in normalized
 
 
 def test_mcp_capture_normalizes_claude_login_error():
@@ -1442,6 +1782,17 @@ def test_run_capture_agent_uses_settings_backed_zai_key_for_preflight(
 
     assert result.success is True
     assert captured["timeout_override"] == 5
+    assert captured["runner_kwargs"]["tools"] == captured["runner_kwargs"]["allowed_tools"]
+    assert captured["runner_kwargs"]["disallowed_tools"] == [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "LS",
+        "Grep",
+        "Glob",
+    ]
     assert os.environ["QUORVEX_LLM_API_KEY"] == "settings-zai-token"
     assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "settings-zai-token"
 
@@ -1487,6 +1838,101 @@ def test_run_capture_agent_uses_explicit_runtime_env_for_preflight(
     assert captured["timeout_override"] == 5
     assert os.environ["QUORVEX_LLM_API_KEY"] == "explicit-settings-token"
     assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "explicit-settings-token"
+
+
+def test_run_capture_agent_uses_claude_code_oauth_for_preflight(
+    tmp_path, monkeypatch
+):
+    from orchestrator.services import browser_auth_sessions as service
+
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "QUORVEX_LLM_API_KEYS",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKENS",
+        "ANTHROPIC_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    captured: dict[str, object] = {}
+
+    class FakeAgentRunner:
+        def __init__(self, **kwargs):
+            captured["runner_kwargs"] = kwargs
+
+        async def run(self, prompt, timeout_override=None):
+            captured["prompt"] = prompt
+            captured["timeout_override"] = timeout_override
+            return AgentResult(success=True, output="ok")
+
+    def fail_runtime_env_vars():
+        raise AssertionError("runtime_env_vars should not be called")
+
+    monkeypatch.setattr(service, "AgentRunner", FakeAgentRunner)
+    monkeypatch.setattr(service, "runtime_env_vars", fail_runtime_env_vars)
+
+    result = asyncio.run(
+        service._run_capture_agent(
+            "capture login",
+            run_dir=tmp_path,
+            timeout_seconds=5,
+            session_id="session-claude-code-oauth",
+            runtime_env={
+                "QUORVEX_LLM_PROVIDER": "anthropic",
+                "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+                "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token-1234567890",
+                "QUORVEX_LLM_TOOL_DEEP_MODEL": "claude-sonnet-4-20250514",
+            },
+        )
+    )
+
+    assert result.success is True
+    assert captured["timeout_override"] == 5
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-1234567890"
+    assert os.environ.get("QUORVEX_LLM_API_KEY", "") == ""
+    assert os.environ.get("ANTHROPIC_AUTH_TOKEN", "") == ""
+
+
+def test_run_capture_agent_missing_claude_code_oauth_has_actionable_message(
+    tmp_path, monkeypatch
+):
+    from orchestrator.services import browser_auth_sessions as service
+
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "QUORVEX_LLM_API_KEYS",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKENS",
+        "ANTHROPIC_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    try:
+        asyncio.run(
+            service._run_capture_agent(
+                "capture login",
+                run_dir=tmp_path,
+                timeout_seconds=5,
+                session_id="session-no-claude-code-token",
+                runtime_env={
+                    "QUORVEX_LLM_PROVIDER": "anthropic",
+                    "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+                    "QUORVEX_LLM_TOOL_DEEP_MODEL": "claude-sonnet-4-20250514",
+                },
+            )
+        )
+    except BrowserAuthSessionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected BrowserAuthSessionError")
+
+    assert "Claude Code OAuth token is not configured" in message
+    assert "not visible to the backend" in message
+    assert "LLM provider API key is not configured" not in message
 
 
 def test_run_capture_agent_missing_zai_key_has_actionable_message(
