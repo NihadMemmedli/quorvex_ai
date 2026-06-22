@@ -99,6 +99,15 @@ ASSISTANT_RUNTIME_ALIASES = {
     "openai_sdk": "openai",
     "openai-sdk": "openai",
 }
+PERSISTED_ENV_SECRET_KEYS = {
+    "QUORVEX_LLM_API_KEY",
+    "QUORVEX_LLM_API_KEYS",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKENS",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+}
 
 
 def _env_file_path() -> Path:
@@ -142,40 +151,16 @@ def _ensure_default_project(session: Session) -> Project:
 
 
 def _write_env_file(env_vars: dict):
-    """Write key-value pairs to .env file, preserving comments and structure"""
+    """Write non-secret runtime settings to the env file.
+
+    Credential values are persisted through encrypted Settings rows and applied to
+    the current process environment, but they are not written back to clear-text
+    env files.
+    """
     env_file = _env_file_path()
     env_file.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    existing_keys = set()
-
-    # Read existing file to preserve structure and comments
-    if env_file.exists():
-        # codeql[py/clear-text-storage-sensitive-data]
-        with open(env_file) as f:
-            for line in f:
-                stripped = line.strip()
-                # Keep comments and empty lines as-is
-                if not stripped or stripped.startswith("#"):
-                    lines.append(line.rstrip("\n"))
-                    continue
-                if "=" in stripped:
-                    key = stripped.split("=", 1)[0].strip()
-                    existing_keys.add(key)
-                    # Update if we have a new value for this key
-                    if key in env_vars:
-                        lines.append(f"{key}={env_vars[key]}")
-                    else:
-                        lines.append(line.rstrip("\n"))
-                else:
-                    lines.append(line.rstrip("\n"))
-
-    # Add any new keys that weren't in the file
-    for key, value in env_vars.items():
-        if key not in existing_keys:
-            lines.append(f"{key}={value}")
-
-    with open(env_file, "w") as f:
-        f.write("\n".join(lines) + "\n")
+    lines = [f"{key}={value}" for key, value in env_vars.items() if key not in PERSISTED_ENV_SECRET_KEYS]
+    env_file.write_text("\n".join(lines) + "\n")
 
 
 def _mask_api_key(api_key: str | None) -> str:

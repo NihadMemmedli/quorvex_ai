@@ -7,7 +7,6 @@ server prefix from the current `.mcp.json`.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -216,36 +215,6 @@ def normalize_agent_profile_name(agent_name: str | None) -> str | None:
     return normalized if normalized in AGENT_TOOL_PROFILES else None
 
 
-def _mcp_server_configured(
-    server_name: str,
-    *,
-    mcp_config_dir: Path | str | None = None,
-    mcp_config_path: Path | str | None = None,
-) -> bool:
-    root = Path(mcp_config_dir) if mcp_config_dir is not None else Path.cwd()
-    root = root.expanduser().resolve(strict=False)
-
-    path = Path(mcp_config_path).expanduser() if mcp_config_path else root / ".mcp.json"
-    if not path.is_absolute():
-        path = root / path
-    if path.is_dir():
-        path = path / ".mcp.json"
-    path = path.resolve(strict=False)
-    if path.name != ".mcp.json":
-        return False
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-
-    try:
-        config = json.loads(path.read_text())
-    except Exception:
-        return False
-    servers = config.get("mcpServers")
-    return isinstance(servers, dict) and server_name in servers
-
-
 def get_agent_allowed_tools(
     agent_name: str | None,
     *,
@@ -263,20 +232,16 @@ def get_agent_allowed_tools(
         mcp_config_dir=mcp_config_dir,
         mcp_config_path=mcp_config_path,
     )
-    if profile_name in {"playwright-test-planner", "playwright-test-healer"} and _mcp_server_configured(
-        "quorvex-agent",
-        mcp_config_dir=mcp_config_dir,
-        mcp_config_path=mcp_config_path,
-    ):
-        allowed_tools.extend(
-            build_mcp_allowed_tools(
-                "quorvex-agent",
-                [],
-                list(NOTE_MCP_TOOLS),
-                mcp_config_dir=mcp_config_dir,
-                mcp_config_path=mcp_config_path,
-            )
+    if profile_name in {"playwright-test-planner", "playwright-test-healer"}:
+        note_tools = build_mcp_allowed_tools(
+            "quorvex-agent",
+            [],
+            list(NOTE_MCP_TOOLS),
+            mcp_config_dir=mcp_config_dir,
+            mcp_config_path=mcp_config_path,
         )
+        if note_tools and note_tools[0].startswith("mcp__quorvex-agent__"):
+            allowed_tools.extend(note_tools)
     return allowed_tools
 
 

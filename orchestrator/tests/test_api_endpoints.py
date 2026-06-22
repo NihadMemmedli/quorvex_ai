@@ -3082,9 +3082,9 @@ class TestAISettings:
         assert fake_rotator.initialized is True
 
         env_vars = settings_api._read_env_file()
-        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "new-key-123456"
-        assert env_vars["ANTHROPIC_API_KEY"] == "new-key-123456"
-        assert env_vars["ANTHROPIC_AUTH_TOKENS"] == ""
+        assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+        assert "ANTHROPIC_API_KEY" not in env_vars
+        assert "ANTHROPIC_AUTH_TOKENS" not in env_vars
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
         assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
         assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"
@@ -3157,11 +3157,11 @@ class TestAISettings:
         env_vars = settings_api._read_env_file()
         assert env_vars["QUORVEX_LLM_PROVIDER"] == "anthropic"
         assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "claude_code_subscription"
-        assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-123456"
-        assert env_vars["QUORVEX_LLM_API_KEY"] == ""
-        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == ""
-        assert env_vars["ANTHROPIC_API_KEY"] == ""
-        assert env_vars["ANTHROPIC_AUTH_TOKENS"] == ""
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+        assert "ANTHROPIC_API_KEY" not in env_vars
+        assert "ANTHROPIC_AUTH_TOKENS" not in env_vars
 
         runtime_response = client.get(
             "/settings/runtime-chat",
@@ -3189,8 +3189,9 @@ class TestAISettings:
         assert zai_response.status_code == 200
         env_vars = settings_api._read_env_file()
         assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "api_key"
-        assert env_vars["QUORVEX_LLM_API_KEY"] == "new-zai-key"
-        assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["QUORVEX_LLM_API_KEY"] == "new-zai-key"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
 
         switch_back_response = client.post(
             "/settings",
@@ -3205,8 +3206,9 @@ class TestAISettings:
         assert switch_back_response.status_code == 200
         env_vars = settings_api._read_env_file()
         assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "claude_code_subscription"
-        assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-123456"
-        assert env_vars["QUORVEX_LLM_API_KEY"] == ""
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-123456"
 
     def test_update_settings_masked_claude_code_token_preserves_existing_secret(self, client, tmp_path, monkeypatch):
         """Submitting a masked Claude Code token should keep the real OAuth token."""
@@ -3243,7 +3245,8 @@ class TestAISettings:
 
         assert response.status_code == 200
         env_vars = settings_api._read_env_file()
-        assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == "real-oauth-token"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-oauth-token"
         assert env_vars["ANTHROPIC_MODEL"] == "claude-sonnet-4-6"
 
     def test_claude_code_setup_token_saves_token_without_returning_raw_secret(self, client, tmp_path, monkeypatch):
@@ -3284,8 +3287,8 @@ class TestAISettings:
 
         env_vars = settings_api._read_env_file()
         assert env_vars["QUORVEX_LLM_AUTH_MODE"] == "claude_code_subscription"
-        assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == raw_token
-        assert env_vars["QUORVEX_LLM_API_KEY"] == ""
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env_vars
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
         assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == raw_token
 
         zai_response = client.post(
@@ -3299,7 +3302,8 @@ class TestAISettings:
         )
         assert zai_response.status_code == 200
         env_vars = settings_api._read_env_file()
-        assert env_vars["QUORVEX_LLM_API_KEY"] == "inactive-zai-key"
+        assert "QUORVEX_LLM_API_KEY" not in env_vars
+        assert os.environ["QUORVEX_LLM_API_KEY"] == "inactive-zai-key"
 
     def test_claude_code_setup_token_missing_cli_returns_manual_fallback(self, client, monkeypatch):
         from orchestrator.api import settings as settings_api
@@ -3453,7 +3457,8 @@ class TestAISettings:
         assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
         assert env_vars["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
         assert env_vars["QUORVEX_LLM_PROVIDER"] == "openai"
-        assert env_vars["OPENAI_API_KEY"] == "sk-openai-test"
+        assert "OPENAI_API_KEY" not in env_vars
+        assert os.environ["OPENAI_API_KEY"] == "sk-openai-test"
         assert env_vars["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
         assert not any(key.startswith("HERMES_") for key in env_vars)
         assert not (tmp_path / "data" / "hermes").exists()
@@ -3555,8 +3560,10 @@ class TestAISettings:
 
         assert response.status_code == 200
         env_vars = settings_api._read_env_file()
-        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
-        assert env_vars["ANTHROPIC_API_KEY"] == "real-existing-key"
+        assert "ANTHROPIC_AUTH_TOKEN" not in env_vars
+        assert "ANTHROPIC_API_KEY" not in env_vars
+        assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
+        assert os.environ["ANTHROPIC_API_KEY"] == "real-existing-key"
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
         assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
         assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"

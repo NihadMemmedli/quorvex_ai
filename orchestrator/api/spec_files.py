@@ -152,23 +152,25 @@ def get_try_code_path_fast(spec_path: Path, base_dir: Path = BASE_DIR) -> str | 
     if not _SAFE_TEST_STEM_RE.fullmatch(stem):
         return None
     stem_slug = stem.replace("_", "-")
-    candidates = [
-        f"tests/generated/{stem}.spec.ts",
-        f"tests/generated/{stem_slug}.spec.ts",
-        f"tests/templates/{stem}.spec.ts",
-        f"tests/templates/{stem_slug}.spec.ts",
-        f"tests/{stem}.spec.ts",
-    ]
+    candidate_names = {f"{stem}.spec.ts", f"{stem_slug}.spec.ts"}
+    roots = (
+        base_dir / "tests" / "generated",
+        base_dir / "tests" / "templates",
+        base_dir / "tests",
+    )
 
-    base_dir = base_dir.resolve()
-    for c in candidates:
-        candidate = (base_dir / c).resolve()
+    base_dir = base_dir.resolve(strict=False)
+    for root in roots:
+        root = root.resolve(strict=False)
         try:
-            candidate.relative_to(base_dir)
+            root.relative_to(base_dir)
         except ValueError:
             continue
-        if candidate.exists():
-            return str(candidate)
+        if not root.is_dir():
+            continue
+        for candidate in root.glob("*.spec.ts"):
+            if candidate.name in candidate_names:
+                return str(candidate)
     return None
 
 

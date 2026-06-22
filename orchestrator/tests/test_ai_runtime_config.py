@@ -659,7 +659,8 @@ def test_settings_update_persists_openai_assistant_runtime(tmp_path, monkeypatch
     assert response["settings"]["agent_runtime"] == "claude_sdk"
     assert response["settings"]["assistant_runtime"] == "openai"
     assert env_vars["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
-    assert env_vars["OPENAI_API_KEY"] == "sk-openai-test"
+    assert "OPENAI_API_KEY" not in env_vars
+    assert os.environ["OPENAI_API_KEY"] == "sk-openai-test"
     assert env_vars["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
     assert not any(key.startswith("HERMES_") for key in env_vars)
     assert not (tmp_path / "data" / "hermes").exists()
