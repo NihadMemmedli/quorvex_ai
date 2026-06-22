@@ -99,15 +99,24 @@ ASSISTANT_RUNTIME_ALIASES = {
     "openai_sdk": "openai",
     "openai-sdk": "openai",
 }
-PERSISTED_ENV_SECRET_KEYS = {
-    "QUORVEX_LLM_API_KEY",
-    "QUORVEX_LLM_API_KEYS",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKENS",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "OPENAI_API_KEY",
-}
+PERSISTED_ENV_FILE_KEYS = (
+    "QUORVEX_LLM_PROVIDER",
+    "QUORVEX_LLM_AUTH_MODE",
+    "QUORVEX_LLM_BASE_URL",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_MODEL",
+    "OPENAI_MODEL_ID",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_CHAT_MODEL",
+    "OPENAI_CHAT_MODEL",
+    "EMBEDDING_MODEL",
+    "QUORVEX_AGENT_RUNTIME",
+    "QUORVEX_ASSISTANT_RUNTIME",
+    *CANONICAL_MODEL_ENV.values(),
+)
 
 
 def _env_file_path() -> Path:
@@ -159,7 +168,11 @@ def _write_env_file(env_vars: dict):
     """
     env_file = _env_file_path()
     env_file.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key}={value}" for key, value in env_vars.items() if key not in PERSISTED_ENV_SECRET_KEYS]
+    lines = []
+    for key in PERSISTED_ENV_FILE_KEYS:
+        value = env_vars.get(key)
+        if value is not None:
+            lines.append(f"{key}={value}")
     env_file.write_text("\n".join(lines) + "\n")
 
 
