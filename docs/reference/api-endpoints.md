@@ -106,6 +106,7 @@ Source: `orchestrator/api/runs.py`
 | POST | `/runs/{id}/stop` | Stop a running or queued test | Optional |
 | POST | `/runs/{id}/progress` | Update run stage progress (called by CLI) | Optional |
 | POST | `/runs/{id}/agentic-summary` | Generate or refresh an agentic run summary | Optional |
+| GET | `/runs/{id}/events/stream` | Stream test-run events over SSE | Optional |
 | GET | `/runs/{id}/log/stream` | Stream execution log via SSE | Optional |
 | POST | `/runs/bulk` | Create a regression batch of runs | Optional |
 
@@ -302,6 +303,7 @@ Source: `orchestrator/api/agent_run_launch.py`; exploratory/spec generation: `or
 | GET | `/api/agents/runs/{id}` | Get agent run details | Optional |
 | GET | `/api/agents/runs/{id}/events` | List persisted lifecycle events for an agent run | Optional |
 | GET | `/api/agents/runs/{id}/events/stream` | Stream agent run lifecycle events over SSE | Optional |
+| GET | `/api/agents/runs/{id}/notes` | List durable or recovered notes for an agent run | Optional |
 | GET | `/api/agents/runs/{id}/trace` | Get an agent run trace bundle | Optional |
 | GET | `/api/agents/runs/{id}/trace/spans` | List spans recorded for an agent run trace | Optional |
 | GET | `/api/agents/runs/{id}/trace/export` | Export an agent run trace bundle | Optional |
@@ -373,6 +375,7 @@ Source: `orchestrator/api/settings.py`
 |--------|------|-------------|---------------|
 | GET | `/settings` | Get current settings (API key masked) | Optional |
 | POST | `/settings` | Update settings (writes to .env file) | Optional |
+| POST | `/settings/claude-code/setup-token` | Generate and save a Claude Code OAuth token when the CLI is available | Optional |
 | POST | `/settings/test-connection` | Test AI provider settings without saving | Optional |
 
 ## Execution Settings
@@ -862,6 +865,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/agents/runs/{id}/coding/reject` | `orchestrator/api/agent_coding_patch.py` |
 | GET | `/api/agents/runs/{id}/events` | `orchestrator/api/agent_run_observability.py` |
 | GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/notes` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/agent_run_control.py` |
 | GET | `/api/agents/runs/{id}/report` | `orchestrator/api/agent_reports.py` |
 | POST | `/api/agents/runs/{id}/retry` | `orchestrator/api/agent_run_control.py` |
@@ -1003,6 +1007,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/autopilot/{session_id}` | `orchestrator/api/autopilot.py` |
 | POST | `/autopilot/{session_id}/answer` | `orchestrator/api/autopilot.py` |
 | POST | `/autopilot/{session_id}/cancel` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/checklist` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/checklist/stream` | `orchestrator/api/autopilot.py` |
 | GET | `/autopilot/{session_id}/live` | `orchestrator/api/autopilot.py` |
 | POST | `/autopilot/{session_id}/pause` | `orchestrator/api/autopilot.py` |
 | GET | `/autopilot/{session_id}/phases` | `orchestrator/api/autopilot.py` |
@@ -1332,6 +1338,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | DELETE | `/runs/{id}` | `orchestrator/api/runs.py` |
 | GET | `/runs/{id}` | `orchestrator/api/runs.py` |
 | POST | `/runs/{id}/agentic-summary` | `orchestrator/api/runs.py` |
+| GET | `/runs/{id}/events/stream` | `orchestrator/api/runs.py` |
 | GET | `/runs/{id}/log/stream` | `orchestrator/api/runs.py` |
 | POST | `/runs/{id}/progress` | `orchestrator/api/runs.py` |
 | POST | `/runs/{id}/stop` | `orchestrator/api/runs.py` |
@@ -1370,6 +1377,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/security-testing/targets` | `orchestrator/api/security_testing.py` |
 | GET | `/settings` | `orchestrator/api/settings.py` |
 | POST | `/settings` | `orchestrator/api/settings.py` |
+| POST | `/settings/claude-code/setup-token` | `orchestrator/api/settings.py` |
 | POST | `/settings/test-connection` | `orchestrator/api/settings.py` |
 | GET | `/spec-metadata` | `orchestrator/api/specs.py` |
 | GET | `/spec-metadata/{spec_name}` | `orchestrator/api/specs.py` |
