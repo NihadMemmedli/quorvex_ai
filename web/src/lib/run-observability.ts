@@ -75,16 +75,16 @@ export function resolveRunHealth(run: RunObservabilityInput | null | undefined, 
   const agentProgress = health.agent_progress || run?.diagnostics?.agent_progress || null;
   const active = isRunActiveForObservability(run);
   if (active && warnings.length === 0) {
-    if (lastLogAge === null) {
+    if (lastLogAge === null && !hasRecentOutput) {
       warnings.push('No execution.log has been written while this run is active.');
-    } else if (lastLogAge > staleAfterSeconds) {
+    } else if (lastLogAge !== null && lastLogAge > staleAfterSeconds && !hasRecentOutput) {
       warnings.push(`No new execution.log output for ${formatAge(lastLogAge)}.`);
     }
     const startedActivities = health.temporal_started_activities || run?.diagnostics?.temporal?.activities?.filter((activity: any) => activity?.status === 'started') || [];
-    if (startedActivities.length > 0 && lastTemporalAge !== null && lastTemporalAge > staleAfterSeconds) {
+    if (startedActivities.length > 0 && lastTemporalAge !== null && lastTemporalAge > staleAfterSeconds && !hasRecentOutput) {
       warnings.push(`Temporal activity is started, but workflow history has not advanced for ${formatAge(lastTemporalAge)}.`);
     }
-    if (health.browser_slot_owner && lastLogAge !== null && lastLogAge > staleAfterSeconds) {
+    if (health.browser_slot_owner && lastLogAge !== null && lastLogAge > staleAfterSeconds && !hasRecentOutput) {
       warnings.push('Browser slot is still held by this run while planner/tool logs are stale.');
     }
     if (agentProgress) {
@@ -144,4 +144,14 @@ export function extractLinkedAgentRunId(value: unknown): string | null {
     return null;
   };
   return visit(value);
+}
+
+export function resolveLinkedAgentRunId(run: unknown): string | null {
+  if (!run || typeof run !== 'object') return null;
+  const record = run as Record<string, unknown>;
+  for (const key of ['linked_agent_run_id', 'linkedAgentRunId']) {
+    const candidate = record[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return extractLinkedAgentRunId(record.agentic_summary);
 }

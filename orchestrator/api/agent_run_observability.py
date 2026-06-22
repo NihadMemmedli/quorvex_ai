@@ -16,7 +16,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from utils.playwright_mcp import browser_runtime_status
 
-from . import agent_run_control, agent_run_runtime, exploration, spec_files
+from . import agent_run_control, agent_run_runtime, exploration, run_files, spec_files
 from .db import engine, get_session
 from .models_db import AgentRun, AgentRunEvent
 
@@ -27,6 +27,205 @@ AGENT_PARTIAL_STATUS = agent_run_control.AGENT_PARTIAL_STATUS
 AGENT_TERMINAL_STATUSES = agent_run_control.AGENT_TERMINAL_STATUSES
 AGENT_ACTIVE_STATUSES = agent_run_control.AGENT_ACTIVE_STATUSES
 RUNS_DIR = spec_files.RUNS_DIR
+
+
+def _agent_run_test_run_id(run: AgentRun) -> str | None:
+    if run.agent_type != "spec_generation":
+        return None
+    config = run.config or {}
+    progress = run.progress or {}
+    if config.get("source") != "test_run" and progress.get("source") != "test_run":
+        return None
+    for key in ("test_run_id", "source_run_id", "run_id"):
+        value = config.get(key) or progress.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return run.id
+
+
+def _fallback_session_activity(run: AgentRun) -> dict[str, Any] | None:
+    test_run_id = _agent_run_test_run_id(run)
+    if not test_run_id:
+        return None
+    run_dir = RUNS_DIR / test_run_id
+    if not run_dir.exists() and test_run_id != run.id:
+        run_dir = RUNS_DIR / run.id
+    if not run_dir.exists():
+        return None
+    try:
+        activity = run_files._extract_agent_session_activity(run_dir)
+    except Exception as exc:
+        logger.debug("Failed to recover session activity for agent run %s: %s", run.id, exc)
+        return None
+    if not isinstance(activity, dict):
+        return None
+    return {**activity, "test_run_id": test_run_id}
+
+
+def _synthetic_created_at(run: AgentRun) -> str:
+    value = run.updated_at or run.completed_at or run.started_at or run.created_at
+    return value.isoformat()
+
+
+def _tool_name_from_row(row: str) -> str | None:
+    text = str(row or "").strip()
+    if not text:
+        return None
+    if text.startswith("CALL "):
+        text = text[5:]
+        return text.split(" input=", 1)[0].strip() or None
+    if text.startswith(("OK ", "ERROR ")):
+        text = text.split(" ", 1)[1]
+        return text.split(" -> ", 1)[0].strip() or None
+    return None
+
+
+def _is_browser_tool(tool_name: str | None) -> bool:
+    value = str(tool_name or "")
+    return "__browser_" in value or value.startswith("mcp__playwright")
+
+
+def _synthetic_agent_notes(run: AgentRun, after_sequence: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    activity = _fallback_session_activity(run)
+    if not isinstance(activity, dict):
+        return []
+    notes = activity.get("notes") if isinstance(activity, dict) else []
+    if not isinstance(notes, list):
+        return []
+    source = str(activity.get("source") or "session_jsonl")
+    created_at = _synthetic_created_at(run)
+    rows: list[dict[str, Any]] = []
+    for index, note in enumerate(notes, start=1):
+        sequence = index
+        if sequence <= after_sequence:
+            continue
+        body = str(note or "").strip()
+        if not body:
+            continue
+        title = body.splitlines()[0].strip()[:120] or "Recovered agent note"
+        rows.append(
+            {
+                "id": f"synthetic-note-{run.id}-{sequence}",
+                "project_id": run.project_id,
+                "run_id": run.id,
+                "agent_task_id": run.agent_task_id,
+                "sequence": sequence,
+                "note_type": "observation",
+                "level": "info",
+                "title": title,
+                "body": body,
+                "source": "session_jsonl",
+                "tags": ["recovered"],
+                "confidence": None,
+                "url": None,
+                "tool_name": None,
+                "artifact_path": source,
+                "actionable": False,
+                "related_event_sequence": None,
+                "related_trace_span_id": None,
+                "payload": {
+                    "source": "session_jsonl",
+                    "artifact_source": source,
+                    "test_run_id": activity.get("test_run_id"),
+                    "synthetic": True,
+                },
+                "created_at": created_at,
+                "synthetic": True,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _synthetic_agent_events(
+    run: AgentRun,
+    *,
+    after_sequence: int = 0,
+    event_type: str | None = None,
+    level: str | None = None,
+    limit: int = 200,
+    sequence_offset: int = 0,
+) -> list[dict[str, Any]]:
+    activity = _fallback_session_activity(run)
+    if not isinstance(activity, dict):
+        return []
+    tool_rows = activity.get("tool_rows") if isinstance(activity, dict) else []
+    if not isinstance(tool_rows, list):
+        return []
+    source = str(activity.get("source") or "session_jsonl")
+    created_at = _synthetic_created_at(run)
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(tool_rows, start=1):
+        sequence = sequence_offset + index
+        if sequence <= after_sequence:
+            continue
+        message = str(row or "").strip()
+        if not message:
+            continue
+        tool_name = _tool_name_from_row(message)
+        recovered_type = "browser_action" if _is_browser_tool(tool_name) else "tool_call"
+        recovered_level = "error" if message.startswith("ERROR ") else "info"
+        if event_type and recovered_type != event_type:
+            continue
+        if level and recovered_level != level:
+            continue
+        rows.append(
+            {
+                "id": f"synthetic-event-{run.id}-{sequence}",
+                "project_id": run.project_id,
+                "run_id": run.id,
+                "agent_task_id": run.agent_task_id,
+                "temporal_workflow_id": run.temporal_workflow_id,
+                "temporal_run_id": run.temporal_run_id,
+                "sequence": sequence,
+                "event_type": recovered_type,
+                "level": recovered_level,
+                "message": message,
+                "payload": {
+                    "source": "session_jsonl",
+                    "artifact_source": source,
+                    "test_run_id": activity.get("test_run_id"),
+                    "tool_name": tool_name,
+                    "synthetic": True,
+                },
+                "idempotency_key": None,
+                "created_at": created_at,
+                "synthetic": True,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _session_activity_progress(run: AgentRun) -> dict[str, Any]:
+    activity = _fallback_session_activity(run)
+    progress = activity.get("progress") if isinstance(activity, dict) else None
+    if not isinstance(progress, dict):
+        return {}
+    tool_rows = activity.get("tool_rows") if isinstance(activity.get("tool_rows"), list) else []
+    recent_tools: list[dict[str, Any]] = []
+    for index, row in enumerate(tool_rows[-8:], start=max(1, len(tool_rows) - 7)):
+        tool_name = _tool_name_from_row(str(row))
+        recent_tools.append(
+            {
+                "sequence": index,
+                "tool_name": tool_name,
+                "label": _short_tool_name(tool_name or str(row)),
+                "message": str(row),
+                "source": "session_jsonl",
+                "synthetic": True,
+            }
+        )
+    return {
+        **progress,
+        "source": "session_jsonl",
+        "artifact_source": activity.get("source"),
+        "test_run_id": activity.get("test_run_id"),
+        "recent_tools": recent_tools,
+        "synthetic": True,
+    }
 
 
 def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
@@ -181,6 +380,8 @@ async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
     from orchestrator.config import settings as app_settings
     from orchestrator.services.temporal_client import TemporalUnavailableError, get_agent_run_temporal_diagnostics
 
+    progress = run.progress or {}
+    task_queue = progress.get("task_queue") or app_settings.temporal_workflow_task_queue
     workflow_url = None
     if app_settings.temporal_ui_url and run.temporal_workflow_id:
         workflow_url = (
@@ -193,7 +394,7 @@ async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
         "temporal_ui_url": app_settings.temporal_ui_url,
         "temporal_ui_workflow_url": workflow_url,
         "temporal_namespace": app_settings.temporal_namespace,
-        "task_queue": app_settings.temporal_workflow_task_queue,
+        "task_queue": task_queue,
         "workflow_type": "AgentRunWorkflow",
         "available": False,
         "workflow_status": None,
@@ -205,7 +406,14 @@ async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
         payload["error"] = "No Temporal workflow id recorded for this agent run."
         return payload
     try:
-        return {**payload, **await get_agent_run_temporal_diagnostics(run.temporal_workflow_id, run.temporal_run_id)}
+        return {
+            **payload,
+            **await get_agent_run_temporal_diagnostics(
+                run.temporal_workflow_id,
+                run.temporal_run_id,
+                task_queue=str(task_queue) if task_queue else None,
+            ),
+        }
     except TemporalUnavailableError as exc:
         payload["error"] = str(exc)
     except Exception as exc:
@@ -236,7 +444,21 @@ def _agent_run_health(run: AgentRun, session: Session | None = None) -> dict[str
     ).one()
 
     progress = run.progress or {}
-    latest_event_response = None
+    if int(tool_count or 0) == 0:
+        synthetic_events = _synthetic_agent_events(run, limit=500, sequence_offset=int(event_count or 0))
+        synthetic_tool_count = len(synthetic_events)
+        if synthetic_tool_count:
+            event_count = int(event_count or 0) + synthetic_tool_count
+            tool_count = synthetic_tool_count
+            error_count = int(error_count or 0) + len([event for event in synthetic_events if event.get("level") == "error"])
+            if latest_event is None:
+                latest_event_response = synthetic_events[-1]
+            else:
+                latest_event_response = None
+        else:
+            latest_event_response = None
+    else:
+        latest_event_response = None
     if latest_event:
         from orchestrator.services.agent_run_events import event_to_response
 
@@ -263,6 +485,42 @@ def _agent_run_has_browser_tools(agent_type: str, config: dict[str, Any]) -> boo
 
 def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
     progress = run.progress or {}
+    recovered_progress = _session_activity_progress(run)
+    if recovered_progress:
+        current_tool_calls = _coerce_progress_int(progress.get("tool_calls"))
+        current_browser_tool_calls = _coerce_progress_int(progress.get("browser_tool_calls"))
+        recovered_tool_calls = _coerce_progress_int(recovered_progress.get("tool_calls"))
+        recovered_browser_tool_calls = _coerce_progress_int(recovered_progress.get("browser_tool_calls"))
+        has_recent_tools = bool(progress.get("recent_tools"))
+        has_recovered_recent_tools = bool(recovered_progress.get("recent_tools"))
+        if (
+            recovered_tool_calls > current_tool_calls
+            or recovered_browser_tool_calls > current_browser_tool_calls
+            or (has_recovered_recent_tools and not has_recent_tools)
+        ):
+            progress = {
+                **progress,
+                **{
+                    key: value
+                    for key, value in recovered_progress.items()
+                    if key
+                    in {
+                        "artifact_source",
+                        "test_run_id",
+                        "recent_tools",
+                        "synthetic",
+                        "messages_received",
+                        "text_blocks_received",
+                        "completed_tool_calls",
+                        "pending_tool_calls",
+                        "output_chars",
+                    }
+                },
+                "source": progress.get("source") or recovered_progress.get("source"),
+                "phase": progress.get("phase") or recovered_progress.get("phase"),
+                "tool_calls": max(current_tool_calls, recovered_tool_calls),
+                "browser_tool_calls": max(current_browser_tool_calls, recovered_browser_tool_calls),
+            }
     if _agent_run_has_browser_tools(run.agent_type, run.config):
         progress = {**browser_runtime_status(), **progress}
     progress = _normalize_agent_run_progress(progress)
@@ -281,6 +539,12 @@ def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[
         "temporal_run_id": run.temporal_run_id,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "updated_at": run.updated_at.isoformat() if getattr(run, "updated_at", None) else None,
+        "state": run.state,
+        "contract_status": run.contract_status,
+        "finalization_status": run.finalization_status,
+        "reporter_status": run.reporter_status,
+        "verifier_status": run.verifier_status,
         "artifacts": _collect_agent_run_artifacts(run.id)
         if run.agent_type in ("exploratory", "custom", "spec_generation")
         else [],
@@ -459,6 +723,10 @@ def _serialize_agent_run_summary_row(row: Any) -> dict[str, Any]:
         project_id,
         config_json,
         progress_json,
+        contract_status,
+        finalization_status,
+        reporter_status,
+        verifier_status,
     ) = row
     config = _compact_agent_run_config(_safe_json_dict(config_json))
     progress = _normalize_agent_run_progress(_safe_json_dict(progress_json))
@@ -474,6 +742,10 @@ def _serialize_agent_run_summary_row(row: Any) -> dict[str, Any]:
         "config": config,
         "progress": progress,
         "summary": _compact_agent_run_summary(progress),
+        "contract_status": contract_status,
+        "finalization_status": finalization_status,
+        "reporter_status": reporter_status,
+        "verifier_status": verifier_status,
     }
 
 
@@ -542,6 +814,10 @@ def list_agent_runs(
             AgentRun.project_id,
             AgentRun.config_json,
             AgentRun.progress_json,
+            AgentRun.contract_status,
+            AgentRun.finalization_status,
+            AgentRun.reporter_status,
+            AgentRun.verifier_status,
         )
         .where(*filters)
         .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
@@ -606,7 +882,60 @@ def list_agent_run_events_api(
         limit=limit,
         session=session,
     )
-    return [event_to_response(event) for event in events]
+    durable_responses = [event_to_response(event) for event in events]
+    durable_tool_count = session.exec(
+        select(func.count(AgentRunEvent.id)).where(
+            AgentRunEvent.run_id == run.id,
+            AgentRunEvent.event_type.in_(["tool_call", "browser_action"]),
+        )
+    ).one()
+    if int(durable_tool_count or 0) > 0:
+        return durable_responses
+    if event_type and event_type not in {"tool_call", "browser_action"}:
+        return durable_responses
+    max_sequence = session.exec(select(func.max(AgentRunEvent.sequence)).where(AgentRunEvent.run_id == run.id)).one()
+    synthetic_events = _synthetic_agent_events(
+        run,
+        after_sequence=after_sequence,
+        event_type=event_type,
+        level=level,
+        limit=max(1, limit - len(durable_responses)) if durable_responses else limit,
+        sequence_offset=int(max_sequence or 0),
+    )
+    if not synthetic_events:
+        return durable_responses
+    return sorted([*durable_responses, *synthetic_events], key=lambda item: int(item.get("sequence") or 0))[:limit]
+
+
+@router.get("/api/agents/runs/{id}/notes")
+def list_agent_run_notes_api(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    from orchestrator.services.agent_native_runs import list_agent_run_notes, serialize_agent_run_note
+
+    notes = list_agent_run_notes(
+        run_id=run.id,
+        after_sequence=after_sequence,
+        limit=limit,
+        session=session,
+    )
+    if notes:
+        return [serialize_agent_run_note(note) for note in notes]
+    from orchestrator.api.models_db import AgentRunNote
+
+    durable_note_count = session.exec(select(func.count(AgentRunNote.id)).where(AgentRunNote.run_id == run.id)).one()
+    if int(durable_note_count or 0) > 0:
+        return []
+    return _synthetic_agent_notes(run, after_sequence=after_sequence, limit=limit)
 
 
 @router.get("/api/agents/runs/{id}/events/stream")

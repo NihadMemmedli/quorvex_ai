@@ -20,11 +20,18 @@ def test_normalize_agent_runtime_defaults_and_aliases(monkeypatch):
     assert normalize_agent_runtime("hermes") == "claude_sdk"
     assert normalize_agent_runtime("hermes-agent") == "claude_sdk"
     assert normalize_agent_runtime("hermes_agent") == "claude_sdk"
-    assert normalize_agent_runtime("unknown") == "claude_sdk"
+
+    with pytest.raises(ValueError, match="Unsupported agent runtime"):
+        normalize_agent_runtime("unknown")
 
 
 def test_runtime_resolver_coerces_legacy_hermes_to_claude_sdk():
     assert isinstance(get_agent_runtime("hermes"), ClaudeAgentSdkRuntime)
+
+
+def test_runtime_resolver_rejects_unknown_runtime():
+    with pytest.raises(ValueError, match="Unsupported agent runtime"):
+        get_agent_runtime("unknown")
 
 
 def test_agent_runner_queue_task_kwargs_preserve_runtime_adapter_fields(monkeypatch):

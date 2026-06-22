@@ -225,6 +225,7 @@ interface AutoPilotLiveState {
     updated_at: string | null;
     browser_runtime: string | null;
     live_view_available: boolean;
+    suspected_browser_dialog_block?: boolean;
     runtime_message: string | null;
     vnc_url: string | null;
     display_diagnostics: {
@@ -2144,6 +2145,7 @@ export default function AutoPilotPage() {
                             runtimeMessage={liveState?.runtime_message}
                             vncUrl={liveState?.vnc_url}
                             displayDiagnostics={liveState?.display_diagnostics}
+                            suspectedBrowserDialogBlock={liveState?.suspected_browser_dialog_block === true}
                         />
 
                         <div style={{

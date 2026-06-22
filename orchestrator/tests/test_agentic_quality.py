@@ -415,6 +415,190 @@ def test_prepare_run_browser_context_detects_run_local_storage_state(tmp_path: P
     assert pipeline.native_healer.cwd == tmp_path
 
 
+def test_prepare_run_browser_context_sets_absolute_agent_cwd(tmp_path: Path, monkeypatch):
+    pipeline = object.__new__(FullNativePipeline)
+
+    class Agent:
+        cwd = None
+        session_dir = None
+
+    pipeline.native_planner = Agent()
+    pipeline.native_generator = Agent()
+    pipeline.native_healer = Agent()
+    monkeypatch.chdir(tmp_path)
+    relative_run_dir = Path("runs") / "relative-native"
+
+    pipeline.prepare_run_browser_context(run_dir=relative_run_dir)
+
+    expected = (tmp_path / relative_run_dir).resolve()
+    assert pipeline.native_planner.cwd == expected
+    assert pipeline.native_planner.session_dir == expected
+    assert pipeline.native_generator.cwd == expected
+    assert pipeline.native_healer.cwd == expected
+
+
+def test_prepare_native_run_writes_run_local_seed_spec(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+
+    class Agent:
+        env_vars = {}
+        cwd = None
+        session_dir = None
+
+    pipeline.native_planner = Agent()
+    pipeline.native_generator = Agent()
+    pipeline.native_healer = Agent()
+    pipeline.test_data_execution_context = {}
+    pipeline.test_data_env_vars = {}
+    pipeline._load_browser_auth_context = lambda: {}
+    pipeline.prepare_run_browser_context = lambda **_kwargs: {}
+    pipeline._resolve_includes = lambda content, *_args, **_kwargs: content
+    pipeline._resolve_test_data_execution_context = lambda *_args, **_kwargs: {}
+    pipeline._write_test_data_fixture_file = lambda *_args, **_kwargs: None
+    pipeline._apply_test_data_execution_context = lambda *_args, **_kwargs: None
+    pipeline._log_test_data_resolution_context = lambda *_args, **_kwargs: None
+    pipeline._log_test_data_fixture_context = lambda *_args, **_kwargs: None
+    pipeline._write_run_metrics = lambda *_args, **_kwargs: {}
+    pipeline._extract_credentials = lambda *_args, **_kwargs: None
+    pipeline._extract_login_url = lambda *_args, **_kwargs: None
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.test/dashboard\n")
+    run_dir = tmp_path / "run"
+
+    preparation = pipeline._prepare_native_run(
+        spec_path=str(spec),
+        run_dir=run_dir,
+        browser="chromium",
+        hybrid_healing=False,
+        max_iterations=1,
+        skip_planning=False,
+        existing_test_path=None,
+        force_api=False,
+        storage_state_path=None,
+        browser_auth_context=None,
+    )
+
+    seed = run_dir / "tests" / "seed.spec.ts"
+    assert preparation.context is not None
+    assert seed.exists()
+    content = seed.read_text()
+    assert 'const targetUrl = "https://example.test/dashboard";' in content
+    assert "page.on('dialog'" in content
+    assert "Browser dialog auto-accepted" in content
+
+
+def test_prepare_native_run_fails_when_seed_is_outside_configured_test_dir(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+
+    class Agent:
+        env_vars = {}
+        cwd = None
+        session_dir = None
+
+    pipeline.native_planner = Agent()
+    pipeline.native_generator = Agent()
+    pipeline.native_healer = Agent()
+    pipeline.test_data_execution_context = {}
+    pipeline.test_data_env_vars = {}
+    pipeline._load_browser_auth_context = lambda: {}
+
+    def fake_prepare_run_browser_context(**kwargs):
+        run_dir = kwargs["run_dir"]
+        (run_dir / "playwright.config.ts").write_text(
+            "export default { testDir: '/app/tests', testMatch: ['seed.spec.ts'] };\n"
+        )
+        return {"mcp_config_path": str(run_dir / ".mcp.json")}
+
+    pipeline.prepare_run_browser_context = fake_prepare_run_browser_context
+    pipeline._resolve_includes = lambda content, *_args, **_kwargs: content
+    pipeline._resolve_test_data_execution_context = lambda *_args, **_kwargs: {}
+    pipeline._write_test_data_fixture_file = lambda *_args, **_kwargs: None
+    pipeline._apply_test_data_execution_context = lambda *_args, **_kwargs: None
+    pipeline._log_test_data_resolution_context = lambda *_args, **_kwargs: None
+    pipeline._log_test_data_fixture_context = lambda *_args, **_kwargs: None
+    pipeline._write_run_metrics = lambda *_args, **_kwargs: {}
+    pipeline._extract_credentials = lambda *_args, **_kwargs: None
+    pipeline._extract_login_url = lambda *_args, **_kwargs: None
+    pipeline._write_pipeline_error = lambda *_args, **_kwargs: None
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.test/dashboard\n")
+
+    preparation = pipeline._prepare_native_run(
+        spec_path=str(spec),
+        run_dir=tmp_path / "run",
+        browser="chromium",
+        hybrid_healing=False,
+        max_iterations=1,
+        skip_planning=False,
+        existing_test_path=None,
+        force_api=False,
+        storage_state_path=None,
+        browser_auth_context=None,
+    )
+
+    assert preparation.context is None
+    assert preparation.result is not None
+    assert preparation.result["stage"] == "playwright_seed_preflight"
+    assert "outside configured Playwright testDir" in preparation.result["error"]
+
+
+def test_extract_login_url_does_not_guess_generic_login_path():
+    pipeline = object.__new__(FullNativePipeline)
+
+    login_url = pipeline._extract_login_url(
+        "Log in before checking My Trips.",
+        "https://pre.wetravel.to/user/my_trips?view=List",
+    )
+
+    assert login_url is None
+
+
+def test_extract_login_url_prefers_browser_auth_context():
+    pipeline = object.__new__(FullNativePipeline)
+
+    login_url = pipeline._extract_login_url(
+        "Login URL: https://pre.wetravel.to/login",
+        "https://pre.wetravel.to/user/my_trips?view=List",
+        auth_context={"login_url": "https://pre.wetravel.to/users/sign_in"},
+    )
+
+    assert login_url == "https://pre.wetravel.to/users/sign_in"
+
+
+def test_generated_preflight_lists_run_local_test(monkeypatch, tmp_path: Path):
+    run_dir = tmp_path / "run"
+    test_path = run_dir / "tests" / "generated" / "checkout.spec.ts"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('checkout', async ({ page }) => { await expect(page).toHaveURL(/example/); });\n"
+    )
+    (run_dir / "playwright.config.ts").write_text("export default {};\n")
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.generated_preflight_list_enabled = True
+    pipeline.test_data_env_vars = {}
+    captured: dict[str, str] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0, stdout="Listing tests", stderr="")
+
+    monkeypatch.setattr(full_native_pipeline.subprocess, "run", fake_run)
+
+    error = pipeline._validate_generated_test_file(
+        test_path=test_path,
+        run_dir=run_dir,
+        browser="chromium",
+        test_type="standard",
+    )
+
+    assert error is None
+    assert f"npx playwright test --list '{test_path}'" in captured["cmd"]
+    assert f"--config {run_dir}/playwright.config.ts" in captured["cmd"]
+
+
 class _FakeGenerator:
     async def generate_test(self, spec_path, target_url=None, output_name=None, design_context=None, **kwargs):
         path = Path(spec_path).parent / f"{output_name or 'generated'}.spec.ts"
@@ -485,6 +669,53 @@ def _pipeline_with_results(results: list[PipelineTestResult], tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_healing_only_materializes_reused_test_before_execution(tmp_path: Path):
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.test\n1. Verify page")
+    old_test = tmp_path / "runs" / "old" / "tests" / "generated" / "checkout.spec.ts"
+    old_test.parent.mkdir(parents=True)
+    original_source = (
+        "import { test, expect } from '@playwright/test';\n"
+        "test('old', async ({ page }) => { await expect(page).toHaveURL(/example/); });\n"
+    )
+    old_test.write_text(original_source)
+    run_dir = tmp_path / "runs" / "active"
+
+    pipeline = _pipeline_with_results(
+        [PipelineTestResult(passed=True, exit_code=0, output="1 passed")],
+        tmp_path,
+    )
+    pipeline.prepare_run_browser_context = lambda **_kwargs: {}
+    async def no_stability(**_kwargs):
+        return None
+
+    pipeline._verify_stability_or_harden = no_stability
+    pipeline._publish_agentic_summary = lambda _run_dir: None
+    executed_paths: list[str] = []
+
+    def fake_run_test(test_file: str, _output_dir: str, _browser: str) -> PipelineTestResult:
+        executed_paths.append(test_file)
+        Path(test_file).write_text(
+            "import { test, expect } from '@playwright/test';\n"
+            "test('local copy', async ({ page }) => { await expect(page).toHaveURL(/example/); });\n"
+        )
+        return PipelineTestResult(passed=True, exit_code=0, output="1 passed")
+
+    pipeline._run_test = fake_run_test
+
+    result = await pipeline.run(str(spec), run_dir, existing_test_path=str(old_test))
+
+    run_local_test = run_dir / "tests" / "generated" / "checkout.spec.ts"
+    assert result["success"] is True
+    assert executed_paths == [str(run_local_test)]
+    assert run_local_test.exists()
+    assert old_test.read_text() == original_source
+    export = json.loads((run_dir / "export.json").read_text())
+    assert export["testFilePath"] == str(run_local_test)
+    assert export["sourceTestFilePath"] == str(old_test.resolve())
+
+
+@pytest.mark.asyncio
 async def test_run_delegates_browser_flow_through_extracted_stages(
     monkeypatch, tmp_path: Path
 ):
@@ -505,6 +736,7 @@ async def test_run_delegates_browser_flow_through_extracted_stages(
         max_iterations=20,
         skip_planning=False,
         existing_test_path=None,
+        source_test_path=None,
         force_api=False,
         handoff_manifest_path=run_dir / "handoff_manifest.json",
         spec_content=spec.read_text(),

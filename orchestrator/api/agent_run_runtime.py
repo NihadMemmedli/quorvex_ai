@@ -119,6 +119,12 @@ async def start_agent_run_temporal_or_fail(
 
     run.temporal_workflow_id = temporal.workflow_id
     run.temporal_run_id = temporal.run_id
+    run.progress = {
+        **(run.progress or {}),
+        "task_queue": task_queue,
+        "task_queue_status": task_queue_status,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
     session.add(run)
     session.commit()
     record_agent_run_event(

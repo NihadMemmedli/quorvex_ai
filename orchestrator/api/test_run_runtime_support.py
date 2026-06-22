@@ -15,6 +15,100 @@ _STARTUP_IMPORT_FAILURE_MESSAGE = (
 )
 
 
+def ensure_linked_agent_run_for_test_run(
+    runtime: Any,
+    *,
+    session: Any,
+    run_id: str,
+    spec_name: str | None,
+    project_id: str | None,
+    status: str = "running",
+) -> Any | None:
+    """Create or update the AgentRun row that owns native test-run notes."""
+    try:
+        agent_run = session.get(runtime.AgentRun, run_id)
+        now = runtime.datetime.utcnow()
+        progress = {
+            "source": "test_run",
+            "test_run_id": run_id,
+            "spec_name": spec_name,
+            "phase": "native_test_run",
+        }
+        config = {
+            "source": "test_run",
+            "test_run_id": run_id,
+            "spec_name": spec_name,
+        }
+        if not agent_run:
+            agent_run = runtime.AgentRun(
+                id=run_id,
+                agent_type="spec_generation",
+                status=status,
+                project_id=project_id,
+                started_at=now if status in ("running", "in_progress") else None,
+            )
+            agent_run.config = config
+        else:
+            agent_run.agent_type = "spec_generation"
+            agent_run.project_id = project_id
+            agent_run.status = status
+            if not agent_run.started_at and status in ("running", "in_progress"):
+                agent_run.started_at = now
+        agent_run.progress = {**(agent_run.progress or {}), **progress}
+        agent_run.updated_at = now
+        session.add(agent_run)
+        session.commit()
+        return agent_run
+    except Exception as exc:
+        runtime.logger.debug("Could not ensure linked AgentRun for test run %s: %s", run_id, exc)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def finalize_linked_agent_run_for_test_run(
+    runtime: Any,
+    *,
+    session: Any,
+    run_id: str,
+    test_status: str | None,
+    error_message: str | None = None,
+) -> None:
+    try:
+        agent_run = session.get(runtime.AgentRun, run_id)
+        if not agent_run:
+            return
+        now = runtime.datetime.utcnow()
+        normalized = str(test_status or "").lower()
+        if normalized in {"passed", "completed", "success"}:
+            agent_status = "completed"
+        elif normalized in {"stopped", "cancelled"}:
+            agent_status = "cancelled"
+        elif normalized in {"failed", "error"}:
+            agent_status = "failed"
+        else:
+            agent_status = agent_run.status
+        agent_run.status = agent_status
+        if agent_status in {"completed", "failed", "cancelled"}:
+            agent_run.completed_at = now
+        agent_run.updated_at = now
+        agent_run.progress = {
+            **(agent_run.progress or {}),
+            "test_status": test_status,
+            **({"error_message": error_message} if error_message else {}),
+        }
+        session.add(agent_run)
+        session.commit()
+    except Exception as exc:
+        runtime.logger.debug("Could not finalize linked AgentRun for test run %s: %s", run_id, exc)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+
+
 def record_startup_import_failure(runtime: Any, run_id: str, run_dir_path: Path, *, retrying: bool) -> None:
     message = (
         f"{_STARTUP_IMPORT_FAILURE_MESSAGE} Retrying test runner."
@@ -127,6 +221,15 @@ def execute_run_task(
             runtime.logger.info(f"Run {run_id} was {run.status} before subprocess start. Aborting.")
             _append_workflow_log("Subprocess aborted before start.", status=run.status)
             return
+        if run:
+            ensure_linked_agent_run_for_test_run(
+                runtime,
+                session=session,
+                run_id=run_id,
+                spec_name=spec_name or run.spec_name,
+                project_id=project_id if project_id is not None else run.project_id,
+                status="running",
+            )
 
     cmd = [runtime.sys.executable, "orchestrator/cli.py", spec_path, "--run-dir", run_dir, "--browser", browser]
     if try_code_path:
@@ -160,6 +263,7 @@ def execute_run_task(
         config_path=playwright_config_dst,
         headless=headless,
         storage_state_path=storage_state_path,
+        agent_run_id=run_id,
     )
     runtime._write_run_browser_metadata(
         run_dir_path,
@@ -195,6 +299,7 @@ def execute_run_task(
     if project_id:
         env["PROJECT_ID"] = project_id
         env["MEMORY_PROJECT_ID"] = project_id
+    env["QUORVEX_AGENT_RUN_ID"] = run_id
     if browser_auth_context:
         env["QUORVEX_BROWSER_AUTH_CONTEXT"] = json.dumps(browser_auth_context)
     normalized_test_data_refs = runtime._normalize_request_test_data_refs(test_data_refs)
@@ -319,6 +424,14 @@ async def execute_run_task_wrapper(
                     run.queue_position = None
                     session.add(run)
                     session.commit()
+                    ensure_linked_agent_run_for_test_run(
+                        runtime,
+                        session=session,
+                        run_id=run_id,
+                        spec_name=spec_name or run.spec_name,
+                        project_id=project_id if project_id is not None else run.project_id,
+                        status="running",
+                    )
 
             if batch_id:
                 runtime.update_batch_stats(batch_id)
@@ -425,6 +538,13 @@ async def execute_run_task_wrapper(
 
                     session.add(run)
                     session.commit()
+                    finalize_linked_agent_run_for_test_run(
+                        runtime,
+                        session=session,
+                        run_id=run_id,
+                        test_status=run.status,
+                        error_message=run.error_message,
+                    )
                     runtime.logger.info(f"[{run_id}] Final DB status: {run.status}")
                     _append_workflow_log("Final DB status recorded.", status=run.status)
 

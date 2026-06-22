@@ -2,6 +2,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import Bot from 'lucide-react/dist/esm/icons/bot';
 import FileText from 'lucide-react/dist/esm/icons/file-text';
 import Play from 'lucide-react/dist/esm/icons/play';
@@ -98,6 +99,7 @@ import {
     REPORT_SEVERITY_OPTIONS,
     TOOL_RISK_PILL_STYLES,
     agentRunDisplayName,
+    agentRunPartialReason,
     agentRunResultTitle,
     agentStatusTone,
     customAgentCurrentActivity,
@@ -154,7 +156,8 @@ import {
 } from './agents-panels';
 
 export default function AgentsPage() {
-    const { currentProject, isLoading: projectLoading } = useProject();
+    const { currentProject, projects, isLoading: projectLoading, setCurrentProject } = useProject();
+    const searchParams = useSearchParams();
     const [workspaceView, setWorkspaceView] = useState<AgentWorkspaceView>('run');
 
     // Enhanced exploratory config
@@ -183,6 +186,15 @@ export default function AgentsPage() {
     const [runPlanDetailsOpen, setRunPlanDetailsOpen] = useState(false);
     const agentEventsRef = useRef<AgentRunEvent[]>([]);
     const fetchHistoryRef = useRef<() => Promise<unknown>>(async () => undefined);
+    const requestedProjectId = searchParams.get('project_id') || '';
+    const requestedProject = requestedProjectId ? projects.find(project => project.id === requestedProjectId) || null : null;
+    const selectedProjectId = requestedProject?.id || currentProject?.id;
+    const selectedRunIdForProject = requestedProjectId && projectLoading ? null : selectedRunId;
+
+    useEffect(() => {
+        if (!requestedProject || currentProject?.id === requestedProject.id) return;
+        setCurrentProject(requestedProject);
+    }, [currentProject?.id, requestedProject, setCurrentProject]);
 
     const {
         queueStatus,
@@ -260,7 +272,7 @@ export default function AgentsPage() {
         updateReportSeverityFilter,
         queryState,
     } = useAgentCustomAgentWorkflow({
-        projectId: currentProject?.id,
+        projectId: selectedProjectId,
         projectLoading,
         workspaceView,
         setWorkspaceView,
@@ -294,7 +306,7 @@ export default function AgentsPage() {
         updateHistoryStatusFilter,
         updateHistoryTypeFilter,
     } = useAgentRunHistory({
-        projectId: currentProject?.id,
+        projectId: selectedProjectId,
         projectLoading,
         queryState,
         updateWorkspaceQuery,
@@ -311,7 +323,7 @@ export default function AgentsPage() {
         updateReportSearchType,
         updateReportSearchSeverity,
     } = useAgentReportSearch({
-        projectId: currentProject?.id,
+        projectId: selectedProjectId,
         projectLoading,
         queryState,
         workspaceView,
@@ -333,7 +345,7 @@ export default function AgentsPage() {
         importReportRequirements,
     } = useAgentReportEditing({
         activeRun,
-        projectId: currentProject?.id,
+        projectId: selectedProjectId,
         setActiveRun,
         setHistory,
         setWorkspaceStatus,
@@ -374,7 +386,7 @@ export default function AgentsPage() {
         flowSpecBrowserAuthFailure,
     } = useAgentSpecGeneration({
         activeRun,
-        projectId: currentProject?.id,
+        projectId: selectedProjectId,
         sessions,
         sessionId,
         activeBrowserAuthSessions,
@@ -419,11 +431,20 @@ export default function AgentsPage() {
         setActiveRun(prev => {
             if (!prev || prev.id !== eventRunId) return prev;
             const currentProgress = prev.progress || {};
+            const currentPhase = String(currentProgress.phase || '').toLowerCase();
+            const nextPhase = currentPhase === 'queued' || currentPhase === 'pending' || !currentPhase
+                ? 'tool_use'
+                : currentProgress.phase;
+            const currentStatus = String(prev.status || '').toLowerCase();
+            const nextStatus = ['queued', 'pending', 'waiting'].includes(currentStatus) ? 'running' : prev.status;
             return {
                 ...prev,
+                status: nextStatus,
                 progress: {
                     ...currentProgress,
-                    phase: currentProgress.phase || 'tool_use',
+                    phase: nextPhase,
+                    status: nextStatus,
+                    browser_activity_seen: event.event_type === 'browser_action' || currentProgress.browser_activity_seen,
                     last_tool: toolName || currentProgress.last_tool,
                     current_tool: toolName || currentProgress.current_tool,
                     last_tool_label: toolLabel || currentProgress.last_tool_label,
@@ -436,15 +457,22 @@ export default function AgentsPage() {
         });
     }, [selectedRunId]);
 
+    const handleResolvedRunId = useCallback((runId: string) => {
+        setSelectedRunId(runId);
+        updateWorkspaceQuery({ runId, view: 'run' });
+    }, [updateWorkspaceQuery]);
+
     const {
         fetchRun,
         fetchAgentEvents,
         fetchAgentTrace,
         fetchSpecs,
         mergeAgentEvents,
+        runLoading,
+        runError,
     } = useAgentRunDetail({
-        selectedRunId,
-        projectId: currentProject?.id,
+        selectedRunId: selectedRunIdForProject,
+        projectId: selectedProjectId,
         activeRun,
         traceTab,
         fetchHistory,
@@ -455,12 +483,13 @@ export default function AgentsPage() {
         setSpecResult,
         setTraceSearch,
         setTraceSpanType,
+        onResolvedRunId: handleResolvedRunId,
     });
 
     useAgentRunEventsStream({
-        selectedRunId,
+        selectedRunId: selectedRunIdForProject,
         activeRun,
-        projectId: currentProject?.id,
+        projectId: selectedProjectId,
         agentEventsRef,
         fetchRun,
         fetchAgentEvents,
@@ -551,7 +580,7 @@ export default function AgentsPage() {
 
     const exportAgentTrace = () => {
         if (!activeRun) return;
-        window.open(agentRunTraceExportUrl(activeRun.id, currentProject?.id), '_blank', 'noopener,noreferrer');
+        window.open(agentRunTraceExportUrl(activeRun.id, selectedProjectId), '_blank', 'noopener,noreferrer');
     };
 
     const handleSynthesize = async () => {
@@ -597,6 +626,9 @@ export default function AgentsPage() {
     };
 
     const flowSpecRunLive = Boolean(flowSpecAgentRun && LIVE_AGENT_STATUSES.has(flowSpecAgentRun.status));
+    const flowSpecRunActive = flowSpecAgentRun
+        ? LIVE_AGENT_STATUSES.has(flowSpecAgentRun.status) && flowSpecAgentRun.status !== 'paused'
+        : generatingSpec;
     const flowSpecShowBrowser = Boolean(flowSpecAgentRunId && (generatingSpec || flowSpecRunLive || flowSpecLatestImage));
     const explorerResult = activeRun?.agent_type === 'exploratory' ? activeRun.result || {} : {};
     const explorerDiagnostics = explorerResult?.diagnostics || {};
@@ -636,8 +668,10 @@ export default function AgentsPage() {
         explorerResult?.contract_warning,
         ...(Array.isArray(explorerResult?.contract_warnings) ? explorerResult.contract_warnings : []),
     ].filter(Boolean).map((warning: any) => String(warning).trim()).filter(Boolean)));
+    const explorerPartialReason = agentRunPartialReason(activeRun);
     const explorerCanGenerateSpecs = explorerStructuredFlowCount > 0;
     const visibleHistory = history;
+    const agentRunLoading = runLoading || Boolean(selectedRunId && !selectedRunIdForProject);
     const queueWarnings = useMemo(() => {
         const stale = queueStatus?.stale_running ?? 0;
         const orphaned = queueStatus?.orphaned_tasks ?? 0;
@@ -2044,7 +2078,7 @@ export default function AgentsPage() {
                                         />
                                     </div>
                                     <TestDataPicker
-                                        projectId={currentProject?.id}
+                                        projectId={selectedProjectId}
                                         mode="ref"
                                         variant="sidebar"
                                         compact
@@ -2199,7 +2233,26 @@ export default function AgentsPage() {
                     </div>
 
                     <div style={{ padding: '1.5rem', flex: 1, overflowY: 'auto', background: 'var(--surface)' }}>
-                        {!activeRun ? (
+                        {agentRunLoading ? (
+                            <div style={{ minHeight: '420px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', textAlign: 'center', gap: '1rem' }}>
+                                <Loader2 size={42} className="spin" style={{ color: 'var(--primary)' }} />
+                                <div>
+                                    <h3 style={{ margin: 0, color: 'var(--text)', fontSize: '1.05rem', fontWeight: 800 }}>Loading agent run...</h3>
+                                    <p style={{ margin: '0.45rem auto 0', maxWidth: 460, lineHeight: 1.5 }}>Fetching the selected run and its latest events.</p>
+                                </div>
+                            </div>
+                        ) : runError ? (
+                            <div style={{ minHeight: '420px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', textAlign: 'center', gap: '1rem' }}>
+                                <AlertTriangle size={48} style={{ color: 'var(--danger)' }} />
+                                <div>
+                                    <h3 style={{ margin: 0, color: 'var(--text)', fontSize: '1.05rem', fontWeight: 800 }}>Run not found or unavailable. Check project selection.</h3>
+                                    <p style={{ margin: '0.45rem auto 0', maxWidth: 460, lineHeight: 1.5 }}>{runError}</p>
+                                </div>
+                                <Button type="button" variant="outline" onClick={() => selectWorkspaceView('history')}>
+                                    <RotateCcw size={14} /> Open History
+                                </Button>
+                            </div>
+                        ) : !activeRun ? (
                             <div style={{ minHeight: '420px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', textAlign: 'center', gap: '1rem' }}>
                                 <Bot size={56} style={{ color: 'var(--primary)' }} />
                                 <div>
@@ -2233,14 +2286,20 @@ export default function AgentsPage() {
 
                                 <LiveBrowserView
                                     runId={activeRun.id}
-                                    isActive={activeRun.status !== 'paused'}
+                                    isActive={LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.status !== 'paused'}
                                     showHeader
                                     artifacts={activeRun.artifacts || []}
                                     latestImage={sortArtifactsByModifiedAt((activeRun.artifacts || []).filter(artifact => artifact.type === 'image'))[0]}
                                     statusMessage={activeRun.progress?.message}
-                                    liveViewAvailable={Boolean(activeRun.progress?.live_view_available)}
+                                    liveViewAvailable={activeRun.progress?.live_view_available !== false}
                                     runtimeMessage={activeRun.progress?.runtime_message}
                                     vncUrl={activeRun.progress?.vnc_url}
+                                    browserActivitySeen={Boolean(activeRun.progress?.browser_activity_seen || activeRun.progress?.browser_tool_calls || activeRun.progress?.interactions)}
+                                    browserActive={Boolean(activeRun.progress?.browser_tool_calls || activeRun.progress?.interactions)}
+                                    browserLastTool={activeRun.progress?.last_tool_label || activeRun.progress?.last_tool}
+                                    suspectedBrowserDialogBlock={activeRun.progress?.suspected_browser_dialog_block === true}
+                                    authPreflightStatus={activeRun.progress?.auth_preflight_status}
+                                    authPreflightFailureReason={activeRun.progress?.auth_preflight_failure_reason}
                                 />
                                 <AgentRunCapturePanel activeRun={activeRun} mode="live" />
                                 <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
@@ -2260,7 +2319,7 @@ export default function AgentsPage() {
                                 const latestImage = sortArtifactsByModifiedAt((activeRun.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
                                 const recentTools = progress.recent_tools || [];
                                 const executionStarted = customAgentExecutionStarted(activeRun);
-                                const waitingForWorker = (!executionStarted || progress.phase === 'queued') && activeRun.status !== 'paused';
+                                const waitingForWorker = !executionStarted && activeRun.status !== 'paused';
                                 const workerMessage = customAgentWorkerMessage(activeRun);
                                 const toolCalls = Number(progress.tool_calls ?? 0);
                                 const browserActions = Number(progress.browser_tool_calls ?? progress.interactions ?? 0);
@@ -2283,14 +2342,14 @@ export default function AgentsPage() {
                                                 <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Current Tool</div>
                                                 <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{customAgentCurrentActivity(progress)}</div>
                                             </div>
-	                                            <div>
-	                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tool Calls</div>
-	                                                <div style={{ fontWeight: 700 }}>{Number.isFinite(toolCalls) ? toolCalls : 0}</div>
-	                                            </div>
-	                                            <div>
-	                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Browser Actions</div>
-	                                                <div style={{ fontWeight: 700 }}>{Number.isFinite(browserActions) ? browserActions : 0}</div>
-	                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tool Calls</div>
+                                                <div style={{ fontWeight: 700 }}>{Number.isFinite(toolCalls) ? toolCalls : 0}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Browser Actions</div>
+                                                <div style={{ fontWeight: 700 }}>{Number.isFinite(browserActions) ? browserActions : 0}</div>
+                                            </div>
                                         </div>
 
                                         {selectedTools.length > 0 && (
@@ -2335,14 +2394,20 @@ export default function AgentsPage() {
                                         ) : hasBrowserTools ? (
                                             <LiveBrowserView
                                                 runId={activeRun.id}
-                                                isActive={activeRun.status !== 'paused'}
+                                                isActive={LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.status !== 'paused'}
                                                 showHeader
                                                 artifacts={activeRun.artifacts || []}
                                                 latestImage={latestImage}
                                                 statusMessage={progress.message}
-                                                liveViewAvailable={Boolean(progress.live_view_available)}
+                                                liveViewAvailable={progress.live_view_available !== false}
                                                 runtimeMessage={progress.runtime_message}
                                                 vncUrl={progress.vnc_url}
+                                                browserActivitySeen={Boolean(progress.browser_activity_seen || browserActions > 0)}
+                                                browserActive={browserActions > 0}
+                                                browserLastTool={progress.last_tool_label || progress.last_tool}
+                                                suspectedBrowserDialogBlock={progress.suspected_browser_dialog_block === true}
+                                                authPreflightStatus={progress.auth_preflight_status}
+                                                authPreflightFailureReason={progress.auth_preflight_failure_reason}
                                             />
                                         ) : (
                                             <div style={{ padding: '1.25rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-secondary)', textAlign: 'center' }}>
@@ -2480,8 +2545,10 @@ export default function AgentsPage() {
                         ) : (
                             // Completed successfully
                             <div className="markdown-content">
-                                {activeRun.agent_type !== 'spec_generation' && (
-                                    <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
+                                {activeRun.agent_type !== 'spec_generation' && activeRun.agent_type !== 'custom' && (
+                                    <>
+                                        <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
+                                    </>
                                 )}
                                 {activeRun.agent_type === 'spec_generation' ? (
                                     <SpecGenerationRunPanel run={activeRun} events={agentEvents} />
@@ -2502,22 +2569,25 @@ export default function AgentsPage() {
                                         </div>
                                     </>
                                 ) : activeRun.agent_type === 'custom' ? (
-                                    <CustomAgentReportView
-                                        run={activeRun}
-                                        activeTab={customResultTab}
-                                        onTabChange={selectCustomResultTab}
-                                        onAskAssistant={openAssistantWithPrompt}
-                                        onCreateSpecFromReport={openSpecFromReportItem}
-                                        onEditOverview={openReportOverviewEdit}
-                                        onEditReportItem={openReportItemEdit}
-                                        onImportRequirements={importReportRequirements}
-                                        importingRequirementIds={importingRequirementIds}
-                                        importError={reportImportError}
-                                        reportStatusFilter={reportStatusFilter}
-                                        onReportStatusFilterChange={updateReportStatusFilter}
-                                        reportSeverityFilter={reportSeverityFilter}
-                                        onReportSeverityFilterChange={updateReportSeverityFilter}
-                                    />
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                        <CustomAgentReportView
+                                            run={activeRun}
+                                            activeTab={customResultTab}
+                                            onTabChange={selectCustomResultTab}
+                                            onAskAssistant={openAssistantWithPrompt}
+                                            onCreateSpecFromReport={openSpecFromReportItem}
+                                            onEditOverview={openReportOverviewEdit}
+                                            onEditReportItem={openReportItemEdit}
+                                            onImportRequirements={importReportRequirements}
+                                            importingRequirementIds={importingRequirementIds}
+                                            importError={reportImportError}
+                                            reportStatusFilter={reportStatusFilter}
+                                            onReportStatusFilterChange={updateReportStatusFilter}
+                                            reportSeverityFilter={reportSeverityFilter}
+                                            onReportSeverityFilterChange={updateReportSeverityFilter}
+                                        />
+                                        <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
+                                    </div>
                                 ) : (
                                     // Exploratory Result - User Friendly Display
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
@@ -2560,7 +2630,7 @@ export default function AgentsPage() {
                                                         <div>
                                                             <strong style={{ color: 'var(--warning)' }}>Partial Explorer result</strong>
                                                             <div style={{ fontSize: '0.86rem', lineHeight: 1.45, marginTop: '0.25rem' }}>
-                                                                The run explored the app, but no completed evidence-backed flows were recovered. Review captured evidence and unsupported candidates before retrying or generating specs.
+                                                                {explorerPartialReason || 'The run explored the app, but no completed evidence-backed flows were recovered. Review captured evidence and unsupported candidates before retrying or generating specs.'}
                                                             </div>
                                                         </div>
                                                     </div>
@@ -2975,7 +3045,7 @@ export default function AgentsPage() {
                                     <Label htmlFor="definition-test-data-refs">Default Test Data Refs</Label>
                                     <Input id="definition-test-data-refs" name="definitionTestDataRefs" value={definitionForm.test_data_refs} onChange={e => setDefinitionForm({ ...definitionForm, test_data_refs: e.target.value })} placeholder="login-users.valid-admin" autoComplete="off" />
                                     <TestDataPicker
-                                        projectId={currentProject?.id}
+                                        projectId={selectedProjectId}
                                         mode="ref"
                                         compact
                                         onInsert={(value: string) => setDefinitionForm(prev => ({
@@ -3268,7 +3338,7 @@ export default function AgentsPage() {
                                     {flowSpecShowBrowser && (
                                         <LiveBrowserView
                                             runId={flowSpecAgentRunId}
-                                            isActive={generatingSpec && flowSpecAgentRun?.status !== 'failed'}
+                                            isActive={flowSpecRunActive}
                                             showHeader
                                             artifacts={flowSpecAgentRun?.artifacts || []}
                                             latestImage={flowSpecLatestImage}
@@ -3276,6 +3346,9 @@ export default function AgentsPage() {
                                             liveViewAvailable={Boolean(flowSpecAgentRun?.progress?.live_view_available ?? true)}
                                             runtimeMessage={flowSpecAgentRun?.progress?.runtime_message}
                                             vncUrl={flowSpecAgentRun?.progress?.vnc_url}
+                                            suspectedBrowserDialogBlock={flowSpecAgentRun?.progress?.suspected_browser_dialog_block === true}
+                                            authPreflightStatus={flowSpecAgentRun?.progress?.auth_preflight_status}
+                                            authPreflightFailureReason={flowSpecAgentRun?.progress?.auth_preflight_failure_reason}
                                         />
                                     )}
                                     {flowSpecAgentRun?.status === 'completed' && !flowSpecShowBrowser && (

@@ -15,6 +15,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -35,11 +36,18 @@ from orchestrator.ai.prompt_registry import (
 )
 from orchestrator.memory import get_memory_manager
 from orchestrator.services.agent_prompt_runtime import create_agent_runner
-from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
+from orchestrator.utils.agent_runner import (
+    CLAUDE_CODE_AUTH_ERROR_TYPE,
+    CLAUDE_CODE_AUTH_NEXT_ACTION,
+    NATIVE_SETUP_SEED_FILE,
+    AgentRunner,
+    get_default_timeout,
+)
 from orchestrator.utils.agent_tool_allowlists import (
     PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS,
     get_agent_tool_config,
 )
+from orchestrator.utils.browser_failures import classify_browser_failure
 from orchestrator.utils.string_utils import clean_extracted_url, slugify
 from orchestrator.utils.token_budget import (
     context_budget_for_stage,
@@ -59,6 +67,17 @@ class SpecGenerationError(Exception):
     def __init__(self, message: str, diagnostics: dict[str, Any] | None = None):
         super().__init__(message)
         self.diagnostics = diagnostics or {}
+
+
+@dataclass
+class PlanValidationResult:
+    blocking_errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    evidence_score: int = 0
+
+    @property
+    def valid(self) -> bool:
+        return not self.blocking_errors
 
 
 class NativePlanner:
@@ -100,10 +119,31 @@ class NativePlanner:
         self.env_vars = dict(env_vars or {})
         self.last_draft_script_path: Path | None = None
         self.last_agent_result = None
-        self.memory_manager = get_memory_manager(project_id=project_id)
+        self.last_runtime_preflight: dict[str, Any] | None = None
+        self.memory_manager = self._init_memory_manager(project_id)
         # Use absolute path relative to project root (up from orchestrator/workflows/native_planner.py)
         self.specs_dir = Path(__file__).resolve().parent.parent.parent / "specs"
         self.specs_dir.mkdir(exist_ok=True)
+
+    @staticmethod
+    def _memory_enabled() -> bool:
+        return os.environ.get("MEMORY_ENABLED", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+    def _init_memory_manager(self, project_id: str):
+        if not self._memory_enabled():
+            return None
+        try:
+            return get_memory_manager(project_id=project_id)
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            logger.warning("Native planner memory disabled after initialization failure: %s", exc)
+            return None
 
     async def generate_spec_for_feature(
         self,
@@ -138,9 +178,11 @@ class NativePlanner:
 
         # 1. Retrieve PRD context from RAG
         logger.info(f"Retrieving PRD context for: {feature_name}")
-        chunks = self.memory_manager.vector_store.search_prd_context(
-            query=feature_name, project_id=prd_project, n_results=5
-        )
+        chunks = []
+        if self.memory_manager is not None:
+            chunks = self.memory_manager.vector_store.search_prd_context(
+                query=feature_name, project_id=prd_project, n_results=5
+            )
 
         prd_context = self._build_context_text(chunks)
 
@@ -398,6 +440,7 @@ The following requirements were extracted from the Product Requirements Document
 - If evidence is thin, generate conservative page/journey checks: reachability, no blocking errors, accessibility basics, responsive rendering, and stable navigation.
 - Use observed selectors, text, URLs, and API endpoints when available.
 - Mark auth or data needs in Preconditions instead of hardcoding secrets.
+- If `quorvex_record_note` is available, record durable notes only for meaningful findings, decisions, blockers, handoffs, or final root cause. Do not record routine low-level tool activity as notes.
 
 ## Draft Script Rules
 - The draft script is required. It is a handoff artifact for the generator agent.
@@ -515,14 +558,43 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             preserve_browser_on_failure=self.owner_type == "autopilot",
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_planner"),
             runner_cls=AgentRunner,
-            tool_permission_guard=(
-                self._build_live_plan_permission_guard(target_url)
-                if target_url
-                else None
+        )
+        diagnostics_fn = getattr(runner, "diagnostics", None)
+        runtime_preflight = (
+            diagnostics_fn(agent_class="NativePlanner", prompt=prompt)
+            if callable(diagnostics_fn)
+            else {}
+        )
+        self.last_runtime_preflight = runtime_preflight
+        logger.info(
+            "Native planner runtime preflight: %s",
+            json.dumps(
+                {
+                    key: runtime_preflight.get(key)
+                    for key in (
+                        "execution_path",
+                        "provider",
+                        "runtime",
+                        "tier",
+                        "model",
+                        "api_key_set",
+                        "api_key_env",
+                        "claude_code_oauth_token_set",
+                        "auth_mode",
+                        "queue",
+                        "runtime_env_keys",
+                    )
+                },
+                sort_keys=True,
+                default=str,
             ),
         )
 
         result = await runner.run(prompt)
+        try:
+            result.runtime_diagnostics = runtime_preflight
+        except Exception:
+            pass
         self.last_agent_result = result
 
         # Log diagnostics
@@ -591,8 +663,51 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 getattr(agent_result, "session_id", None) or retry_session_id
             )
             try:
+                if self._is_claude_code_auth_failure(agent_result):
+                    raise self._build_runtime_failure_error(
+                        subject_type=subject_type,
+                        subject_name=subject_name,
+                        agent_result=agent_result,
+                        expected_output_path=expected_output_path,
+                    )
+
                 if self._is_unproductive_stream_failure(agent_result):
-                    saved_plan_path = self._recover_saved_plan(expected_output_path)
+                    if target_url:
+                        self._validate_live_plan_tool_call_contract(
+                            agent_result,
+                            target_url,
+                        )
+                        self._validate_live_plan_tool_sequence(agent_result, target_url)
+                    saved_plan_path = self._recover_expected_saved_plan(expected_output_path)
+                    if saved_plan_path:
+                        logger.info(
+                            "Recovering saved planner artifact after unproductive SDK stream: %s",
+                            saved_plan_path,
+                        )
+                        return await self._finalize_or_repair_plan_artifact(
+                            plan_path=saved_plan_path,
+                            expected_output_path=expected_output_path,
+                            require_draft_script=require_draft_script,
+                            subject_type=subject_type,
+                            subject_name=subject_name,
+                            agent_result=agent_result,
+                        )
+                    plan_content = self._extract_plan_content(agent_result)
+                    if plan_content:
+                        expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+                        expected_output_path.write_text(plan_content)
+                        return await self._finalize_or_repair_plan_artifact(
+                            plan_path=expected_output_path,
+                            expected_output_path=expected_output_path,
+                            require_draft_script=require_draft_script,
+                            subject_type=subject_type,
+                            subject_name=subject_name,
+                            agent_result=agent_result,
+                        )
+                    saved_plan_path = self._recover_saved_plan(
+                        expected_output_path,
+                        include_expected=False,
+                    )
                     if saved_plan_path:
                         logger.info(
                             "Recovering saved planner artifact after unproductive SDK stream: %s",
@@ -623,12 +738,16 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
 
                 live_sequence_error: SpecGenerationError | None = None
                 if target_url:
+                    self._validate_live_plan_tool_call_contract(
+                        agent_result,
+                        target_url,
+                    )
                     try:
                         self._validate_live_plan_tool_sequence(agent_result, target_url)
                     except SpecGenerationError as exc:
                         live_sequence_error = exc
 
-                saved_plan_path = self._recover_saved_plan(expected_output_path)
+                saved_plan_path = self._recover_expected_saved_plan(expected_output_path)
                 if saved_plan_path:
                     logger.info(f"Spec saved by agent: {saved_plan_path}")
                     finalized_path = await self._finalize_or_repair_plan_artifact(
@@ -656,6 +775,28 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     expected_output_path.write_text(plan_content)
                     finalized_path = await self._finalize_or_repair_plan_artifact(
                         plan_path=expected_output_path,
+                        expected_output_path=expected_output_path,
+                        require_draft_script=require_draft_script,
+                        subject_type=subject_type,
+                        subject_name=subject_name,
+                        agent_result=agent_result,
+                    )
+                    if live_sequence_error:
+                        self._handle_live_sequence_artifact(
+                            error=live_sequence_error,
+                            expected_output_path=expected_output_path,
+                            generated_plan_path=finalized_path,
+                        )
+                    return finalized_path
+
+                saved_plan_path = self._recover_saved_plan(
+                    expected_output_path,
+                    include_expected=False,
+                )
+                if saved_plan_path:
+                    logger.info(f"Spec saved by agent: {saved_plan_path}")
+                    finalized_path = await self._finalize_or_repair_plan_artifact(
+                        plan_path=saved_plan_path,
                         expected_output_path=expected_output_path,
                         require_draft_script=require_draft_script,
                         subject_type=subject_type,
@@ -707,6 +848,8 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 )
             except SpecGenerationError as exc:
                 last_error = exc
+                if self._is_non_retryable_planner_failure(exc):
+                    raise
                 is_unproductive = (
                     exc.diagnostics.get("exception_type") == "unproductive_stream"
                     or exc.diagnostics.get("failure_category") == "unproductive_stream"
@@ -715,10 +858,19 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     raise
                 if attempt_number >= max_attempts:
                     raise
+                fresh_browser_required = self._fresh_browser_required_failure(
+                    exc,
+                    agent_result=agent_result,
+                    target_url=target_url,
+                )
                 if is_unproductive:
                     unproductive_retry_used = True
                     retry_session_id = None
                     force_fresh_retry = True
+                elif fresh_browser_required:
+                    retry_session_id = None
+                    force_fresh_retry = True
+                    self._discard_rejected_plan_artifact(expected_output_path)
                 else:
                     force_fresh_retry = False
                 current_prompt = self._build_planner_retry_prompt(
@@ -754,6 +906,39 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 exc,
             )
 
+    @staticmethod
+    def _fresh_browser_required_failure(
+        error: SpecGenerationError,
+        *,
+        agent_result: Any | None,
+        target_url: str | None,
+    ) -> bool:
+        if not target_url:
+            return False
+        diagnostics = error.diagnostics or {}
+        if diagnostics.get("requires_fresh_browser") is True:
+            return True
+        if classify_browser_failure(
+            diagnostics.get("last_browser_error") or diagnostics.get("exception_message") or str(error),
+            tool_name=diagnostics.get("last_tool"),
+            error_type=diagnostics.get("exception_type")
+            or diagnostics.get("failure_category")
+            or diagnostics.get("agent_error_type"),
+        ):
+            return True
+        if agent_result is not None and classify_browser_failure(
+            getattr(agent_result, "error", None) or str(error),
+            tool_name=NativePlanner._last_tool_name(agent_result),
+            error_type=getattr(agent_result, "error_type", None),
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _last_tool_name(agent_result: Any | None) -> str | None:
+        tool_calls = list(getattr(agent_result, "tool_calls", []) or []) if agent_result is not None else []
+        return str(getattr(tool_calls[-1], "name", "") or "") if tool_calls else None
+
     def _handle_live_sequence_artifact(
         self,
         *,
@@ -762,7 +947,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         generated_plan_path: Path,
     ) -> None:
         """Reject live-browser artifacts that violated mandatory navigate/snapshot order."""
-        if os.environ.get("NATIVE_PLANNER_ALLOW_LIVE_SEQUENCE_WARNING") == "1":
+        if self._is_non_fatal_setup_seed_warning(error):
             self._record_live_sequence_warning(
                 error=error,
                 expected_output_path=expected_output_path,
@@ -771,6 +956,17 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             return
         self._discard_rejected_plan_artifact(expected_output_path)
         raise error
+
+    @staticmethod
+    def _is_non_fatal_setup_seed_warning(error: SpecGenerationError) -> bool:
+        diagnostics = error.diagnostics or {}
+        return (
+            diagnostics.get("failure_category")
+            == "planner_live_sequence_setup_seed_warning"
+            and diagnostics.get("non_fatal") is True
+            and diagnostics.get("setup_tool") == "generator_setup_page"
+            and diagnostics.get("setup_seed_file_omitted") is True
+        )
 
     def _record_live_sequence_warning(
         self,
@@ -824,11 +1020,38 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         )
         target_instruction = ""
         if target_url:
-            target_instruction = (
-                "\nFor this retry, the browser contract still must be satisfied. Call "
-                "`planner_setup_page`, then `browser_navigate` to the exact Target URL "
-                f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`."
-            )
+            if self._fresh_browser_required_failure(
+                error,
+                agent_result=agent_result,
+                target_url=target_url,
+            ):
+                target_instruction = (
+                    "\nThe previous browser session was abandoned because it failed or closed. "
+                    "Do not use `browser_resume`, do not continue the old browser state, and do not rely on rejected artifacts. "
+                    "Start from a clean sequence: `planner_setup_page`, then `browser_navigate` to the exact Target URL "
+                    f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`. "
+                    "Use `planner_setup_page` only for planner setup, do not call `generator_setup_page` during planning, "
+                    f"and every setup call must include `seedFile: \"{NATIVE_SETUP_SEED_FILE}\"`. "
+                    "Use only the structured prior evidence below plus fresh browser observations from this retry."
+                )
+            else:
+                target_instruction = (
+                    "\nFor this retry, the browser contract still must be satisfied. Call "
+                    "`planner_setup_page`, then `browser_navigate` to the exact Target URL "
+                    f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`. "
+                    "Use `planner_setup_page` only for planner setup, do not call `generator_setup_page` during planning, "
+                    f"and every setup call must include `seedFile: \"{NATIVE_SETUP_SEED_FILE}\"`."
+                )
+            if error.diagnostics.get("failure_category") in {
+                "planner_live_tool_call_contract_failure",
+                "planner_text_tool_call_contract_failure",
+            }:
+                target_instruction += (
+                    "\nThe previous attempt emitted no real recorded MCP tool calls. "
+                    "You must call the actual MCP tools through the runtime; do not write "
+                    "`<function_calls>`, `<invoke name=...>`, JSON, XML, or any other textual "
+                    "representation of tool calls in the answer."
+                )
         return f"""You are retrying a rejected Playwright planner attempt.
 
 The previous attempt for {subject_type} "{subject_name}" was rejected. Do not repeat its failed tool sequence, but reuse the useful observations and selectors summarized below.
@@ -1113,6 +1336,56 @@ Original task follows. Obey it, but correct the failure above.
         return None
 
     @classmethod
+    def _validate_live_plan_tool_call_contract(
+        cls, agent_result: Any, target_url: str
+    ) -> None:
+        """Live-browser planning requires recorded MCP tool events, not text markup."""
+        tool_calls = list(getattr(agent_result, "tool_calls", []) or [])
+        if tool_calls:
+            return
+
+        raw_output = str(getattr(agent_result, "output", "") or "")
+        fake_tool_call_markup = cls._contains_fake_tool_call_markup(raw_output)
+        failure_category = (
+            "planner_text_tool_call_contract_failure"
+            if fake_tool_call_markup
+            else "planner_live_tool_call_contract_failure"
+        )
+        missing = ["planner_setup_page", "browser_navigate", "browser_snapshot"]
+        raise SpecGenerationError(
+            "Live-browser planner produced no recorded MCP tool calls before finishing.",
+            diagnostics={
+                "failure_category": failure_category,
+                "requires_fresh_browser": True,
+                "expected_target_url": target_url,
+                "tool_calls": 0,
+                "messages_received": int(
+                    getattr(agent_result, "messages_received", 0) or 0
+                ),
+                "text_blocks_received": int(
+                    getattr(agent_result, "text_blocks_received", 0) or 0
+                ),
+                "output_preview": cls._content_preview(raw_output, limit=1200),
+                "fake_tool_call_markup_observed": fake_tool_call_markup,
+                "planner_setup_page_observed": False,
+                "browser_navigate_observed": False,
+                "target_navigation_observed": False,
+                "browser_snapshot_after_navigation_observed": False,
+                "planner_save_plan_observed": False,
+                "missing_sequence_steps": missing,
+            },
+        )
+
+    @staticmethod
+    def _contains_fake_tool_call_markup(raw_output: str) -> bool:
+        if not raw_output:
+            return False
+        return bool(
+            re.search(r"<\s*function_calls\b", raw_output, flags=re.IGNORECASE)
+            or re.search(r"<\s*invoke\b[^>]*\bname\s*=", raw_output, flags=re.IGNORECASE)
+        )
+
+    @classmethod
     def _validate_live_plan_tool_sequence(
         cls, agent_result: Any, target_url: str
     ) -> None:
@@ -1127,9 +1400,55 @@ Original task follows. Obey it, but correct the failure above.
         navigate_seen = False
         snapshot_seen = False
         save_seen = False
+        omitted_generator_setup_seed_after_valid_sequence = False
 
         for tool_call in tool_calls:
             short_name = cls._tool_call_short_name(tool_call)
+            tool_input = getattr(tool_call, "input", None)
+            if short_name in {"planner_setup_page", "generator_setup_page"}:
+                setup_input = tool_input if isinstance(tool_input, dict) else {}
+                if "seedFile" in setup_input:
+                    seed_file = setup_input.get("seedFile")
+                    if seed_file != NATIVE_SETUP_SEED_FILE:
+                        raise SpecGenerationError(
+                            f"{short_name} used an invalid setup seed file for a native browser run.",
+                            diagnostics={
+                                "failure_category": "native_setup_seed_file_error",
+                                "setup_tool": short_name,
+                                "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                                "received_seed_file": seed_file,
+                                "expected_target_url": target_url,
+                                "planner_setup_page_observed": setup_seen,
+                                "browser_navigate_observed": navigate_attempt_seen,
+                                "target_navigation_observed": navigate_seen,
+                                "browser_snapshot_after_navigation_observed": snapshot_seen,
+                                "planner_save_plan_observed": save_seen,
+                            },
+                        )
+                elif short_name == "generator_setup_page":
+                    if setup_seen and navigate_seen and snapshot_seen:
+                        omitted_generator_setup_seed_after_valid_sequence = True
+
+            tool_error = str(getattr(tool_call, "error", "") or "")
+            browser_failure = classify_browser_failure(
+                tool_error or getattr(tool_call, "result_preview", None),
+                tool_name=str(getattr(tool_call, "name", "") or "") or None,
+            )
+            if browser_failure:
+                raise SpecGenerationError(
+                    "Live-browser planner browser session failed before completing the required setup/navigate/snapshot sequence.",
+                    diagnostics={
+                        **browser_failure.telemetry(),
+                        "expected_target_url": target_url,
+                        "planner_setup_page_observed": setup_seen,
+                        "browser_navigate_observed": navigate_attempt_seen,
+                        "target_navigation_observed": navigate_seen,
+                        "browser_snapshot_after_navigation_observed": snapshot_seen,
+                        "planner_save_plan_observed": save_seen,
+                    },
+                )
+            if getattr(tool_call, "success", True) is False:
+                continue
             if short_name == "planner_setup_page":
                 setup_seen = True
             elif short_name == "browser_navigate":
@@ -1194,6 +1513,24 @@ Original task follows. Obey it, but correct the failure above.
                 },
             )
 
+        if omitted_generator_setup_seed_after_valid_sequence:
+            raise SpecGenerationError(
+                "Live-browser planner produced valid setup/navigate/snapshot evidence but called generator_setup_page during planning without seedFile.",
+                diagnostics={
+                    "failure_category": "planner_live_sequence_setup_seed_warning",
+                    "non_fatal": True,
+                    "setup_tool": "generator_setup_page",
+                    "setup_seed_file_omitted": True,
+                    "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                    "expected_target_url": target_url,
+                    "planner_setup_page_observed": setup_seen,
+                    "browser_navigate_observed": navigate_attempt_seen,
+                    "target_navigation_observed": navigate_seen,
+                    "browser_snapshot_after_navigation_observed": snapshot_seen,
+                    "planner_save_plan_observed": save_seen,
+                },
+            )
+
     @staticmethod
     def _looks_like_test_plan(content: str) -> bool:
         """Return true when markdown contains real test-case structure."""
@@ -1207,6 +1544,24 @@ Original task follows. Obey it, but correct the failure above.
             and int(getattr(agent_result, "messages_received", 0) or 0) == 0
             and int(getattr(agent_result, "text_blocks_received", 0) or 0) == 0
         )
+
+    @staticmethod
+    def _is_claude_code_auth_failure(agent_result: Any) -> bool:
+        if str(getattr(agent_result, "error_type", "") or "") == CLAUDE_CODE_AUTH_ERROR_TYPE:
+            return True
+        text = "\n".join(
+            part
+            for part in (
+                str(getattr(agent_result, "error", "") or ""),
+                str(getattr(agent_result, "output", "") or ""),
+            )
+            if part
+        ).lower()
+        return "not logged in" in text and "run /login" in text
+
+    @staticmethod
+    def _is_non_retryable_planner_failure(error: SpecGenerationError) -> bool:
+        return (error.diagnostics or {}).get("failure_category") == CLAUDE_CODE_AUTH_ERROR_TYPE
 
     @classmethod
     def _is_runtime_zero_output_failure(
@@ -1458,26 +1813,6 @@ Original task follows. Obey it, but correct the failure above.
                     "planner_draft_script_error": str(exc),
                 },
             ) from exc
-        warnings = self._planner_evidence_warnings(content)
-        if warnings:
-            logger.warning(
-                "Planner evidence warnings for %s: %s", plan_path, "; ".join(warnings)
-            )
-            if self.session_dir:
-                try:
-                    warning_path = self.session_dir / "planner_evidence_warnings.json"
-                    warning_path.write_text(
-                        json.dumps(
-                            {"plan_path": str(plan_path), "warnings": warnings},
-                            indent=2,
-                        )
-                    )
-                except OSError:
-                    logger.debug(
-                        "Could not write planner evidence warning artifact",
-                        exc_info=True,
-                    )
-
         draft_script = self._extract_draft_script(content)
         if not draft_script:
             if require_draft_script:
@@ -1512,6 +1847,46 @@ Original task follows. Obey it, but correct the failure above.
             )
             self.last_draft_script_path = None
             return plan_path
+
+        validation = self._validate_planner_evidence(
+            content,
+            require_live_browser=require_draft_script,
+        )
+        if validation.blocking_errors:
+            raise SpecGenerationError(
+                "Planner output did not include enough concrete evidence for a live-browser test plan.",
+                diagnostics={
+                    "expected_output_path": str(expected_output_path),
+                    "generated_plan_path": str(plan_path),
+                    "planner_validation_errors": validation.blocking_errors,
+                    "planner_validation_warnings": validation.warnings,
+                    "evidence_score": validation.evidence_score,
+                    "failure_category": "low_evidence_non_repairable",
+                    "retryable": True,
+                },
+            )
+        if validation.warnings:
+            logger.warning(
+                "Planner evidence warnings for %s: %s", plan_path, "; ".join(validation.warnings)
+            )
+            if self.session_dir:
+                try:
+                    warning_path = self.session_dir / "planner_evidence_warnings.json"
+                    warning_path.write_text(
+                        json.dumps(
+                            {
+                                "plan_path": str(plan_path),
+                                "warnings": validation.warnings,
+                                "evidence_score": validation.evidence_score,
+                            },
+                            indent=2,
+                        )
+                    )
+                except OSError:
+                    logger.debug(
+                        "Could not write planner evidence warning artifact",
+                        exc_info=True,
+                    )
 
         draft_path = self._draft_script_path_for_plan(expected_output_path)
         draft_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1563,21 +1938,24 @@ Original task follows. Obey it, but correct the failure above.
         return True, None
 
     @classmethod
-    def _planner_evidence_warnings(cls, content: str) -> list[str]:
-        """Warn when UI-oriented TC blocks lack observable evidence fields."""
+    def _validate_planner_evidence(
+        cls,
+        content: str,
+        *,
+        require_live_browser: bool = False,
+    ) -> PlanValidationResult:
+        """Validate that UI-oriented plans carry at least one concrete evidence signal."""
+        result = PlanValidationResult()
+        lower_content = (content or "").lower()
+        evidence_terms = cls._planner_evidence_terms()
+        result.evidence_score = sum(1 for term in evidence_terms if term in lower_content)
+        if require_live_browser and result.evidence_score <= 0:
+            result.blocking_errors.append(
+                "live-browser plan lacks observed URL, snapshot, screenshot, selector, locator, network/API evidence, or conservative reachability evidence"
+            )
+
         warnings: list[str] = []
         tc_matches = list(re.finditer(r"(?m)^###\s+(TC-\d{3}):\s+(.+)", content or ""))
-        evidence_terms = (
-            "observed url",
-            "source:",
-            "selector",
-            "getbyrole",
-            "getbytext",
-            "screenshot",
-            "confidence",
-            "browser_snapshot",
-            "live-step-",
-        )
         ui_terms = (
             "click",
             "navigate",
@@ -1603,22 +1981,80 @@ Original task follows. Obey it, but correct the failure above.
                 warnings.append(
                     f"{match.group(1)} has UI steps but no explicit observed URL/selector/screenshot/source confidence evidence."
                 )
-        return warnings[:20]
+        result.warnings = warnings[:20]
+        return result
+
+    @staticmethod
+    def _planner_evidence_terms() -> tuple[str, ...]:
+        return (
+            "observed url",
+            "current url",
+            "page url",
+            "source:",
+            "selector",
+            "locator",
+            "getbyrole",
+            "getbytext",
+            "getbylabel",
+            "screenshot",
+            "browser_snapshot",
+            "browser_take_screenshot",
+            "live-step-",
+            "network",
+            "api evidence",
+            "browser_network_requests",
+            "reachability",
+            "reachable",
+            "conservative",
+        )
+
+    @classmethod
+    def _planner_evidence_warnings(cls, content: str) -> list[str]:
+        """Backward-compatible warning list for tests/callers."""
+        return cls._validate_planner_evidence(content).warnings
 
     @classmethod
     def _is_valid_test_plan(cls, content: str) -> bool:
         valid, _reason = cls._validate_test_plan_schema(content)
         return valid
 
-    def _recover_saved_plan(self, expected_output_path: Path) -> Path | None:
-        """
-        Recover a markdown plan saved by the agent.
+    @staticmethod
+    def _is_ignored_plan_artifact_path(path: Path) -> bool:
+        parts = [part.lower() for part in path.parts]
+        if ".claude" in parts:
+            return True
+        stem = path.stem.lower()
+        return stem.endswith("-agent") or stem.endswith("_agent")
 
-        The expected output path wins. If it is absent or invalid, search run/session
-        directories for a valid markdown plan artifact and copy it to the expected
-        specs location so downstream spec registration remains stable.
-        """
-        candidates: list[Path] = [expected_output_path]
+    @staticmethod
+    def _is_likely_planner_artifact_path(path: Path, expected_output_path: Path) -> bool:
+        try:
+            if path.resolve() == expected_output_path.resolve():
+                return True
+        except OSError:
+            if path == expected_output_path:
+                return True
+
+        if NativePlanner._is_ignored_plan_artifact_path(path):
+            return False
+        if path.suffix.lower() != ".md":
+            return False
+
+        name = path.name.lower()
+        likely_names = {
+            "planner-output.md",
+            "test-plan.md",
+            "saved-plan.md",
+        }
+        return name in likely_names or name == expected_output_path.name.lower()
+
+    def _iter_likely_plan_artifacts(
+        self,
+        expected_output_path: Path,
+        *,
+        include_expected: bool = True,
+    ) -> list[Path]:
+        candidates: list[Path] = [expected_output_path] if include_expected else []
         search_roots = []
         for root in (self.session_dir, self.cwd):
             if root:
@@ -1628,30 +2064,59 @@ Original task follows. Obey it, but correct the failure above.
 
         for root in search_roots:
             try:
-                candidates.extend(
-                    sorted(
-                        root.rglob("*.md"),
-                        key=lambda path: path.stat().st_mtime,
-                        reverse=True,
-                    )
-                )
+                for path in sorted(
+                    root.rglob("*.md"),
+                    key=lambda candidate: candidate.stat().st_mtime,
+                    reverse=True,
+                ):
+                    if self._is_likely_planner_artifact_path(path, expected_output_path):
+                        candidates.append(path)
             except OSError:
                 logger.debug("Failed to search saved plan artifacts under %s", root)
 
         seen: set[Path] = set()
+        unique: list[Path] = []
         for path in candidates:
             try:
                 resolved = path.resolve()
-                if resolved in seen or not path.exists() or not path.is_file():
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(path)
+        return unique
+
+    def _recover_saved_plan(
+        self,
+        expected_output_path: Path,
+        *,
+        include_expected: bool = True,
+    ) -> Path | None:
+        """
+        Recover a markdown plan saved by the agent.
+
+        The expected output path wins. If it is absent or invalid, search run/session
+        directories for a valid markdown plan artifact and copy it to the expected
+        specs location so downstream spec registration remains stable.
+        """
+        for path in self._iter_likely_plan_artifacts(
+            expected_output_path,
+            include_expected=include_expected,
+        ):
+            try:
+                if not path.exists() or not path.is_file():
                     continue
-                seen.add(resolved)
                 content = path.read_text()
             except OSError:
                 continue
 
             valid, reason = self._validate_test_plan_schema(content)
             if not valid:
-                logger.warning("Ignoring invalid saved plan %s: %s", path, reason)
+                if self._is_likely_planner_artifact_path(path, expected_output_path):
+                    logger.warning("Ignoring invalid saved plan %s: %s", path, reason)
+                else:
+                    logger.debug("Ignoring non-planner markdown artifact %s: %s", path, reason)
                 continue
 
             if path.resolve() != expected_output_path.resolve():
@@ -1663,6 +2128,19 @@ Original task follows. Obey it, but correct the failure above.
                 return expected_output_path
             return path
 
+        return None
+
+    def _recover_expected_saved_plan(self, expected_output_path: Path) -> Path | None:
+        try:
+            if not expected_output_path.exists() or not expected_output_path.is_file():
+                return None
+            content = expected_output_path.read_text()
+        except OSError:
+            return None
+        valid, reason = self._validate_test_plan_schema(content)
+        if valid:
+            return expected_output_path
+        logger.warning("Ignoring invalid saved plan %s: %s", expected_output_path, reason)
         return None
 
     @staticmethod
@@ -1732,38 +2210,7 @@ Original task follows. Obey it, but correct the failure above.
         return None
 
     def _plan_candidate_paths(self, expected_output_path: Path) -> list[Path]:
-        candidates: list[Path] = [expected_output_path]
-        search_roots = []
-        for root in (self.session_dir, self.cwd):
-            if root:
-                root_path = Path(root)
-                if root_path.exists() and root_path not in search_roots:
-                    search_roots.append(root_path)
-
-        for root in search_roots:
-            try:
-                candidates.extend(
-                    sorted(
-                        root.rglob("*.md"),
-                        key=lambda path: path.stat().st_mtime,
-                        reverse=True,
-                    )
-                )
-            except OSError:
-                logger.debug("Failed to search saved plan artifacts under %s", root)
-
-        seen: set[Path] = set()
-        unique: list[Path] = []
-        for path in candidates:
-            try:
-                resolved = path.resolve()
-            except OSError:
-                continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            unique.append(path)
-        return unique
+        return self._iter_likely_plan_artifacts(expected_output_path)
 
     def _collect_repair_evidence(
         self,
@@ -1851,15 +2298,19 @@ Original task follows. Obey it, but correct the failure above.
             "content_hash": self._content_hash(raw_output) if raw_output else None,
             "preview": self._content_preview(raw_output) if raw_output else "",
         }
+        raw_output_evidence = self._validate_planner_evidence(raw_output)
+        structured_evidence_present = bool(
+            save_plan_observed or rejected_artifacts or rejected_payloads
+        )
 
         useful = bool(
-            save_plan_observed
-            or rejected_artifacts
-            or rejected_payloads
-            or raw_output.strip()
+            structured_evidence_present
+            or (raw_output.strip() and raw_output_evidence.evidence_score > 0)
         )
         return {
             "useful_evidence": useful,
+            "evidence_score": raw_output_evidence.evidence_score,
+            "failure_category": None if useful else "low_evidence_non_repairable",
             "save_plan_observed": save_plan_observed,
             "draft_script_validation_failure": draft_script_validation_failure,
             "rejected_artifacts": rejected_artifacts,
@@ -1989,6 +2440,51 @@ Original task follows. Obey it, but correct the failure above.
         }
         self._write_repair_attempt_artifact(attempt)
         if not evidence["useful_evidence"]:
+            raw_output_text = str(evidence.get("_raw_output_content") or "").strip()
+            if (
+                not raw_output_text
+                or bool(getattr(agent_result, "timed_out", False))
+                or bool(getattr(agent_result, "error", None))
+            ):
+                return None
+            evidence_hash = (
+                evidence["raw_output"].get("content_hash")
+                or self._content_hash(
+                    json.dumps(
+                        {
+                            "artifacts": evidence.get("rejected_artifacts"),
+                            "payloads": evidence.get("rejected_save_plan_payloads"),
+                        },
+                        sort_keys=True,
+                        default=str,
+                    )
+                )
+            )
+            attempt["validation_failure_reason"] = "low_evidence_non_repairable"
+            attempt["failure_category"] = "low_evidence_non_repairable"
+            attempt["evidence_hash"] = evidence_hash
+            self._write_repair_attempt_artifact(attempt)
+            if evidence_hash and getattr(self, "_last_low_evidence_repair_hash", None) == evidence_hash:
+                diagnostics = self._agent_diagnostics(agent_result, expected_output_path)
+                diagnostics.update(
+                    {
+                        "planner_repair_attempted": False,
+                        "planner_repair_accepted": False,
+                        "planner_repair_validation_failure": "low_evidence_non_repairable",
+                        "failure_category": "low_evidence_non_repairable",
+                        "evidence_hash": evidence_hash,
+                        "retryable": False,
+                    }
+                )
+                raise SpecGenerationError(
+                    (
+                        f"Failed to generate spec for {subject_type} '{subject_name}': "
+                        "planner output was narrative-only or otherwise lacked concrete browser evidence, "
+                        "and the same low-evidence failure repeated."
+                    ),
+                    diagnostics=diagnostics,
+                )
+            self._last_low_evidence_repair_hash = evidence_hash
             return None
 
         attempt["attempted"] = True
@@ -2134,6 +2630,9 @@ Original task follows. Obey it, but correct the failure above.
             "valid_saved_plan_observed": False,
             "expected_output_path": str(expected_output_path),
         }
+        runtime_diagnostics = getattr(agent_result, "runtime_diagnostics", None)
+        if isinstance(runtime_diagnostics, dict):
+            diagnostics["planner_runtime_preflight"] = runtime_diagnostics
 
         if diagnostics["unproductive_stream"]:
             diagnostics["next_action"] = (
@@ -2143,6 +2642,8 @@ Original task follows. Obey it, but correct the failure above.
             diagnostics["next_action"] = (
                 "Retry with a longer planner timeout or reduce the feature scope."
             )
+        elif diagnostics["agent_error_type"] == CLAUDE_CODE_AUTH_ERROR_TYPE:
+            diagnostics["next_action"] = CLAUDE_CODE_AUTH_NEXT_ACTION
         elif agent_error:
             diagnostics["next_action"] = (
                 "Check agent worker logs and SDK/queue runtime errors."
@@ -2187,13 +2688,25 @@ Original task follows. Obey it, but correct the failure above.
         expected_output_path: Path,
     ) -> SpecGenerationError:
         diagnostics = self._agent_diagnostics(agent_result, expected_output_path)
+        auth_failure = self._is_claude_code_auth_failure(agent_result)
+        browser_failure = classify_browser_failure(
+            getattr(agent_result, "error", None),
+            tool_name=self._last_tool_name(agent_result),
+            error_type=getattr(agent_result, "error_type", None),
+        )
         diagnostics.update(
             {
                 "status": "runtime_failed",
                 "failure_category": (
+                    CLAUDE_CODE_AUTH_ERROR_TYPE
+                    if auth_failure
+                    else browser_failure.error_type
+                    if browser_failure
+                    else (
                     "unproductive_stream"
                     if getattr(agent_result, "error_type", None) == "unproductive_stream"
                     else "runtime_failed"
+                    )
                 ),
                 "exception_type": getattr(agent_result, "error_type", None)
                 or ("timeout" if getattr(agent_result, "timed_out", False) else None)
@@ -2210,13 +2723,30 @@ Original task follows. Obey it, but correct the failure above.
                 else None,
             }
         )
+        if auth_failure:
+            diagnostics["next_action"] = self._auth_failure_next_action(diagnostics)
+        if browser_failure:
+            diagnostics.update(browser_failure.telemetry())
         artifact_path = self._write_runtime_error_artifact(
             diagnostics=diagnostics,
             expected_output_path=expected_output_path,
         )
         if artifact_path:
             diagnostics["runtime_error_path"] = artifact_path
-        if diagnostics["exception_type"] == "unproductive_stream":
+        if auth_failure:
+            raw_message = (
+                getattr(agent_result, "error", None)
+                or getattr(agent_result, "output", None)
+                or "Claude Code authentication failed."
+            )
+            auth_runtime_message = self._auth_failure_runtime_message(diagnostics)
+            message = (
+                f"Failed to generate spec for {subject_type} '{subject_name}': "
+                f"Claude Code authentication failed. {auth_runtime_message}\n"
+                f"Raw error: {raw_message}\n"
+                f"Next action: {diagnostics['next_action']}"
+            )
+        elif diagnostics["exception_type"] == "unproductive_stream":
             message = (
                 f"Failed to generate spec for {subject_type} '{subject_name}': "
                 "planner SDK stream received messages but produced no parsed text, "
@@ -2230,6 +2760,46 @@ Original task follows. Obey it, but correct the failure above.
         return SpecGenerationError(
             message,
             diagnostics=diagnostics,
+        )
+
+    @staticmethod
+    def _runtime_preflight_from_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
+        preflight = diagnostics.get("planner_runtime_preflight")
+        return preflight if isinstance(preflight, dict) else {}
+
+    @classmethod
+    def _auth_failure_next_action(cls, diagnostics: dict[str, Any]) -> str:
+        preflight = cls._runtime_preflight_from_diagnostics(diagnostics)
+        if preflight.get("execution_path") == "direct_sdk":
+            return CLAUDE_CODE_AUTH_NEXT_ACTION
+        return (
+            "Check queue/worker runtime credentials and environment propagation. "
+            "Confirm the worker receives the configured API key or Claude Code OAuth token."
+        )
+
+    @classmethod
+    def _auth_failure_runtime_message(cls, diagnostics: dict[str, Any]) -> str:
+        preflight = cls._runtime_preflight_from_diagnostics(diagnostics)
+        execution_path = preflight.get("execution_path")
+        if execution_path == "direct_sdk":
+            return (
+                "The planner used the direct SDK auth path. Configure Claude Code OAuth token "
+                "or run /login for the backend runtime."
+            )
+        if execution_path == "queue":
+            return (
+                "The planner used the queue/worker runtime path. "
+                f"Credential diagnostics: api_key_set={bool(preflight.get('api_key_set'))}, "
+                "claude_code_oauth_token_set="
+                f"{bool(preflight.get('claude_code_oauth_token_set'))}, "
+                f"auth_mode={preflight.get('auth_mode') or 'unset'}, "
+                f"provider={preflight.get('provider') or 'unknown'}, "
+                f"tier={preflight.get('tier') or 'unknown'}, "
+                f"model={preflight.get('model') or 'unknown'}."
+            )
+        return (
+            "Credential diagnostics were unavailable for this run. Check queue/worker logs "
+            "and runtime credential configuration."
         )
 
     @classmethod

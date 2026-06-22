@@ -28,7 +28,8 @@ def normalize_agent_runtime(value: str | None, *, default: str | None = None) ->
     }
     normalized = aliases.get(raw, raw)
     if normalized not in SUPPORTED_AGENT_RUNTIMES:
-        return "claude_sdk"
+        supported = ", ".join(sorted(SUPPORTED_AGENT_RUNTIMES))
+        raise ValueError(f"Unsupported agent runtime {raw!r}. Supported runtimes: {supported}.")
     return normalized  # type: ignore[return-value]
 
 

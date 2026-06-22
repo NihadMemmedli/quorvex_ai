@@ -85,6 +85,7 @@ def create_agent_run_event(
     message: str,
     level: str = "info",
     payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
     session: Session | None = None,
 ) -> AgentRunEvent | None:
     """Persist one compact agent run event."""
@@ -95,6 +96,15 @@ def create_agent_run_event(
         run = db.get(AgentRun, run_id)
         if not run:
             return None
+        if idempotency_key:
+            existing = db.exec(
+                select(AgentRunEvent).where(
+                    AgentRunEvent.run_id == run_id,
+                    AgentRunEvent.idempotency_key == idempotency_key,
+                )
+            ).first()
+            if existing:
+                return existing
         event: AgentRunEvent | None = None
         for attempt in range(5):
             event = AgentRunEvent(
@@ -108,6 +118,7 @@ def create_agent_run_event(
                 event_type=event_type,
                 level=level,
                 message=_compact_text(message, MAX_MESSAGE_CHARS),
+                idempotency_key=idempotency_key,
                 created_at=_utcnow(),
             )
             event.payload = safe_event_payload(payload)
@@ -118,6 +129,15 @@ def create_agent_run_event(
                 break
             except IntegrityError as exc:
                 db.rollback()
+                if idempotency_key:
+                    existing = db.exec(
+                        select(AgentRunEvent).where(
+                            AgentRunEvent.run_id == run_id,
+                            AgentRunEvent.idempotency_key == idempotency_key,
+                        )
+                    ).first()
+                    if existing:
+                        return existing
                 if attempt >= 4:
                     logger.warning("Failed to allocate unique event sequence for run %s: %s", run_id, exc)
                     raise
@@ -144,6 +164,7 @@ def create_event_for_agent_task(
     level: str = "info",
     payload: dict[str, Any] | None = None,
     run_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> AgentRunEvent | None:
     """Resolve an agent task to its AgentRun and persist an event."""
 
@@ -161,6 +182,7 @@ def create_event_for_agent_task(
             level=level,
             message=message,
             payload=payload,
+            idempotency_key=idempotency_key,
             session=session,
         )
 
@@ -178,6 +200,7 @@ def event_to_response(event: AgentRunEvent) -> dict[str, Any]:
         "level": event.level,
         "message": event.message,
         "payload": event.payload,
+        "idempotency_key": event.idempotency_key,
         "created_at": event.created_at.isoformat(),
     }
 

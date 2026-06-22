@@ -126,6 +126,41 @@ def test_agent_allowlist_can_use_run_local_mcp_config(tmp_path, monkeypatch):
     assert "mcp__playwright__planner_setup_page" not in tools
 
 
+def test_planner_and_healer_allow_note_tool_only_when_configured(tmp_path, monkeypatch):
+    root_dir = tmp_path / "root"
+    run_dir = tmp_path / "run"
+    root_dir.mkdir()
+    run_dir.mkdir()
+    _write_mcp_config(root_dir, "playwright-test")
+    (run_dir / ".mcp.json").write_text(
+        """
+{
+  "mcpServers": {
+    "playwright-test": {
+      "command": "npx",
+      "args": ["playwright", "run-test-mcp-server"]
+    },
+    "quorvex-agent": {
+      "command": "python",
+      "args": ["tools/agent_note_mcp/server.py"]
+    }
+  }
+}
+"""
+    )
+    monkeypatch.chdir(root_dir)
+
+    root_tools = get_agent_allowed_tools("playwright-test-healer")
+    planner_tools = get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=run_dir)
+    healer_tools = get_agent_allowed_tools("playwright-test-healer", mcp_config_dir=run_dir)
+    generator_tools = get_agent_allowed_tools("playwright-test-generator", mcp_config_dir=run_dir)
+
+    assert "mcp__quorvex-agent__quorvex_record_note" not in root_tools
+    assert "mcp__quorvex-agent__quorvex_record_note" in planner_tools
+    assert "mcp__quorvex-agent__quorvex_record_note" in healer_tools
+    assert "mcp__quorvex-agent__quorvex_record_note" not in generator_tools
+
+
 def test_prd_only_planner_profile_has_no_tools(tmp_path, monkeypatch):
     _write_mcp_config(tmp_path, "playwright-test")
     monkeypatch.chdir(tmp_path)
@@ -144,6 +179,7 @@ def test_prd_live_planner_allows_only_prd_browser_tools(tmp_path, monkeypatch):
     assert "mcp__playwright-test__generator_write_test" in tools
     assert "mcp__playwright-test__browser_navigate" in tools
     assert "mcp__playwright-test__browser_snapshot" in tools
+    assert "mcp__playwright-test__browser_handle_dialog" in tools
     assert "mcp__playwright-test__test_debug" in tools
     assert "mcp__playwright-test__test_run" in tools
     assert "mcp__playwright-test__browser_close" not in tools
@@ -166,6 +202,8 @@ def test_prd_live_planner_tool_config_keeps_debug_browser_open(tmp_path, monkeyp
     visible_tools = set(config["tools"])
     assert "mcp__playwright-test__browser_close" not in allowed_tools
     assert "mcp__playwright-test__browser_close" not in visible_tools
+    assert "mcp__playwright-test__browser_handle_dialog" in allowed_tools
+    assert "mcp__playwright-test__browser_handle_dialog" in visible_tools
     assert "mcp__playwright-test__browser_run_code" not in allowed_tools
     assert "mcp__playwright-test__browser_evaluate" not in visible_tools
 

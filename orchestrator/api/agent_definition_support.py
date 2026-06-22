@@ -12,6 +12,9 @@ from . import agent_tool_catalog_support
 from .middleware.permissions import ProjectRole, check_project_access
 from .models_db import AgentDefinition, AgentToolDefinition
 
+AGENT_NOTE_TOOL_ID = "agent_note"
+AGENT_NOTE_TOOL_NAME = "mcp__quorvex-agent__quorvex_record_note"
+
 
 def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
     """Upsert the built-in selectable tool catalog."""
@@ -116,10 +119,11 @@ def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[st
     _sync_agent_tool_catalog(session)
     if not tool_ids:
         raise HTTPException(status_code=400, detail="Select at least one tool for this agent")
+    normalized_tool_ids = list(dict.fromkeys([*tool_ids, AGENT_NOTE_TOOL_ID]))
 
     tools: list[AgentToolDefinition] = []
     unknown: list[str] = []
-    for tool_id in tool_ids:
+    for tool_id in normalized_tool_ids:
         tool = session.get(AgentToolDefinition, tool_id)
         if not tool or not tool.enabled:
             unknown.append(tool_id)

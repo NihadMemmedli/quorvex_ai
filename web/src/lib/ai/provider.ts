@@ -6,8 +6,10 @@ export interface ChatRuntimeSettings {
   llm_provider?: string;
   assistant_runtime?: string;
   agent_runtime?: string;
+  auth_mode?: string;
   base_url?: string;
   api_key?: string;
+  claude_code_oauth_token?: string;
   model_name?: string;
   chat_model?: string;
   standard_model?: string;
@@ -90,6 +92,13 @@ function getAvailableSlot(runtime?: ChatRuntimeSettings): KeySlot | null {
   );
 }
 
+export function usesClaudeCodeSubscription(runtime?: ChatRuntimeSettings): boolean {
+  return runtime?.auth_mode === 'claude_code_subscription'
+    || runtime?.llm_provider === 'claude_code_subscription'
+    || process.env.QUORVEX_LLM_AUTH_MODE === 'claude_code_subscription'
+    || process.env.QUORVEX_LLM_PROVIDER === 'claude_code_subscription';
+}
+
 const _COOLDOWN_SCHEDULE = [60_000, 300_000]; // 1 min, 5 min (ms)
 
 export function reportRateLimit(slot?: KeySlot) {
@@ -105,9 +114,12 @@ export function reportRateLimit(slot?: KeySlot) {
  * Returns { provider, slot } so callers can report rate limits.
  */
 export function getActiveProvider(runtime?: ChatRuntimeSettings) {
-  const slot = runtime?.api_key ? null : getAvailableSlot(runtime);
-  const apiKey = runtime?.api_key || slot?.token || process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
-  const authToken = apiKey ? '' : process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
+  const useClaudeCode = usesClaudeCodeSubscription(runtime);
+  const slot = runtime?.api_key || useClaudeCode ? null : getAvailableSlot(runtime);
+  const apiKey = useClaudeCode
+    ? ''
+    : runtime?.api_key || slot?.token || process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+  const authToken = apiKey ? '' : runtime?.claude_code_oauth_token || process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
 
   const provider = createAnthropic({
     ...(apiKey ? { apiKey } : { authToken }),
@@ -119,10 +131,13 @@ export function getActiveProvider(runtime?: ChatRuntimeSettings) {
 
 export function hasDirectAnthropicChatCredential(runtime?: ChatRuntimeSettings) {
   if (runtime) {
-    return runtime.route_provider === 'anthropic' && Boolean((runtime.api_key || process.env.CLAUDE_CODE_OAUTH_TOKEN || '').trim());
+    return runtime.route_provider === 'anthropic'
+      && !usesClaudeCodeSubscription(runtime)
+      && Boolean((runtime.api_key || '').trim());
   }
   const explicitAssistantRuntime = getExplicitAssistantRuntime(runtime);
   if (explicitAssistantRuntime === 'openai') return false;
+  if (usesClaudeCodeSubscription(runtime)) return false;
 
   return Boolean(
     (
@@ -131,6 +146,7 @@ export function hasDirectAnthropicChatCredential(runtime?: ChatRuntimeSettings) 
       process.env.ANTHROPIC_AUTH_TOKENS ||
       process.env.ANTHROPIC_API_KEY ||
       process.env.ANTHROPIC_AUTH_TOKEN ||
+      process.env.CLAUDE_CODE_OAUTH_TOKEN ||
       ''
     ).trim()
   );

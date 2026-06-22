@@ -2501,6 +2501,7 @@ export default function DiscoveryPage() {
                                         liveViewAvailable={Boolean(activeRun.progress?.live_view_available)}
                                         runtimeMessage={activeRun.progress?.runtime_message}
                                         vncUrl={activeRun.progress?.vnc_url}
+                                        suspectedBrowserDialogBlock={activeRun.progress?.suspected_browser_dialog_block === true}
                                     />
                                     <ExplorerAgentCapturePanel activeRun={activeRun} mode="live" />
                                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>

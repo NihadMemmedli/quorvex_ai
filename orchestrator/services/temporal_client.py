@@ -753,7 +753,10 @@ async def get_custom_workflow_temporal_diagnostics(
 
 
 async def get_agent_run_temporal_diagnostics(
-    workflow_id: str, run_id: str | None = None
+    workflow_id: str,
+    run_id: str | None = None,
+    *,
+    task_queue: str | None = None,
 ) -> dict[str, Any]:
     """Return parsed Temporal activity history for a standalone agent run."""
     client = await _connect_client()
@@ -780,9 +783,10 @@ async def get_agent_run_temporal_diagnostics(
     diagnostic_error = None
     if worker_registration_failure and not activities:
         diagnostic_error = worker_registration_failure
+    selected_task_queue = task_queue or settings.temporal_workflow_task_queue
     task_queue_status: dict[str, Any] = {}
     try:
-        task_queue_status = await describe_temporal_task_queue(settings.temporal_workflow_task_queue)
+        task_queue_status = await describe_temporal_task_queue(selected_task_queue)
     except TemporalUnavailableError as exc:
         diagnostic_error = diagnostic_error or str(exc)
     return {
@@ -791,7 +795,7 @@ async def get_agent_run_temporal_diagnostics(
         "error": diagnostic_error,
         "temporal_error": diagnostic_error,
         "temporal_namespace": getattr(settings, "temporal_namespace", None),
-        "task_queue": getattr(settings, "temporal_workflow_task_queue", None),
+        "task_queue": selected_task_queue,
         "workflow_type": "AgentRunWorkflow",
         "task_queue_status": task_queue_status,
         "workflow_status": (

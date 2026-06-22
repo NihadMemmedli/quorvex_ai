@@ -109,6 +109,8 @@ class ExploratoryAgent(BaseAgent):
         excluded_patterns = config.get("excluded_patterns") or []
         browser_memory_context = config.get("browser_memory_context") or ""
         advanced_tools = bool(config.get("advanced_tools") or config.get("record_video") or config.get("capture_video"))
+        self.model = config.get("model")
+        self.model_tier = config.get("model_tier")
 
         # Initialize state and coverage
         self.state = ExplorationState(start_time=time.time())

@@ -35,8 +35,11 @@ if "slowapi" not in sys.modules:
     sys.modules["slowapi.errors"] = slowapi_errors
     sys.modules["slowapi.util"] = slowapi_util
 
+from orchestrator.api import agent_run_observability
 from orchestrator.api import db as db_module
 from orchestrator.api import main as main_module
+from orchestrator.api.agent_background_runner_support import custom_agent_browser_tool_policy
+from orchestrator.api.agent_run_runtime_support import update_agent_run_progress
 from orchestrator.api.db import engine
 from orchestrator.api.main import (
     _custom_agent_browser_runs_via_queue,
@@ -107,6 +110,25 @@ def _create_run(run_id: str, status: str = "queued") -> AgentRun:
         return run
 
 
+def _assert_playwright_test_mcp_config(run_dir: Path) -> list[str]:
+    mcp_config_path = run_dir / ".mcp.json"
+    assert mcp_config_path.exists()
+    config = json.loads(mcp_config_path.read_text())
+    server = config["mcpServers"]["playwright-test"]
+    args = server["args"]
+    assert server["command"] == "npx"
+    assert args == [
+        "playwright",
+        "run-test-mcp-server",
+        "-c",
+        str(run_dir / "playwright.config.ts"),
+        "--headless",
+    ]
+    assert "@playwright/mcp" not in json.dumps(config)
+    assert (run_dir / "playwright.config.ts").exists()
+    return args
+
+
 class _AssertingSpecBackgroundTasks:
     def __init__(self, runs_dir: Path):
         self.runs_dir = runs_dir
@@ -114,10 +136,7 @@ class _AssertingSpecBackgroundTasks:
 
     def add_task(self, func, *args, **kwargs):
         spec_agent_run_id = kwargs["spec_agent_run_id"]
-        mcp_config_path = self.runs_dir / spec_agent_run_id / ".mcp.json"
-        assert mcp_config_path.exists()
-        config = json.loads(mcp_config_path.read_text())
-        assert "playwright-test" in config["mcpServers"]
+        _assert_playwright_test_mcp_config(self.runs_dir / spec_agent_run_id)
         self.tasks.append((func, args, kwargs))
 
 
@@ -138,12 +157,101 @@ def _report_source_result(item_id: str = "F-001", page: str = "https://example.t
     }
 
 
+@pytest.mark.parametrize(
+    "progress_patch",
+    [
+        {"phase": "tool_use", "last_tool": "mcp__playwright-test__browser_click"},
+        {"phase": "queued", "browser_tool_calls": 1},
+        {"phase": "queued", "tool_calls": 1},
+    ],
+)
+def test_update_agent_run_progress_promotes_queued_run_on_execution_evidence(progress_patch):
+    run_id = "agent-progress-promotes-queued"
+    _create_run(run_id, status="queued")
+
+    try:
+        update_agent_run_progress(run_id, progress_patch)
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "running"
+            assert run.started_at is not None
+            assert run.progress["status"] == "running"
+            assert run.progress["phase"] != "queued"
+    finally:
+        _cleanup_run(run_id)
+
+
+def test_update_agent_run_progress_preserves_active_phase_on_worker_enqueue_patch():
+    run_id = "agent-progress-preserves-active"
+    _create_run(run_id, status="running")
+
+    try:
+        update_agent_run_progress(
+            run_id,
+            {
+                "phase": "tool_use",
+                "last_tool": "mcp__playwright-test__browser_navigate",
+                "tool_calls": 1,
+            },
+        )
+        update_agent_run_progress(
+            run_id,
+            {
+                "phase": "queued",
+                "message": "Agent task queued for worker",
+                "agent_task_id": "agent-task-queued",
+            },
+        )
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "running"
+            assert run.agent_task_id == "agent-task-queued"
+            assert run.progress["phase"] == "tool_use"
+            assert run.progress["agent_task_id"] == "agent-task-queued"
+    finally:
+        _cleanup_run(run_id)
+
+
+def test_update_agent_run_progress_uses_worker_wait_for_plain_enqueue_patch():
+    run_id = "agent-progress-worker-wait"
+    _create_run(run_id, status="queued")
+
+    try:
+        update_agent_run_progress(
+            run_id,
+            {
+                "phase": "queued",
+                "message": "Agent task queued for worker",
+                "agent_task_id": "agent-task-worker-wait",
+            },
+        )
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "queued"
+            assert run.agent_task_id == "agent-task-worker-wait"
+            assert run.progress["phase"] == "worker_wait"
+    finally:
+        _cleanup_run(run_id)
+
+
 def test_custom_agent_browser_tool_detection_matches_playwright_mcp_and_browser_aliases():
     assert _custom_agent_uses_browser_tools(["mcp__playwright-test__browser_click"]) is True
     assert _custom_agent_uses_browser_tools(["mcp__playwright__browser_navigate"]) is True
     assert _custom_agent_uses_browser_tools(["browser_navigate"]) is True
     assert _custom_agent_uses_browser_tools(["Read", "Write", "mcp__appium-mcp__tap"]) is False
     assert _custom_agent_uses_browser_tools([]) is False
+
+
+def test_custom_agent_browser_tool_policy_blocks_infrastructure_debugging():
+    policy = custom_agent_browser_tool_policy()
+
+    assert "report the tooling failure" in policy
+    assert "Do not debug Quorvex source code" in policy
+    assert "node_modules" in policy
+    assert "Playwright internals" in policy
 
 
 def test_custom_agent_browser_probe_launches_installed_playwright(monkeypatch):
@@ -189,6 +297,23 @@ def test_custom_agent_mcp_config_uses_installed_chromium_executable(tmp_path, mo
     assert "--headless" not in args
 
 
+def test_custom_agent_mcp_config_includes_agent_note_server_without_browser(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+
+    run_dir = _prepare_custom_agent_mcp_config(
+        "custom-agent-note-only",
+        include_browser_tools=False,
+        include_agent_note_tool=True,
+    )
+    config = json.loads((run_dir / ".mcp.json").read_text())
+    servers = config["mcpServers"]
+
+    assert sorted(servers) == ["quorvex-agent"]
+    assert servers["quorvex-agent"]["command"] == sys.executable
+    assert servers["quorvex-agent"]["args"][0].endswith("tools/agent_note_mcp/server.py")
+    assert servers["quorvex-agent"]["env"]["QUORVEX_AGENT_RUN_ID"] == "custom-agent-note-only"
+
+
 def test_resolve_playwright_chromium_executable_prefers_env_override(tmp_path, monkeypatch):
     chromium = tmp_path / "chrome"
     chromium.write_text("")
@@ -203,6 +328,8 @@ def test_run_seed_spec_is_generated_from_target_url(tmp_path):
     content = seed_path.read_text(encoding="utf-8")
     assert seed_path == tmp_path / "tests" / "seed.spec.ts"
     assert 'const targetUrl = "https://example.test/dashboard";' in content
+    assert "page.on('dialog'" in content
+    assert "Browser dialog auto-accepted" in content
     assert "await page.goto(targetUrl || 'about:blank');" in content
 
 
@@ -269,8 +396,9 @@ async def test_report_item_spec_generation_writes_mcp_config_before_scheduling(t
                 main_module.RUNS_DIR / response["agent_run_id"] / ".mcp.json"
             )
             assert spec_run.progress["artifacts_dir"] == str(
-                main_module.RUNS_DIR / response["agent_run_id"] / "artifacts"
+                main_module.RUNS_DIR / response["agent_run_id"] / "mcp-output"
             )
+            _assert_playwright_test_mcp_config(main_module.RUNS_DIR / response["agent_run_id"])
             assert "mcp__playwright-test__planner_setup_page" in spec_run.config["allowed_tools"]
             assert len(background_tasks.tasks) == 1
     finally:
@@ -348,11 +476,12 @@ async def test_report_item_spec_generation_inherits_browser_auth_session(tmp_pat
             assert spec_run.config["source_url"] == "https://example.test/user/crm/opportunities"
             assert "do-not-copy" not in spec_run.config_json
 
-            mcp_config = json.loads((main_module.RUNS_DIR / response["agent_run_id"] / ".mcp.json").read_text())
-            args = mcp_config["mcpServers"]["playwright-test"]["args"]
-            assert "--storage-state" in args
-            storage_arg = args[args.index("--storage-state") + 1]
-            assert storage_arg.endswith("browser-auth-storage-state.json")
+            spec_run_dir = main_module.RUNS_DIR / response["agent_run_id"]
+            args = _assert_playwright_test_mcp_config(spec_run_dir)
+            assert "--storage-state" not in args
+            playwright_config = (spec_run_dir / "playwright.config.ts").read_text()
+            assert "storageState:" in playwright_config
+            assert str(spec_run_dir / "browser-auth-storage-state.json") in playwright_config
 
             assert calls == [
                 {
@@ -778,8 +907,9 @@ async def test_flow_spec_generation_writes_mcp_config_before_scheduling(tmp_path
                 main_module.RUNS_DIR / response["agent_run_id"] / ".mcp.json"
             )
             assert spec_run.progress["artifacts_dir"] == str(
-                main_module.RUNS_DIR / response["agent_run_id"] / "artifacts"
+                main_module.RUNS_DIR / response["agent_run_id"] / "mcp-output"
             )
+            _assert_playwright_test_mcp_config(main_module.RUNS_DIR / response["agent_run_id"])
             assert "mcp__playwright-test__planner_setup_page" in spec_run.config["allowed_tools"]
             assert len(background_tasks.tasks) == 1
     finally:
@@ -886,11 +1016,11 @@ async def test_flow_spec_generation_recreates_mcp_config_in_background(tmp_path,
         )
 
         assert constructed["mcp_exists_before_planner"] is True
-        assert mcp_config_path.exists()
-        mcp_config = json.loads(mcp_config_path.read_text())
-        args = mcp_config["mcpServers"]["playwright-test"]["args"]
-        assert "--storage-state" in args
-        assert args[args.index("--storage-state") + 1].endswith("browser-auth-storage-state.json")
+        args = _assert_playwright_test_mcp_config(spec_run_dir)
+        assert "--storage-state" not in args
+        playwright_config = (spec_run_dir / "playwright.config.ts").read_text()
+        assert "storageState:" in playwright_config
+        assert str(spec_run_dir / "browser-auth-storage-state.json") in playwright_config
         assert auth_calls == [
             {
                 "project_id": "background-project",
@@ -903,7 +1033,7 @@ async def test_flow_spec_generation_recreates_mcp_config_in_background(tmp_path,
             assert spec_run is not None
             assert spec_run.status == "completed"
             assert spec_run.progress["mcp_config_path"] == str(mcp_config_path)
-            assert spec_run.progress["artifacts_dir"] == str(spec_run_dir / "artifacts")
+            assert spec_run.progress["artifacts_dir"] == str(spec_run_dir / "mcp-output")
             assert spec_run.progress["browser_auth_session_id"] == "background-auth-session"
         assert main_module._flow_spec_jobs[job_id]["status"] == "completed"
     finally:
@@ -1260,6 +1390,50 @@ async def test_browser_agent_run_temporal_uses_vnc_task_queue(monkeypatch):
             ).first()
             assert event is not None
             assert event.payload["task_queue"] == "quorvex-browser-workflows"
+            session.refresh(run)
+            assert run.progress["task_queue"] == "quorvex-browser-workflows"
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_temporal_diagnostics_uses_recorded_task_queue(monkeypatch):
+    run_id = "agent-temporal-diagnostics-task-queue"
+    _create_run(run_id)
+    captured: dict[str, str | None] = {}
+
+    async def fake_temporal_diagnostics(
+        workflow_id: str,
+        run_id: str | None = None,
+        *,
+        task_queue: str | None = None,
+    ):
+        captured["workflow_id"] = workflow_id
+        captured["run_id"] = run_id
+        captured["task_queue"] = task_queue
+        return {"available": True, "task_queue": task_queue, "workflow_status": "RUNNING"}
+
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.get_agent_run_temporal_diagnostics",
+        fake_temporal_diagnostics,
+    )
+
+    try:
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            run.temporal_workflow_id = "agent-run-diagnostics"
+            run.temporal_run_id = "temporal-run-diagnostics"
+            run.progress = {"task_queue": "quorvex-browser-workflows"}
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            payload = await agent_run_observability._agent_run_temporal_payload(run)
+
+        assert captured["workflow_id"] == "agent-run-diagnostics"
+        assert captured["run_id"] == "temporal-run-diagnostics"
+        assert captured["task_queue"] == "quorvex-browser-workflows"
+        assert payload["task_queue"] == "quorvex-browser-workflows"
     finally:
         _cleanup_run(run_id)
 

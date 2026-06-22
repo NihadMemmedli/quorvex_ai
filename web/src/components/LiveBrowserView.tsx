@@ -22,6 +22,9 @@ interface LiveBrowserViewProps {
     browserActivitySeen?: boolean;
     browserActive?: boolean;
     browserLastTool?: string | null;
+    suspectedBrowserDialogBlock?: boolean;
+    authPreflightStatus?: string | null;
+    authPreflightFailureReason?: string | null;
 }
 
 const VNC_CONNECT_TIMEOUT_MS = 8000;
@@ -124,6 +127,9 @@ export function LiveBrowserView({
     browserActivitySeen = false,
     browserActive = false,
     browserLastTool,
+    suspectedBrowserDialogBlock = false,
+    authPreflightStatus,
+    authPreflightFailureReason,
 }: LiveBrowserViewProps) {
     const { user } = useAuth();
     const [isConnected, setIsConnected] = useState(false);
@@ -152,6 +158,10 @@ export function LiveBrowserView({
     const canUseLiveView = liveBrowserRequested && liveViewAvailable;
     const forceArtifactPreview = preferProvidedArtifactPreview || preferQueryArtifactPreview || !canUseLiveView;
     const pendingMessage = runtimeMessage?.trim() || statusMessage?.trim();
+    const authPreflightFailed = String(authPreflightStatus || '').toLowerCase() === 'failed';
+    const authChallenge = authPreflightFailed && /challenge|security|cloudflare|captcha|verify you are human|just a moment/i.test(authPreflightFailureReason || pendingMessage || '');
+    const authFailureLabel = authChallenge ? 'Auth challenge' : 'Session validation failed';
+    const authFailureMessage = authPreflightFailureReason?.trim() || pendingMessage || 'Saved browser session validation failed before the agent started.';
     const browserProcessCount = displayDiagnostics?.browser_process_count ?? 0;
     const browserWindowCount = displayDiagnostics?.browser_window_count ?? null;
     const browserProcessSeen = displayDiagnostics?.browser_process_seen ?? browserProcessCount > 0;
@@ -164,32 +174,42 @@ export function LiveBrowserView({
     const browserStarting = !vncServerUnavailable && liveBrowserRequested && browserProcessSeen && !browserWindowSeen;
     const noBrowserWindow = !vncServerUnavailable && liveBrowserRequested && browserActivitySeen && !browserProcessSeen && !browserWindowSeen;
     const isProviderRetry = Boolean(pendingMessage && /rate limit|rate-limited|retry/i.test(pendingMessage));
+    const dialogBlocked = suspectedBrowserDialogBlock === true;
     const showingFallbackCapture = forceArtifactPreview
         || Boolean(fallbackImage && !isConnected)
+        || Boolean(fallbackImage && desktopConnected)
         || (!isConnected && !isLoading);
     const statusLabel = !liveBrowserRequested
         ? 'PRD-only'
+        : authPreflightFailed
+            ? authFailureLabel
         : browserActive && liveStreamVisible
             ? 'Connected'
-            : vncServerUnavailable
-                ? 'VNC unavailable'
-            : fallbackImage && !isConnected
-                ? 'Latest capture'
-                : browserStarting
-                    ? 'Browser starting'
-                    : noBrowserWindow
-                        ? 'No browser window'
-                        : desktopConnected
-                            ? 'Desktop connected'
-                            : isProviderRetry
-                                ? 'Provider retry'
-                                : isLoading
-                                    ? 'Connecting...'
-                                    : isConnected
-                                        ? 'Desktop connected'
-                                        : 'Disconnected';
+            : dialogBlocked
+                ? 'Blocked by browser dialog'
+                : vncServerUnavailable
+                    ? 'VNC unavailable'
+                    : fallbackImage && !isConnected
+                        ? 'Latest capture'
+                        : browserStarting
+                            ? 'Browser starting'
+                            : noBrowserWindow
+                                ? 'No browser window'
+                                : desktopConnected
+                                    ? 'Desktop connected'
+                                    : isProviderRetry
+                                        ? 'Provider retry'
+                                        : isLoading
+                                            ? 'Connecting...'
+                                            : isConnected
+                                                ? 'Desktop connected'
+                                                : 'Disconnected';
     const unavailableTitle = vncServerUnavailable
         ? 'VNC Server Unavailable'
+        : authPreflightFailed
+            ? authFailureLabel
+        : dialogBlocked
+            ? 'Blocked by Browser Dialog'
         : canUseLiveView
             ? 'Live Browser Standby'
             : liveBrowserRequested
@@ -197,6 +217,8 @@ export function LiveBrowserView({
                 : 'PRD-only Generation';
     const unavailableMessage = vncServerUnavailable
         ? pendingMessage || 'The WebSocket bridge is reachable, but the backend VNC server on port 5900 is not accepting connections.'
+        : authPreflightFailed
+            ? authFailureMessage
         : pendingMessage || (
             canUseLiveView
                 ? 'The agent can continue to publish screenshots and recordings while the live stream initializes.'
@@ -586,11 +608,15 @@ export function LiveBrowserView({
                         border: '1px solid var(--border)',
                         gap: '1rem',
                         padding: '1.25rem',
-                    }}
-                >
-                    <img
-                        src={`${API_BASE}${fallbackImage.path}`}
-                        alt="Latest browser capture"
+                }}
+            >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--success)', fontWeight: 700 }}>
+                    <Monitor size={18} />
+                    Latest Browser Capture
+                </div>
+                <img
+                    src={`${API_BASE}${fallbackImage.path}`}
+                    alt="Latest browser capture"
                         style={{
                             width: '100%',
                             maxWidth: '920px',
@@ -645,11 +671,15 @@ export function LiveBrowserView({
                         border: '1px solid var(--border)',
                         gap: '1rem',
                         padding: '1.25rem',
-                    }}
-                >
-                    <img
-                        src={`${API_BASE}${fallbackImage.path}`}
-                        alt="Latest browser capture"
+                }}
+            >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--success)', fontWeight: 700 }}>
+                    <Monitor size={18} />
+                    Latest Browser Capture
+                </div>
+                <img
+                    src={`${API_BASE}${fallbackImage.path}`}
+                    alt="Latest browser capture"
                         style={{
                             width: '100%',
                             maxWidth: '920px',
@@ -819,6 +849,10 @@ export function LiveBrowserView({
                         <div style={{ fontSize: '0.75rem', lineHeight: 1.45, color: 'var(--text-secondary)' }}>
                             {statusLabel === 'Browser starting'
                                 ? 'A browser process exists, but no browser window has appeared on the display yet.'
+                                : authPreflightFailed
+                                    ? authFailureMessage
+                                : statusLabel === 'Blocked by browser dialog'
+                                    ? pendingMessage || 'Automatic browser dialog recovery ran, but the browser tool still timed out.'
                                 : statusLabel === 'No browser window'
                                     ? 'Browser activity was expected, but no browser process or window was detected.'
                                     : statusLabel === 'Desktop connected'
@@ -867,9 +901,6 @@ export function LiveBrowserView({
                                         objectFit: 'contain',
                                     }}
                                 />
-                                <p style={{ fontSize: '0.82rem', lineHeight: 1.5, margin: '0.85rem 0 0' }}>
-                                    Live stream is not connected in this environment, so the latest agent browser capture is shown for review.
-                                </p>
                             </div>
                         ) : (
                             <Server size={48} color="var(--primary)" />
@@ -877,9 +908,17 @@ export function LiveBrowserView({
                         <div>
                             <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.1rem' }}>
                                 {fallbackImage
-                                    ? 'Browser Evidence Available'
+                                    ? vncServerUnavailable || authPreflightFailed || dialogBlocked || !liveViewAvailable
+                                        ? unavailableTitle
+                                        : desktopConnected
+                                            ? 'Waiting for Browser Window'
+                                            : 'Browser Evidence Available'
                                     : vncServerUnavailable
                                         ? unavailableTitle
+                                        : authPreflightFailed
+                                            ? unavailableTitle
+                                        : dialogBlocked
+                                            ? unavailableTitle
                                         : !liveViewAvailable
                                             ? unavailableTitle
                                             : hasNoBrowserWindow
@@ -888,10 +927,26 @@ export function LiveBrowserView({
                                                     ? 'Waiting on Provider'
                                                     : unavailableTitle}
                             </h3>
-                            {!fallbackImage && (
+                            {fallbackImage ? (
+                                <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
+                                    {desktopConnected
+                                        ? pendingMessage || 'The VNC desktop is connected, but no active browser window is visible. Showing the latest browser capture for review.'
+                                        : vncServerUnavailable
+                                            ? unavailableMessage
+                                            : authPreflightFailed
+                                                ? authFailureMessage
+                                            : dialogBlocked
+                                                ? pendingMessage || 'Automatic browser dialog recovery ran, but the browser tool still timed out.'
+                                                : 'Live stream is not connected in this environment, so the latest agent browser capture is shown for review.'}
+                                </p>
+                            ) : (
                                 <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
                                     {vncServerUnavailable
                                         ? unavailableMessage
+                                        : authPreflightFailed
+                                            ? authFailureMessage
+                                        : dialogBlocked
+                                            ? pendingMessage || 'Automatic browser dialog recovery ran, but the browser tool still timed out.'
                                         : hasNoBrowserWindow && canUseLiveView
                                             ? pendingMessage || 'The VNC display is connected, but no browser window was detected yet.'
                                             : unavailableMessage}

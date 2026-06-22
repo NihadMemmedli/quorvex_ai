@@ -93,6 +93,20 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
         },
         session=session,
     )
+    if request.agent_type in {"custom", "exploratory"}:
+        from orchestrator.services.agent_native_runs import commit_agent_run_note
+
+        commit_agent_run_note(
+            run_id=run_id,
+            phase="created",
+            note_type="handoff",
+            title="Agent run accepted",
+            body=f"{request.agent_type} run queued for Temporal execution.",
+            source="launcher",
+            tags=["queued", request.agent_type],
+            payload={"status": initial_status, "runtime": runtime},
+            session=session,
+        )
 
     await runtime_module._start_agent_run_temporal_or_fail(run, session)
     session.refresh(run)

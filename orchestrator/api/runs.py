@@ -17,6 +17,7 @@ from utils.playwright_mcp import browser_runtime_status
 from . import run_files, spec_files
 from .db import engine, get_session
 from .models import BulkRunRequest, CreateBatchResponse, TestRun
+from .models_db import AgentRun
 from .models_db import TestRun as DBTestRun
 
 logger = get_logger(__name__)
@@ -103,6 +104,13 @@ def _read_text_if_exists(path_value: str | None) -> str:
     except Exception:
         return ""
     return ""
+
+
+def _linked_agent_run_id(session: Session, run_id: str) -> str | None:
+    agent_run = session.get(AgentRun, run_id)
+    if agent_run and agent_run.agent_type == "spec_generation":
+        return agent_run.id
+    return None
 
 
 def _validate_bulk_test_data_refs(
@@ -279,11 +287,13 @@ async def get_run(
 
     runs_dir = _runs_dir()
     run_dir = runs_dir / id
+    linked_agent_run_id = _linked_agent_run_id(session, id)
     browser_metadata = run_files.load_run_browser_metadata(run_dir)
     if not run_dir.exists():
         browser_metadata = run_files.augment_active_browser_metadata(browser_metadata, run_db.status)
         payload = {
             "id": id,
+            "linked_agent_run_id": linked_agent_run_id,
             "status": run_db.status,
             "effective_status": run_db.status or "unknown",
             "spec_name": run_db.spec_name,
@@ -320,6 +330,7 @@ async def get_run(
 
     data = {
         "id": id,
+        "linked_agent_run_id": linked_agent_run_id,
         "status": run_db.status,
         "spec_name": run_db.spec_name,
         "test_name": run_db.test_name,
@@ -609,6 +620,7 @@ async def stream_run_events(id: str, request: Request, session: Session = Depend
                     payload = await run_files.compose_test_run_log_payload(current_run, run_dir)
                     status_payload = {
                         "run_id": id,
+                        "linked_agent_run_id": _linked_agent_run_id(check_session, id),
                         "status": current_run.status,
                         "current_stage": current_run.current_stage,
                         "stage_started_at": current_run.stage_started_at.isoformat()

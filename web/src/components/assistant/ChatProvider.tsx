@@ -343,6 +343,12 @@ function projectStatusPath(path: string, projectId?: string) {
   return projectId ? withProjectQuery(path, projectId) : path;
 }
 
+function agentRunPagePath(runId: string, projectId?: string) {
+  const params = new URLSearchParams({ runId, view: 'run' });
+  if (projectId) params.set('project_id', projectId);
+  return `/agents?${params.toString()}`;
+}
+
 function emitApiTestingRefresh(job: TrackedChatJob, snapshot?: JobSnapshot) {
   if (typeof window === 'undefined' || job.kind !== 'api-job') return;
   const artifact = {
@@ -376,7 +382,7 @@ function getTrackedArtifactContext(job: TrackedChatJob, snapshot?: JobSnapshot):
   return job.artifact || {};
 }
 
-function buildTrackedJobPagePath(job: TrackedChatJob, snapshot?: JobSnapshot): string {
+export function buildTrackedJobPagePath(job: TrackedChatJob, snapshot?: JobSnapshot): string {
   if (isApiTestingTool(job.toolName)) {
     return buildApiTestingPageLink(getTrackedArtifactContext(job, snapshot) as ApiTestingArtifactContext);
   }
@@ -422,7 +428,7 @@ function formatArtifactLines(job: TrackedChatJob, snapshot?: JobSnapshot): strin
   return lines;
 }
 
-function makeTrackedJob(
+export function makeTrackedJob(
   toolName: string,
   result: unknown,
   args: Record<string, unknown> | undefined,
@@ -449,7 +455,7 @@ function makeTrackedJob(
     kind = 'agent';
     id = stringValue(data, ['run_id', 'runId', 'id']);
     statusPath = `/api/agents/runs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`;
-    pagePath = '/agents';
+    pagePath = id ? agentRunPagePath(id, projectId) : '/agents';
   } else if (['startDiscoveryExploration', 'startExploration'].includes(toolName)) {
     kind = 'exploration';
     id = stringValue(data, ['session_id', 'sessionId', 'id']);

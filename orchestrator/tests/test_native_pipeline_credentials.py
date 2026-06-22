@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
@@ -356,6 +357,51 @@ def test_native_pipeline_writes_runtime_fixture_file(tmp_path, caplog):
     assert "QUORVEX_TEST_DATA_FILE" not in caplog.text
     assert "env_injected=True" in caplog.text
     assert "secret-pass" not in caplog.text
+
+
+def test_native_pipeline_fixture_env_resolves_runner_settings_credentials(monkeypatch, tmp_path):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    monkeypatch.setattr(
+        settings_api,
+        "runtime_env_vars",
+        lambda: {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "api_key",
+            "QUORVEX_LLM_BASE_URL": "https://settings.example/anthropic",
+            "ANTHROPIC_BASE_URL": "https://settings.example/anthropic",
+            "QUORVEX_LLM_API_KEY": "settings-secret-key",
+            "ANTHROPIC_AUTH_TOKEN": "settings-secret-key",
+            "ANTHROPIC_API_KEY": "settings-secret-key",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL": "settings-tool",
+        },
+    )
+    fixture_file = tmp_path / "resolved-fixtures.json"
+    fixture_file.write_text("{}")
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.native_planner = SimpleNamespace(env_vars={})
+    pipeline.native_generator = SimpleNamespace(env_vars={})
+    pipeline.native_healer = SimpleNamespace(env_vars={})
+
+    pipeline._apply_test_data_execution_context(
+        {"runtime_fixture_file": str(fixture_file)}
+    )
+
+    for component in (
+        pipeline.native_planner,
+        pipeline.native_generator,
+        pipeline.native_healer,
+    ):
+        assert component.env_vars == {"QUORVEX_TEST_DATA_FILE": str(fixture_file)}
+        env_vars = AgentRunner(
+            model_tier="tool_deep",
+            env_vars=component.env_vars,
+        )._collect_api_env_vars()
+        assert env_vars["QUORVEX_TEST_DATA_FILE"] == str(fixture_file)
+        assert env_vars["QUORVEX_LLM_API_KEY"] == "settings-secret-key"
+        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "settings-secret-key"
+        assert env_vars["ANTHROPIC_API_KEY"] == "settings-secret-key"
 
 
 def test_native_subprocess_receives_runtime_fixture_file_only(monkeypatch, tmp_path):

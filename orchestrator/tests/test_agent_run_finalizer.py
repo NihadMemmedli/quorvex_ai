@@ -63,6 +63,55 @@ def test_custom_finalizer_synthesizes_partial_report_from_prose_and_artifact():
     assert finalized.result["contract_warnings"]
 
 
+def test_custom_finalizer_marks_timeout_recovery_partial_when_report_synthesized():
+    finalized = AgentRunFinalizer().finalize(
+        run_id="finalizer-custom-timeout-recovery",
+        agent_type="custom",
+        config={"prompt": "inspect checkout", "url": "https://example.test"},
+        raw_model_output="Checkout button was visible before the browser click stalled.",
+        tool_calls=[
+            {
+                "name": "mcp__playwright-test__browser_click",
+                "input": {"element": "Checkout"},
+                "success": False,
+                "error": "Browser tool timed out: mcp__playwright-test__browser_click ran for 45.0s (limit 45.0s)",
+            }
+        ],
+        runtime_diagnostics={
+            "error_type": "browser_tool_timeout",
+            "browser_tool_timeout": True,
+            "timed_out_tool_name": "mcp__playwright-test__browser_click",
+            "browser_action_timeout_seconds": 30,
+            "browser_tool_timeout_seconds": 45,
+        },
+    )
+
+    assert finalized.status == "completed_partial"
+    assert finalized.result["contract_status"] == "partial"
+    assert finalized.result["partial_reason"] == "Recovered partial evidence after browser_click timed out after 30s/45s."
+    assert finalized.result["partial_reason"] in finalized.result["contract_warnings"]
+
+
+def test_custom_finalizer_keeps_completed_when_timeout_run_has_valid_structured_report():
+    finalized = AgentRunFinalizer().finalize(
+        run_id="finalizer-custom-timeout-valid",
+        agent_type="custom",
+        config={"prompt": "inspect checkout"},
+        raw_model_output='{"structured_report":{"summary":"Finished before timeout","scope":"checkout","findings":[],"test_ideas":[],"requirements":[],"evidence":[],"pages_checked":[],"follow_up_actions":[]}}',
+        runtime_diagnostics={
+            "error_type": "browser_tool_timeout",
+            "browser_tool_timeout": True,
+            "timed_out_tool_name": "mcp__playwright-test__browser_click",
+            "browser_action_timeout_seconds": 30,
+            "browser_tool_timeout_seconds": 45,
+        },
+    )
+
+    assert finalized.status == "completed"
+    assert finalized.result["contract_status"] == "valid"
+    assert finalized.result.get("partial_reason") is None
+
+
 def test_custom_finalizer_fails_empty_output_without_evidence():
     finalized = AgentRunFinalizer().finalize(
         run_id="finalizer-custom-empty",
@@ -74,6 +123,28 @@ def test_custom_finalizer_fails_empty_output_without_evidence():
     assert finalized.status == "failed"
     assert finalized.result["contract_status"] == "invalid"
     assert "structured output" in finalized.result["summary"]
+
+
+def test_custom_finalizer_marks_claude_auth_failure_failed_without_synthesis():
+    finalized = AgentRunFinalizer().finalize(
+        run_id="finalizer-custom-auth-failed",
+        agent_type="custom",
+        config={"prompt": "inspect checkout", "url": "https://example.test"},
+        raw_model_output="401 token expired or incorrect",
+        artifacts=[{"name": "live-step-001.png", "path": "/artifacts/run/live-step-001.png", "type": "image"}],
+        runtime_diagnostics={"error_type": "claude_code_auth_required"},
+    )
+
+    assert finalized.status == "failed"
+    assert finalized.result["contract_status"] == "invalid"
+    assert finalized.result["failure_reason"] == "runtime_auth_failed"
+    assert "Claude Code authentication failed" in finalized.result["summary"]
+    assert "structured_report" not in finalized.result
+    assert any(
+        item["strategy"] == "synthesize_minimal_report_from_evidence"
+        and item["status"] == "skipped"
+        for item in finalized.result["repair_attempts"]
+    )
 
 
 def test_explorer_finalizer_does_not_invent_unsupported_claimed_flows(monkeypatch):

@@ -36,14 +36,17 @@ from .models_db import TestRun as DBTestRun
 from .models_db import get_spec_metadata as get_db_spec_metadata
 from .spec_files import (
     BASE_DIR,
+    RUNS_DIR,
     SPECS_DIR,
     _spec_cache,
     _spec_info_cache,
     build_folder_tree,
+    build_generated_test_index,
     get_cached_spec_info,
     get_try_code_path,
     get_try_code_path_fast,
     required_test_data_refs_for_spec,
+    resolve_generated_code_path,
 )
 
 logger = get_logger(__name__)
@@ -127,6 +130,7 @@ def list_specs_lightweight(
     total_all = 0  # Total specs in the requested listing mode (unfiltered)
     automated_count = 0  # Automated count across all specs in the requested listing mode
     all_tags_set: set = set()
+    generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
 
     if SPECS_DIR.exists():
         for f in SPECS_DIR.glob("**/*.md"):
@@ -145,8 +149,8 @@ def list_specs_lightweight(
             if name in excluded_spec_names:
                 continue
 
-            # Fast code path check - only checks filename patterns
-            code_path = get_try_code_path_fast(f)
+            # Fast direct path check first, then request-scoped generated test index.
+            code_path = resolve_generated_code_path(f, generated_test_index, BASE_DIR)
             is_automated = bool(code_path)
 
             # Count totals before applying user filters
@@ -1375,4 +1379,3 @@ def update_spec_metadata(spec_name: str, request: UpdateMetadataRequest, session
             "project_id": m.project_id,
         },
     }
-

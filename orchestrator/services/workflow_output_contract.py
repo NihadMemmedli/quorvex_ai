@@ -23,6 +23,11 @@ STANDARD_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
         "diagnostics": {"type": "object"},
         "data": {"type": "object"},
         "raw": {},
+        "contract_status": {"type": ["string", "null"]},
+        "evidence_score": {"type": ["number", "integer", "null"]},
+        "retryable": {"type": ["boolean", "null"]},
+        "failure_category": {"type": ["string", "null"]},
+        "source_attempt_id": {"type": ["string", "null"]},
     },
     "required": ["contract_version", "status", "artifacts", "metrics", "diagnostics", "data"],
     "additionalProperties": True,
@@ -59,6 +64,11 @@ def normalize_step_output(
         },
         "data": data,
         "raw": raw_payload,
+        "contract_status": payload.get("contract_status") or "valid",
+        "evidence_score": payload.get("evidence_score"),
+        "retryable": payload.get("retryable"),
+        "failure_category": payload.get("failure_category"),
+        "source_attempt_id": payload.get("source_attempt_id"),
     }
     # Preserve existing token paths and child response shape for saved workflows
     # and downstream references that predate the formal output contract.

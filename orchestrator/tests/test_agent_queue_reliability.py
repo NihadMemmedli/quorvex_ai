@@ -21,12 +21,92 @@ from orchestrator.services.agent_worker import (
     AgentWorker,
     BrowserObservationRecorder,
     BrowserToolTimeoutError,
+    _browser_tool_timeout_seconds_for_tools,
     _event_tool_uses,
 )
 from orchestrator.utils import browser_cleanup
 from orchestrator.utils.agent_runner import AgentRunner
+from orchestrator.utils.browser_failures import classify_browser_failure
 
 UTC = timezone.utc
+
+
+def test_browser_failure_classifier_normalizes_closed_browser_errors():
+    classification = classify_browser_failure(
+        "MCP error: browser_context.close: Target page, context or browser has been closed",
+        tool_name="mcp__playwright-test__browser_navigate",
+    )
+
+    assert classification is not None
+    assert classification.error_type == "browser_session_closed"
+    telemetry = classification.telemetry()
+    assert telemetry["phase"] == "browser_session_failed"
+    assert telemetry["browser_session_usable"] is False
+    assert telemetry["retryable_failure"] is True
+    assert telemetry["requires_fresh_browser"] is True
+    assert telemetry["last_tool"] == "mcp__playwright-test__browser_navigate"
+
+
+def test_planner_browser_tool_timeout_uses_planner_specific_env(monkeypatch):
+    monkeypatch.setenv("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "30")
+    runner = AgentRunner(
+        allowed_tools=[
+            "mcp__playwright-test__planner_setup_page",
+            "mcp__playwright-test__browser_navigate",
+        ],
+        tools=[
+            "mcp__playwright-test__planner_setup_page",
+            "mcp__playwright-test__browser_navigate",
+        ],
+        log_tools=False,
+        env_vars={"NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS": "90"},
+    )
+
+    assert runner._browser_tool_timeout_seconds() == 90.0
+
+
+def test_non_planner_browser_tool_timeout_keeps_global_default(monkeypatch):
+    monkeypatch.setenv("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "30")
+    runner = AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_navigate"],
+        tools=["mcp__playwright-test__browser_navigate"],
+        log_tools=False,
+        env_vars={"NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS": "90"},
+    )
+
+    assert runner._browser_tool_timeout_seconds() == 30.0
+
+
+def test_worker_planner_browser_tool_timeout_uses_planner_specific_env(monkeypatch):
+    monkeypatch.setenv("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS", "90")
+
+    assert _browser_tool_timeout_seconds_for_tools(
+        ["mcp__playwright-test__planner_setup_page"],
+        ["mcp__playwright-test__browser_navigate"],
+    ) == 90.0
+    assert _browser_tool_timeout_seconds_for_tools(
+        ["mcp__playwright-test__browser_navigate"],
+    ) == 30.0
+
+
+def test_browser_timeout_defaults_and_diagnostics_are_aligned(monkeypatch):
+    monkeypatch.delenv("AGENT_BROWSER_ACTION_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", raising=False)
+    runner = AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_click"],
+        tools=["mcp__playwright-test__browser_click"],
+        log_tools=False,
+    )
+
+    diagnostics = runner.diagnostics(prompt="click checkout")
+
+    assert diagnostics["browser_action_timeout_seconds"] == 30.0
+    assert diagnostics["browser_tool_timeout_seconds"] == 45.0
+    assert diagnostics["browser_tool_timeout_seconds"] > diagnostics["browser_action_timeout_seconds"]
+    assert diagnostics["browser_action_timeout_env"] == "AGENT_BROWSER_ACTION_TIMEOUT_SECONDS"
+    assert diagnostics["browser_tool_timeout_env"] == "AGENT_BROWSER_TOOL_TIMEOUT_SECONDS"
+    assert _browser_tool_timeout_seconds_for_tools(["mcp__playwright-test__browser_click"]) == 45.0
 
 
 def test_agent_worker_task_env_helpers_restore_and_skip_testdata(monkeypatch):
@@ -56,6 +136,246 @@ def test_agent_worker_task_env_helpers_restore_and_skip_testdata(monkeypatch):
     assert os.environ["QUEUE_ENV_EXISTING"] == "old"
     assert "QUEUE_ENV_NEW" not in os.environ
     assert "TESTDATA_SECRET" not in os.environ
+
+
+def test_agent_worker_task_env_helpers_apply_runtime_credentials_and_fixture(monkeypatch):
+    worker = AgentWorker()
+    monkeypatch.setenv("QUORVEX_LLM_API_KEY", "old-api-key")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("QUORVEX_TEST_DATA_FILE", raising=False)
+    monkeypatch.delenv("TESTDATA_SECRET", raising=False)
+    task = AgentTask(
+        id="agent-runtime-env",
+        prompt="run",
+        env_vars={
+            "QUORVEX_LLM_API_KEY": "queue-api-key",
+            "CLAUDE_CODE_OAUTH_TOKEN": "queue-oauth-token",
+            "QUORVEX_TEST_DATA_FILE": "/tmp/resolved-fixtures.json",
+            "TESTDATA_SECRET": "ignored",
+        },
+    )
+
+    saved = worker._apply_task_env_vars(task)
+
+    assert saved == {
+        "QUORVEX_LLM_API_KEY": "old-api-key",
+        "CLAUDE_CODE_OAUTH_TOKEN": None,
+        "QUORVEX_TEST_DATA_FILE": None,
+    }
+    assert os.environ["QUORVEX_LLM_API_KEY"] == "queue-api-key"
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "queue-oauth-token"
+    assert os.environ["QUORVEX_TEST_DATA_FILE"] == "/tmp/resolved-fixtures.json"
+    assert "TESTDATA_SECRET" not in os.environ
+
+    worker._restore_task_env_vars(saved, task.id)
+
+    assert os.environ["QUORVEX_LLM_API_KEY"] == "old-api-key"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+    assert "QUORVEX_TEST_DATA_FILE" not in os.environ
+    assert "TESTDATA_SECRET" not in os.environ
+
+
+def test_agent_worker_empty_credentials_unset_and_restore(monkeypatch):
+    worker = AgentWorker()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "existing-api-key")
+    monkeypatch.setenv("QUORVEX_LLM_API_KEY", "existing-quorvex-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "existing-oauth-token")
+    task = AgentTask(
+        id="agent-empty-runtime-env",
+        prompt="run",
+        env_vars={
+            "ANTHROPIC_API_KEY": "",
+            "QUORVEX_LLM_API_KEY": "",
+            "CLAUDE_CODE_OAUTH_TOKEN": "",
+        },
+    )
+
+    saved = worker._apply_task_env_vars(task)
+
+    assert saved == {
+        "ANTHROPIC_API_KEY": "existing-api-key",
+        "QUORVEX_LLM_API_KEY": "existing-quorvex-key",
+        "CLAUDE_CODE_OAUTH_TOKEN": "existing-oauth-token",
+    }
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    assert "QUORVEX_LLM_API_KEY" not in os.environ
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+
+    worker._restore_task_env_vars(saved, task.id)
+
+    assert os.environ["ANTHROPIC_API_KEY"] == "existing-api-key"
+    assert os.environ["QUORVEX_LLM_API_KEY"] == "existing-quorvex-key"
+    assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "existing-oauth-token"
+
+
+def test_agent_worker_claude_code_preflight_passes_with_oauth_only():
+    diagnostics = AgentWorker._claude_code_auth_preflight(
+        {
+            "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+            "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token",
+        }
+    )
+
+    assert diagnostics["required"] is True
+    assert diagnostics["claude_code_oauth_token_set"] is True
+    assert diagnostics["active_api_key_aliases"] == []
+
+
+def test_agent_worker_claude_code_preflight_fails_without_token():
+    with pytest.raises(RuntimeError, match="CLAUDE_CODE_OAUTH_TOKEN is not set"):
+        AgentWorker._claude_code_auth_preflight(
+            {"QUORVEX_LLM_AUTH_MODE": "claude_code_subscription"}
+        )
+
+
+def test_agent_worker_claude_code_preflight_requires_task_scoped_token(monkeypatch):
+    monkeypatch.setenv("QUORVEX_LLM_AUTH_MODE", "claude_code_subscription")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-worker-token")
+
+    with pytest.raises(RuntimeError, match="CLAUDE_CODE_OAUTH_TOKEN is not set"):
+        AgentWorker._claude_code_auth_preflight(
+            os.environ,
+            {"QUORVEX_LLM_AUTH_MODE": "claude_code_subscription"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_queue_payload_includes_settings_credentials_for_sparse_env(
+    monkeypatch, tmp_path
+):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    fixture_file = tmp_path / "resolved-fixtures.json"
+    fixture_file.write_text("{}")
+    monkeypatch.setattr(
+        settings_api,
+        "runtime_env_vars",
+        lambda: {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "api_key",
+            "QUORVEX_LLM_BASE_URL": "https://settings.example/anthropic",
+            "ANTHROPIC_BASE_URL": "https://settings.example/anthropic",
+            "QUORVEX_LLM_API_KEY": "settings-secret-key",
+            "ANTHROPIC_AUTH_TOKEN": "settings-secret-key",
+            "ANTHROPIC_API_KEY": "settings-secret-key",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL": "settings-tool",
+        },
+    )
+
+    class FakeQueue:
+        def __init__(self):
+            self.enqueue_payload = None
+
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **kwargs):
+            self.enqueue_payload = kwargs
+            return "agent-task-1"
+
+        async def wait_for_result(self, *_args, **_kwargs):
+            return "queue completed with enough output to be considered a normal agent response"
+
+        async def get_task(self, task_id):
+            assert task_id == "agent-task-1"
+            return SimpleNamespace(telemetry={})
+
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(agent_runner_module, "get_agent_queue", lambda: fake_queue)
+    runner = AgentRunner(
+        allowed_tools=[],
+        model_tier="tool_deep",
+        env_vars={"QUORVEX_TEST_DATA_FILE": str(fixture_file)},
+    )
+
+    result = await runner._run_via_queue("return done", timeout=5)
+
+    env_vars = fake_queue.enqueue_payload["env_vars"]
+    assert result.success is True
+    assert env_vars["QUORVEX_LLM_API_KEY"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_API_KEY"] == "settings-secret-key"
+    assert env_vars["ANTHROPIC_MODEL"] == "settings-tool"
+    assert env_vars["QUORVEX_TEST_DATA_FILE"] == str(fixture_file)
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_queue_payload_claude_code_settings_omits_empty_api_aliases(
+    monkeypatch, tmp_path
+):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    fixture_file = tmp_path / "resolved-fixtures.json"
+    fixture_file.write_text("{}")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-process-key")
+    monkeypatch.setattr(
+        settings_api,
+        "runtime_env_vars",
+        lambda: {
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+            "QUORVEX_LLM_BASE_URL": "https://api.anthropic.com",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+            "CLAUDE_CODE_OAUTH_TOKEN": "settings-oauth-token",
+            "QUORVEX_LLM_API_KEY": "",
+            "QUORVEX_LLM_API_KEYS": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_AUTH_TOKENS": "",
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL": "claude-tool",
+        },
+    )
+
+    class FakeQueue:
+        def __init__(self):
+            self.enqueue_payload = None
+
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **kwargs):
+            self.enqueue_payload = kwargs
+            return "agent-task-claude-code"
+
+        async def wait_for_result(self, *_args, **_kwargs):
+            return "queue completed with enough output to be considered a normal agent response"
+
+        async def get_task(self, task_id):
+            assert task_id == "agent-task-claude-code"
+            return SimpleNamespace(telemetry={})
+
+    fake_queue = FakeQueue()
+    monkeypatch.setattr(agent_runner_module, "get_agent_queue", lambda: fake_queue)
+    runner = AgentRunner(
+        allowed_tools=[],
+        model_tier="tool_deep",
+        env_vars={"QUORVEX_TEST_DATA_FILE": str(fixture_file)},
+    )
+
+    result = await runner._run_via_queue("return done", timeout=5)
+
+    env_vars = fake_queue.enqueue_payload["env_vars"]
+    assert result.success is True
+    assert env_vars["CLAUDE_CODE_OAUTH_TOKEN"] == "settings-oauth-token"
+    assert env_vars["QUORVEX_TEST_DATA_FILE"] == str(fixture_file)
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "QUORVEX_LLM_API_KEYS",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKENS",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        assert key not in env_vars
 
 
 class _MemoryPipeline:
@@ -411,6 +731,65 @@ async def test_agent_runner_returns_provider_overloaded_after_sdk_retries_exhaus
     assert calls["rate_limit"] == 0
 
 
+@pytest.mark.asyncio
+async def test_agent_runner_watchdog_marks_suspected_browser_dialog_block(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    progress_events: list[dict[str, object]] = []
+
+    async def fake_query(**_kwargs):
+        yield SimpleNamespace(
+            type="assistant",
+            message=SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="toolu_direct_hung",
+                        name="mcp__playwright-test__browser_click",
+                        input={"element": "Leave page link"},
+                    )
+                ]
+            ),
+        )
+        await asyncio.sleep(60)
+
+    monkeypatch.setenv("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: None)
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        on_progress=progress_events.append,
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+
+    result = await runner.run("click through")
+
+    assert result.success is False
+    assert result.error_type == "browser_tool_timeout"
+    assert "Browser tool timed out" in (result.error or "")
+    assert result.tool_calls[0].name == "mcp__playwright-test__browser_click"
+    assert result.tool_calls[0].success is False
+    timeout_progress = [
+        event
+        for event in progress_events
+        if event.get("error_type") == "browser_tool_timeout" and event.get("suspected_browser_dialog_block") is True
+    ]
+    assert timeout_progress
+    assert timeout_progress[-1]["suspected_browser_dialog_block"] is True
+    assert timeout_progress[-1]["blocked_tool_name"] == "mcp__playwright-test__browser_click"
+    assert timeout_progress[-1]["phase"] == "browser_session_failed"
+    assert timeout_progress[-1]["requires_fresh_browser"] is True
+    assert timeout_progress[-1]["browser_session_usable"] is False
+    assert timeout_progress[-1]["retryable_failure"] is True
+    assert timeout_progress[-1]["dialog_recovery_attempted"] is True
+
+
 def test_agent_worker_detects_browser_capable_tasks():
     worker = AgentWorker.__new__(AgentWorker)
 
@@ -617,6 +996,49 @@ async def test_agent_runner_records_sdk_object_tool_calls_by_tool_use_id(monkeyp
     assert any(event["phase"] == "tool_use" and event["tool_calls"] == 2 for event in progress_events)
     persisted = json.loads((tmp_path / "tool_calls.json").read_text())
     assert [item["name"] for item in persisted] == [call.name for call in result.tool_calls]
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_classifies_claude_code_auth_sdk_event(monkeypatch, tmp_path):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    async def fake_query(**_kwargs):
+        yield SimpleNamespace(
+            type="assistant",
+            message=SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text="Not logged in · Please run /login",
+                    )
+                ],
+                isApiErrorMessage=True,
+                error="authentication_failed",
+            ),
+        )
+
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: None)
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        session_dir=tmp_path,
+        cwd=tmp_path,
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+
+    result = await runner.run("inspect checkout")
+
+    assert result.success is False
+    assert result.error_type == "claude_code_auth_required"
+    assert result.error == "Not logged in · Please run /login"
+    assert result.output == "Not logged in · Please run /login"
+    assert result.tool_calls == []
 
 
 @pytest.mark.asyncio
@@ -849,6 +1271,147 @@ def test_agent_worker_cli_args_preserve_supported_sdk_options(monkeypatch, tmp_p
     assert json.loads(args[args.index("--json-schema") + 1]) == {"type": "object"}
 
 
+def test_agent_worker_cli_parser_uses_stream_text_delta_without_result():
+    worker = AgentWorker.__new__(AgentWorker)
+    raw_output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "wrapped stream text"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": " plus top-level text"},
+                }
+            ),
+        ]
+    )
+
+    assert worker._parse_cli_output(raw_output) == "wrapped stream text plus top-level text"
+
+
+def test_agent_worker_cli_parser_keeps_result_event_precedence():
+    worker = AgentWorker.__new__(AgentWorker)
+    raw_output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "partial"},
+                }
+            ),
+            json.dumps({"type": "result", "result": "final result"}),
+        ]
+    )
+
+    assert worker._parse_cli_output(raw_output) == "final result"
+
+
+def test_agent_worker_stream_events_update_progress_tool_input_and_text(monkeypatch, tmp_path):
+    from orchestrator.services import agent_worker as worker_module
+
+    payload = json.dumps({"element": "Email", "text": "ada@example.test"})
+    split_at = payload.index('"text"')
+    lines = [
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_type",
+                "name": "mcp__playwright-test__browser_type",
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": payload[:split_at],
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": payload[split_at:],
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "typed email"},
+        },
+    ]
+
+    class _Stdout:
+        def __init__(self):
+            self._lines = [json.dumps(line).encode("utf-8") + b"\n" for line in lines]
+
+        def readline(self):
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+        def close(self):
+            return None
+
+    class _FakeProc:
+        pid = 12345
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = _Stdout()
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(worker_module.subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
+
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.cwd = str(tmp_path)
+    worker._process_lock = threading.Lock()
+    worker._running_processes = {}
+    worker._cancelled_task_ids = set()
+    worker._pause_lock = threading.Lock()
+    worker._paused_task_ids = set()
+    worker._pause_started_at = {}
+    worker._paused_duration_seconds = {}
+    worker._progress_lock = threading.RLock()
+    worker._current_progress = AgentWorker._empty_progress()
+    worker._last_execution_telemetry = {}
+
+    output = worker._run_cli_sync(
+        task_id="agent-stream-progress",
+        prompt="stream",
+        cwd=str(tmp_path),
+        tools=[],
+    )
+
+    assert output == "typed email"
+    assert worker._current_progress["last_message"] == "typed email"
+    assert worker._current_progress["tool_calls"] == 1
+    assert worker._current_progress["browser_tool_calls"] == 1
+    assert worker._current_progress["interactions"] == 1
+    record = worker._current_progress["tool_call_records"][0]
+    assert record["name"] == "mcp__playwright-test__browser_type"
+    assert record["input"] == {"element": "Email", "text": "ada@example.test"}
+    assert worker._last_execution_telemetry["text_blocks"] == 1
+
+
 def test_agent_worker_browser_tool_watchdog_kills_hung_process(monkeypatch, tmp_path):
     from orchestrator.services import agent_worker as worker_module
     (tmp_path / ".mcp.json").write_text(
@@ -960,6 +1523,13 @@ def test_agent_worker_browser_tool_watchdog_kills_hung_process(monkeypatch, tmp_
     assert records[0]["success"] is False
     assert records[0]["error_type"] == "browser_tool_timeout"
     assert progress["browser_tool_timeout"] is True
+    assert progress["suspected_browser_dialog_block"] is True
+    assert progress["blocked_tool_name"] == "mcp__playwright-test__browser_run_code"
+    assert progress["phase"] == "browser_session_failed"
+    assert progress["requires_fresh_browser"] is True
+    assert progress["browser_session_usable"] is False
+    assert progress["retryable_failure"] is True
+    assert progress["dialog_recovery_attempted"] is True
     assert worker._last_execution_telemetry["error_type"] == "browser_tool_timeout"
 
 
@@ -1060,6 +1630,14 @@ async def test_agent_worker_submits_browser_tool_timeout_result(monkeypatch):
     assert telemetry["error_type"] == "browser_tool_timeout"
     assert telemetry["timed_out_tool_name"] == "mcp__playwright-test__browser_run_code"
     assert telemetry["timed_out_tool_use_id"] == "toolu_hung"
+    assert telemetry["suspected_browser_dialog_block"] is True
+    assert telemetry["blocked_tool_name"] == "mcp__playwright-test__browser_run_code"
+    assert telemetry["phase"] == "browser_session_failed"
+    assert telemetry["requires_fresh_browser"] is True
+    assert telemetry["browser_session_usable"] is False
+    assert telemetry["retryable_failure"] is True
+    assert telemetry["dialog_recovery_attempted"] is True
+    assert telemetry["snapshot_after_recovery"] is False
     assert telemetry["browser_tool_calls"] == 1
 
 
@@ -1233,6 +1811,80 @@ def test_agent_runner_uses_parent_test_run_as_queue_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_runner_live_browser_tools_use_queue_without_sdk_only_options(
+    monkeypatch, tmp_path
+):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright-test": {
+                        "command": "npx",
+                        "args": ["@playwright/mcp"],
+                    }
+                }
+            }
+        )
+    )
+    captured: dict[str, object] = {}
+
+    class _CompletedTask:
+        telemetry = {
+            "tool_calls": 1,
+            "tool_names": ["mcp__playwright-test__browser_navigate"],
+            "text_blocks": 1,
+        }
+
+    class _FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def worker_capability_summary(self):
+            return {"live_browser_worker_count": 1}
+
+        async def enqueue_task(self, **kwargs):
+            captured.update(kwargs)
+            return "task-live-queue"
+
+        async def wait_for_result(self, *_args, **_kwargs):
+            return "Queued live browser planner run completed with enough detail for validation."
+
+        async def get_task(self, task_id):
+            assert task_id == "task-live-queue"
+            return _CompletedTask()
+
+    async def fail_query(**_kwargs):
+        raise AssertionError("direct SDK query should not be used")
+        yield None
+
+    monkeypatch.setattr(agent_runner_module, "AGENT_QUEUE_AVAILABLE", True)
+    monkeypatch.setattr(agent_runner_module, "should_use_agent_queue", lambda: True)
+    monkeypatch.setattr(agent_runner_module, "get_agent_queue", lambda: _FakeQueue())
+    monkeypatch.setattr(agent_runner_module, "query", fail_query)
+
+    runner = AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_navigate"],
+        tools=["mcp__playwright-test__browser_navigate"],
+        log_tools=False,
+        cwd=tmp_path,
+        requires_live_browser=True,
+        inject_memory=False,
+        capture_memory=False,
+    )
+    result = await runner.run("open checkout")
+
+    assert result.success is True
+    assert captured["requires_live_browser"] is True
+    assert captured["allowed_tools"] == ["mcp__playwright-test__browser_navigate"]
+    assert result.tool_calls[0].name == "mcp__playwright-test__browser_navigate"
+
+
+@pytest.mark.asyncio
 async def test_agent_runner_adds_browser_dialog_policy_before_queue_enqueue(monkeypatch):
     from orchestrator.utils import agent_runner as agent_runner_module
 
@@ -1274,6 +1926,93 @@ async def test_agent_runner_adds_browser_dialog_policy_before_queue_enqueue(monk
     assert "## Browser Dialog Recovery" in captured["prompt"]
     assert "Leave site?" in captured["prompt"]
     assert "`accept: true`" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_queue_classifies_claude_code_auth_output(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    class _CompletedTask:
+        telemetry = {"tool_calls": 0, "text_blocks": 1}
+
+    class _FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **_kwargs):
+            return "task-auth"
+
+        async def wait_for_result(self, *_args, **_kwargs):
+            return "Not logged in · Please run /login"
+
+        async def get_task(self, task_id):
+            assert task_id == "task-auth"
+            return _CompletedTask()
+
+    monkeypatch.setattr(agent_runner_module, "AGENT_QUEUE_AVAILABLE", True)
+    monkeypatch.setattr(agent_runner_module, "should_use_agent_queue", lambda: True)
+    monkeypatch.setattr(agent_runner_module, "get_agent_queue", lambda: _FakeQueue())
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        inject_memory=False,
+        capture_memory=False,
+    )
+
+    result = await runner.run("plan checkout")
+
+    assert result.success is False
+    assert result.error_type == "claude_code_auth_required"
+    assert result.error == "Not logged in · Please run /login"
+    assert result.tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_queue_cli_401_maps_to_claude_code_auth_required(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    class _FailedTask:
+        telemetry = {"error_type": "claude_code_auth_required"}
+
+    class _FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **_kwargs):
+            return "task-auth-401"
+
+        async def wait_for_result(self, *_args, **_kwargs):
+            raise RuntimeError("401 token expired or incorrect")
+
+        async def get_task(self, task_id):
+            assert task_id == "task-auth-401"
+            return _FailedTask()
+
+    monkeypatch.setattr(agent_runner_module, "AGENT_QUEUE_AVAILABLE", True)
+    monkeypatch.setattr(agent_runner_module, "should_use_agent_queue", lambda: True)
+    monkeypatch.setattr(agent_runner_module, "get_agent_queue", lambda: _FakeQueue())
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        inject_memory=False,
+        capture_memory=False,
+    )
+
+    result = await runner.run("plan checkout")
+
+    assert result.success is False
+    assert result.error_type == "claude_code_auth_required"
+    assert result.error == "401 token expired or incorrect"
 
 
 @pytest.mark.asyncio

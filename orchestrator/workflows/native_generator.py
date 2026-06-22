@@ -49,6 +49,7 @@ from orchestrator.utils.agent_runner import (
     get_default_timeout,
 )
 from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
+from orchestrator.utils.browser_dialog_recovery import playwright_dialog_auto_accept_handler
 from orchestrator.utils.text_utils import truncate_middle
 from orchestrator.utils.token_budget import (
     context_budget_for_stage,
@@ -100,10 +101,20 @@ class NativeGenerator:
         self.last_self_heal_attempts: int = 0
         self.last_self_heal_passed: bool = False
         self.last_self_heal_artifact_path: Path | None = None
-        # Use absolute path to project's tests directory (not relative to cwd)
-        # This fixes Docker issue where cwd changes to run directory
-        self.tests_dir = BASE_DIR / "tests" / "generated"
+        # Default for non-run-local usage; native runs with cwd set write under
+        # the run-local Playwright testDir so MCP test_run/test_debug can find them.
+        self.default_tests_dir = BASE_DIR / "tests" / "generated"
+        self.tests_dir = self.default_tests_dir
         self.tests_dir.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_tests_dir(self) -> Path:
+        configured = Path(self.tests_dir)
+        cwd = Path(self.cwd) if getattr(self, "cwd", None) else None
+        if cwd and configured == self.default_tests_dir:
+            configured = cwd / "tests" / "generated"
+            self.tests_dir = configured
+        configured.mkdir(parents=True, exist_ok=True)
+        return configured
 
     async def generate_test(
         self,
@@ -146,7 +157,7 @@ class NativeGenerator:
         spec_name = output_name if output_name else spec_path_obj.stem
 
         # Determine output path
-        output_path = self.tests_dir / f"{spec_name}.spec.ts"
+        output_path = self._resolve_tests_dir() / f"{spec_name}.spec.ts"
         if output_path.exists():
             logger.info(
                 f"Removing stale generated test before regeneration: {output_path}"
@@ -1238,7 +1249,7 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - After handling a dialog, call `browser_snapshot` or `browser_take_screenshot` to verify page state
 - In generated code, include dialog handler for forms/editors:
   ```typescript
-  page.on('dialog', async dialog => await dialog.accept());
+{playwright_dialog_auto_accept_handler(indent="  ")}
   ```
 
 ## Code Generation Requirements

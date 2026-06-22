@@ -117,6 +117,95 @@ def test_prd_processor_uses_settings_backed_openai_compatible_runtime(monkeypatc
     assert calls[0]["json"]["response_format"] == {"type": "json_object"}
 
 
+def test_prd_processor_uses_claude_code_subscription_runtime(monkeypatch, tmp_path):
+    from orchestrator.api import settings as settings_api
+
+    markdown_path = tmp_path / "content.md"
+    markdown_path.write_text("Users need room inventory, allocation, and package management.")
+    env_vars = {
+        "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+        "QUORVEX_LLM_PROVIDER": "anthropic",
+        "QUORVEX_LLM_BASE_URL": "https://api.anthropic.com",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token-1234567890",
+        "QUORVEX_LLM_API_KEY": "",
+        "QUORVEX_LLM_API_KEYS": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+        "ANTHROPIC_API_KEY": "",
+        "OPENAI_API_KEY": "",
+        "QUORVEX_LLM_DEEP_MODEL": "claude-opus-test",
+    }
+    captured: dict[str, object] = {"prompts": []}
+    response_features = [
+        {
+            "name": "Room Management",
+            "description": "Manage room inventory and allocations.",
+            "requirements": ["Users can allocate rooms."],
+            "merged_from": [],
+        }
+    ]
+
+    class FakeAgentResult:
+        success = True
+        output = json.dumps({"features": response_features})
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        async def run(self, prompt):
+            captured["prompts"].append(prompt)
+            return FakeAgentResult()
+
+    def fake_runtime_env_vars(session=None):
+        return env_vars
+
+    monkeypatch.setattr(settings_api, "runtime_env_vars", fake_runtime_env_vars)
+    monkeypatch.setattr(prd_processor, "AgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        prd_processor.httpx,
+        "post",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct HTTP path should not run")),
+    )
+
+    processor = PRDProcessor(prds_dir=str(tmp_path / "prds"))
+    features = processor._extract_features_with_llm(markdown_path)
+
+    assert [feature.name for feature in features] == ["Room Management"]
+    assert captured["kwargs"]["allowed_tools"] == []
+    assert captured["kwargs"]["log_tools"] is False
+    assert captured["kwargs"]["model_tier"] == "deep"
+    assert captured["kwargs"]["env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-1234567890"
+    assert len(captured["prompts"]) >= 2
+
+
+def test_prd_processor_claude_code_mode_without_token_is_actionable(monkeypatch, tmp_path):
+    from orchestrator.api import settings as settings_api
+
+    markdown_path = tmp_path / "content.md"
+    markdown_path.write_text("Users need room inventory, allocation, and package management.")
+
+    def fake_runtime_env_vars(session=None):
+        return {
+            "QUORVEX_LLM_AUTH_MODE": "claude_code_subscription",
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "CLAUDE_CODE_OAUTH_TOKEN": "",
+            "QUORVEX_LLM_API_KEY": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_API_KEY": "",
+        }
+
+    monkeypatch.setattr(settings_api, "runtime_env_vars", fake_runtime_env_vars)
+    processor = PRDProcessor(prds_dir=str(tmp_path / "prds"))
+
+    with pytest.raises(PRDProcessingError) as excinfo:
+        processor._extract_features_with_llm(markdown_path)
+
+    assert excinfo.value.status_code == 400
+    message = str(excinfo.value)
+    assert "No AI API key is configured" in message
+    assert "Claude Code subscription OAuth token" in message
+
+
 def test_prd_processor_missing_settings_api_key_is_actionable(monkeypatch, tmp_path):
     from orchestrator.api import settings as settings_api
 
@@ -221,6 +310,36 @@ def test_prd_processor_parses_raw_feature_array():
     features = processor._extract_chunk_features(RawArrayClient(), "Package requirements")
 
     assert features[0]["name"] == "Package Management"
+
+
+def test_prd_processor_embeddings_use_settings_backed_model(monkeypatch):
+    from orchestrator.api import settings as settings_api
+
+    seen: dict[str, object] = {}
+
+    def fake_runtime_env_vars(session=None):
+        return {"QUORVEX_EMBEDDING_MODEL": "settings-embedding-model"}
+
+    class FakeEmbeddings:
+        def create(self, model, input):
+            seen["model"] = model
+            seen["input"] = input
+            return type(
+                "EmbeddingResponse",
+                (),
+                {"data": [type("EmbeddingItem", (), {"embedding": [1.0, 0.0]})()]},
+            )()
+
+    class FakeClient:
+        embeddings = FakeEmbeddings()
+
+    monkeypatch.setattr(settings_api, "runtime_env_vars", fake_runtime_env_vars)
+    processor = PRDProcessor()
+
+    embeddings = processor._get_embeddings(FakeClient(), ["feature text"])
+
+    assert embeddings == [[1.0, 0.0]]
+    assert seen["model"] == "settings-embedding-model"
 
 
 def test_prd_processor_rejects_valid_json_with_no_features():

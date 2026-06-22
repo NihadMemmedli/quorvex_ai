@@ -81,7 +81,7 @@ export default defineConfig({
         str(copied_config),
         "--headless",
     ]
-    assert f"testDir: '{base_dir}/tests'" in copied_config.read_text()
+    assert f"testDir: '{run_dir}/tests'" in copied_config.read_text()
     assert f"outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || '{run_dir}/test-results'" in copied_config.read_text()
 
     allowed_tools = get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=run_dir)

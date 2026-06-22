@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from orchestrator.utils.generated_test_materializer import materialize_generated_test_for_run
 from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
 from orchestrator.utils.string_utils import clean_extracted_url
 
@@ -1301,7 +1302,14 @@ def main():
         # 2. Native Planner
         from orchestrator.workflows.native_planner import NativePlanner
 
-        planner = NativePlanner(project_id=project_name, model_tier=args.model_tier or "tool_deep")
+        linked_agent_run_id = os.environ.get("QUORVEX_AGENT_RUN_ID") or None
+        linked_owner_type = "agent_run" if linked_agent_run_id else None
+        planner = NativePlanner(
+            project_id=project_name,
+            owner_type=linked_owner_type,
+            owner_id=linked_agent_run_id,
+            model_tier=args.model_tier or "tool_deep",
+        )
 
         specs_to_process = []
         try:
@@ -1322,8 +1330,15 @@ def main():
         from orchestrator.workflows.native_generator import NativeGenerator
         from orchestrator.workflows.native_healer import NativeHealer
 
-        generator = NativeGenerator(model_tier=args.model_tier or "tool_deep")
-        healer = NativeHealer()
+        generator = NativeGenerator(
+            owner_type=linked_owner_type,
+            owner_id=linked_agent_run_id,
+            model_tier=args.model_tier or "tool_deep",
+        )
+        healer = NativeHealer(
+            owner_type=linked_owner_type,
+            owner_id=linked_agent_run_id,
+        )
 
         success_count = 0
 
@@ -1486,7 +1501,13 @@ def main():
         project_id = os.environ.get("PROJECT_ID") or args.project_id or "default"
 
         # Run-local test data fixtures must be available before direct --try-code execution.
-        pipeline = FullNativePipeline(project_id=project_id, model_tier=args.model_tier)
+        linked_agent_run_id = os.environ.get("QUORVEX_AGENT_RUN_ID") or None
+        pipeline = FullNativePipeline(
+            project_id=project_id,
+            owner_type="agent_run" if linked_agent_run_id else None,
+            owner_id=linked_agent_run_id,
+            model_tier=args.model_tier,
+        )
 
         # Try existing code first if available
         code_path = None
@@ -1497,11 +1518,19 @@ def main():
 
         if code_path and code_path.exists():
             print(f"\n🔄 Trying existing code: {code_path}")
+            materialized = materialize_generated_test_for_run(
+                code_path,
+                run_dir,
+                base_dir=PROJECT_ROOT,
+            )
+            source_code_path = materialized.source_test_file_path
+            code_path = materialized.test_file_path
 
             # Create minimal artifacts for dashboard
             test_name = extract_test_name(spec_file)
             export_data = {
                 "testFilePath": str(code_path),
+                "sourceTestFilePath": str(source_code_path),
                 "code": code_path.read_text(),
                 "dependencies": ["@playwright/test"],
                 "notes": ["Reusing existing test code"],
@@ -1641,9 +1670,21 @@ def main():
         code_path = Path(args.try_code)
         if code_path.exists():
             print(f"🔄 Stage 0: Trying existing code: {code_path}")
+            materialized = materialize_generated_test_for_run(
+                code_path,
+                run_dir,
+                base_dir=PROJECT_ROOT,
+            )
+            source_code_path = materialized.source_test_file_path
+            code_path = materialized.test_file_path
 
             # Create export.json to expose code to UI immediately
-            export_data = {"testFilePath": str(code_path), "code": code_path.read_text(), "dependencies": []}
+            export_data = {
+                "testFilePath": str(code_path),
+                "sourceTestFilePath": str(source_code_path),
+                "code": code_path.read_text(),
+                "dependencies": [],
+            }
             (run_dir / "export.json").write_text(json.dumps(export_data, indent=2))
 
             # Create minimal plan.json so UI shows the correct Test Name

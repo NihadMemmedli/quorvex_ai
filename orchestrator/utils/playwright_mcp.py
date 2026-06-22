@@ -8,9 +8,15 @@ import re
 import shlex
 import socket
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from utils.browser_dialog_recovery import playwright_dialog_auto_accept_handler
+except ImportError:  # pragma: no cover - package import mode
+    from orchestrator.utils.browser_dialog_recovery import playwright_dialog_auto_accept_handler
 
 REAL_BROWSER_EXECUTABLE_NAMES = {
     "chrome",
@@ -22,6 +28,39 @@ REAL_BROWSER_EXECUTABLE_NAMES = {
     "firefox",
     "webkit",
 }
+
+BROWSER_ACTION_TIMEOUT_ENV = "AGENT_BROWSER_ACTION_TIMEOUT_SECONDS"
+PLAYWRIGHT_MCP_ACTION_TIMEOUT_ENV = "PLAYWRIGHT_MCP_TIMEOUT_ACTION"
+DEFAULT_BROWSER_ACTION_TIMEOUT_SECONDS = 30.0
+
+
+def _parse_positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def browser_action_timeout_config(env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Return the inner Playwright action timeout used by browser MCP tools."""
+    source = env if env is not None else os.environ
+    raw_value = source.get(BROWSER_ACTION_TIMEOUT_ENV)
+    timeout_seconds = _parse_positive_float(raw_value, DEFAULT_BROWSER_ACTION_TIMEOUT_SECONDS)
+    using_default = raw_value is None
+    if raw_value is not None:
+        try:
+            using_default = float(raw_value) <= 0
+        except (TypeError, ValueError):
+            using_default = True
+    return {
+        "browser_action_timeout_seconds": timeout_seconds,
+        "browser_action_timeout_ms": int(timeout_seconds * 1000),
+        "browser_action_timeout_env": BROWSER_ACTION_TIMEOUT_ENV,
+        "browser_action_timeout_source": "default" if raw_value is None else "env",
+        "browser_action_timeout_raw": raw_value,
+        "browser_action_timeout_defaulted": using_default,
+    }
 
 
 def _parse_semver(version: str) -> tuple[int, int, int]:
@@ -339,6 +378,9 @@ def build_playwright_mcp_args(
         args.extend(["--secrets", str(secrets_file)])
     if should_run_headless() and "--headless" not in args:
         args.append("--headless")
+    timeout = browser_action_timeout_config()
+    if "--timeout-action" not in args:
+        args.extend(["--timeout-action", str(timeout["browser_action_timeout_ms"])])
     return str(server["command"]), args, browser_runtime_status()
 
 
@@ -361,6 +403,9 @@ def _browser_mcp_env(headless: bool | None = None) -> dict[str, str]:
     effective_headless = should_run_headless() if headless is None else headless
     env["HEADLESS"] = "true" if effective_headless else "false"
     env["PLAYWRIGHT_HEADLESS"] = "true" if effective_headless else "false"
+    timeout = browser_action_timeout_config()
+    env[BROWSER_ACTION_TIMEOUT_ENV] = f"{timeout['browser_action_timeout_seconds']:g}"
+    env[PLAYWRIGHT_MCP_ACTION_TIMEOUT_ENV] = str(timeout["browser_action_timeout_ms"])
     if not effective_headless:
         # Playwright Test MCP defaults to headless when CI is truthy, even when
         # DISPLAY is set. Override inherited worker CI for visible VNC runs.
@@ -377,6 +422,18 @@ def _redact_storage_state_args(args: list[str]) -> list[str]:
         if value == "--secrets" and index + 1 < len(redacted):
             redacted[index + 1] = "<run-local-secrets>"
     return redacted
+
+
+def write_browser_dialog_recovery_init_page(run_dir: Path) -> Path:
+    """Write a Playwright MCP init page that accepts browser dialogs automatically."""
+    path = run_dir / "browser-dialog-recovery.init.ts"
+    path.write_text(
+        "exports.default = async ({ page }) => {\n"
+        f"{playwright_dialog_auto_accept_handler(indent='  ')}\n"
+        "};\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def resolve_run_playwright_config(output_dir: Path | str | None = None) -> Path | None:
@@ -404,19 +461,24 @@ def prepare_run_playwright_config_content(
     run_dir: Path,
     headless: bool,
     storage_state_path: Path | str | None = None,
+    test_root_dir: Path | str | None = None,
 ) -> str:
     """Prepare a Playwright config copy for isolated run execution."""
-    config_content = config_content.replace(
-        "testDir: './tests/generated'", f"testDir: '{base_dir}/tests/generated'"
+    run_dir = Path(run_dir).resolve()
+    configured_test_root = (
+        Path(test_root_dir).resolve() if test_root_dir else run_dir / "tests"
     )
     config_content = config_content.replace(
-        'testDir: "./tests/generated"', f'testDir: "{base_dir}/tests/generated"'
+        "testDir: './tests/generated'", f"testDir: '{configured_test_root}'"
     )
     config_content = config_content.replace(
-        "testDir: './tests'", f"testDir: '{base_dir}/tests'"
+        'testDir: "./tests/generated"', f'testDir: "{configured_test_root}"'
     )
     config_content = config_content.replace(
-        'testDir: "./tests"', f'testDir: "{base_dir}/tests"'
+        "testDir: './tests'", f"testDir: '{configured_test_root}'"
+    )
+    config_content = config_content.replace(
+        'testDir: "./tests"', f'testDir: "{configured_test_root}"'
     )
     config_content = config_content.replace(
         "outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || './test-results'",
@@ -434,7 +496,11 @@ def prepare_run_playwright_config_content(
     config_content = config_content.replace('video: "retain-on-failure"', 'video: "on"')
 
     if storage_state_path and "storageState:" not in config_content:
-        storage_state = str(storage_state_path).replace("\\", "\\\\").replace("'", "\\'")
+        storage_state = (
+            str(Path(storage_state_path).resolve())
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+        )
         if "  use: {\n" in config_content:
             config_content = config_content.replace(
                 "  use: {\n",
@@ -445,6 +511,57 @@ def prepare_run_playwright_config_content(
             config_content = re.sub(
                 r"use:\s*{",
                 f"use: {{\n    storageState: '{storage_state}',",
+                config_content,
+                count=1,
+            )
+
+    action_timeout = browser_action_timeout_config()
+    if "const browserActionTimeout =" not in config_content:
+        timeout_block = (
+            "const configuredBrowserActionTimeoutSeconds = Number(process.env."
+            f"{BROWSER_ACTION_TIMEOUT_ENV} || '{action_timeout['browser_action_timeout_seconds']:g}');\n"
+            "const browserActionTimeout = Number.isFinite(configuredBrowserActionTimeoutSeconds) "
+            "&& configuredBrowserActionTimeoutSeconds > 0\n"
+            "  ? configuredBrowserActionTimeoutSeconds * 1000\n"
+            f"  : {action_timeout['browser_action_timeout_ms']};\n"
+        )
+        export_match = re.search(r"^export\s+default\s+defineConfig\(", config_content, flags=re.MULTILINE)
+        if export_match:
+            config_content = (
+                config_content[: export_match.start()]
+                + timeout_block
+                + "\n"
+                + config_content[export_match.start() :]
+            )
+        else:
+            config_content = timeout_block + "\n" + config_content
+
+    if "actionTimeout:" not in config_content:
+        if "  use: {\n" in config_content:
+            config_content = config_content.replace(
+                "  use: {\n",
+                "  use: {\n    actionTimeout: browserActionTimeout,\n",
+                1,
+            )
+        else:
+            config_content = re.sub(
+                r"use:\s*{",
+                "use: {\n    actionTimeout: browserActionTimeout,",
+                config_content,
+                count=1,
+            )
+
+    if "navigationTimeout:" not in config_content:
+        if "  use: {\n" in config_content:
+            config_content = config_content.replace(
+                "  use: {\n",
+                "  use: {\n    navigationTimeout: 60_000,\n",
+                1,
+            )
+        else:
+            config_content = re.sub(
+                r"use:\s*{",
+                "use: {\n    navigationTimeout: 60_000,",
                 config_content,
                 count=1,
             )
@@ -496,6 +613,77 @@ def prepare_run_playwright_config_content(
     return config_content
 
 
+def _configured_playwright_test_dir(config_path: Path, config_content: str) -> Path:
+    match = re.search(r"testDir:\s*['\"]([^'\"]+)['\"]", config_content)
+    if not match:
+        return config_path.parent / "tests"
+    configured = Path(match.group(1))
+    if configured.is_absolute():
+        return configured
+    return config_path.parent / configured
+
+
+def validate_run_seed_spec_preflight(
+    *,
+    run_dir: Path,
+    config_path: Path,
+    seed_file: str = "tests/seed.spec.ts",
+) -> dict[str, Any]:
+    """Validate that the run-local Playwright config can discover the MCP seed."""
+    config_path = Path(config_path)
+    seed_path = Path(seed_file)
+    if not seed_path.is_absolute():
+        seed_path = run_dir / seed_path
+    seed_path = seed_path.resolve()
+
+    if not config_path.exists():
+        return {
+            "ready": False,
+            "error": f"Playwright config not found: {config_path}",
+            "seed_file": seed_file,
+            "seed_path": str(seed_path),
+            "config_path": str(config_path),
+        }
+
+    config_content = config_path.read_text()
+    test_dir = _configured_playwright_test_dir(config_path, config_content).resolve()
+    if not seed_path.exists():
+        return {
+            "ready": False,
+            "error": (
+                f"Run-local seed test not found: {seed_path}. "
+                f"Expected `{seed_file}` under run directory {run_dir}."
+            ),
+            "seed_file": seed_file,
+            "seed_path": str(seed_path),
+            "configured_test_dir": str(test_dir),
+            "config_path": str(config_path),
+        }
+
+    try:
+        seed_path.relative_to(test_dir)
+    except ValueError:
+        return {
+            "ready": False,
+            "error": (
+                f"Run-local seed test {seed_path} is outside configured Playwright "
+                f"testDir {test_dir}. Set testDir to the run-local tests directory."
+            ),
+            "seed_file": seed_file,
+            "seed_path": str(seed_path),
+            "configured_test_dir": str(test_dir),
+            "config_path": str(config_path),
+        }
+
+    return {
+        "ready": True,
+        "seed_file": seed_file,
+        "seed_path": str(seed_path),
+        "configured_test_dir": str(test_dir),
+        "config_path": str(config_path),
+    }
+
+
 def write_playwright_test_mcp_config(
     *,
     run_dir: Path,
@@ -503,6 +691,7 @@ def write_playwright_test_mcp_config(
     config_path: Path,
     headless: bool,
     storage_state_path: Path | str | None = None,
+    agent_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Write a run-local Playwright Test MCP config.
 
@@ -513,7 +702,7 @@ def write_playwright_test_mcp_config(
     mcp_output_dir = run_dir / "mcp-output"
     mcp_output_dir.mkdir(parents=True, exist_ok=True)
 
-    if storage_state_path and config_path.exists():
+    if config_path.exists():
         prepared = prepare_run_playwright_config_content(
             config_path.read_text(),
             base_dir=Path.cwd(),
@@ -528,26 +717,51 @@ def write_playwright_test_mcp_config(
         args.append("--headless")
 
     mcp_env = _browser_mcp_env(headless)
-    mcp_config = {
-        "mcpServers": {
-            server_name: {
-                "command": "npx",
-                "args": args,
-                "env": mcp_env,
-            }
+    mcp_servers: dict[str, dict[str, Any]] = {
+        server_name: {
+            "command": "npx",
+            "args": args,
+            "env": mcp_env,
+            "alwaysLoad": True,
         }
     }
+    if agent_run_id:
+        project_root = Path(__file__).resolve().parents[2]
+        note_env = {
+            key: value
+            for key in (
+                "DATABASE_URL",
+                "JWT_SECRET_KEY",
+                "QUORVEX_NATIVE_AGENT_RUN_TYPES",
+                "QUORVEX_NATIVE_AGENT_RUN_SHADOW",
+                "QUORVEX_NATIVE_AGENT_RUNS_ENABLED",
+            )
+            if (value := os.environ.get(key))
+        }
+        note_env["QUORVEX_AGENT_RUN_ID"] = str(agent_run_id)
+        mcp_servers["quorvex-agent"] = {
+            "command": sys.executable,
+            "args": [str(project_root / "tools" / "agent_note_mcp" / "server.py")],
+            "env": note_env,
+            "alwaysLoad": True,
+        }
+
+    mcp_config = {"mcpServers": mcp_servers}
     run_dir.mkdir(parents=True, exist_ok=True)
     config_file = run_dir / ".mcp.json"
     config_file.write_text(json.dumps(mcp_config, indent=2))
 
     return {
         **browser_runtime_status(),
+        **browser_action_timeout_config(),
         "mcp_command": "npx",
         "mcp_args": args,
         "mcp_env": {key: mcp_env[key] for key in sorted(mcp_env)},
         "artifacts_dir": str(mcp_output_dir),
         "mcp_config_path": str(config_file),
+        "dialog_recovery_attempted": True,
+        "dialog_recovery_result": "run_local_seed_and_test_prelude",
+        "dialog_recovery_seed_file": "tests/seed.spec.ts",
     }
 
 
@@ -632,6 +846,8 @@ def write_playwright_mcp_config(
     """Write a run-local MCP config and return runtime metadata."""
     artifacts_dir = run_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    dialog_recovery_init_page = write_browser_dialog_recovery_init_page(run_dir)
     command, args, runtime = build_playwright_mcp_args(
         output_dir=artifacts_dir,
         project_root=project_root,
@@ -639,13 +855,20 @@ def write_playwright_mcp_config(
         caps=caps,
         secrets_file=secrets_file,
     )
-    mcp_config = {"mcpServers": {server_name: {"command": command, "args": args}}}
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if "--init-page" not in args:
+        args.extend(["--init-page", str(dialog_recovery_init_page)])
+    mcp_env = _browser_mcp_env()
+    mcp_config = {"mcpServers": {server_name: {"command": command, "args": args, "env": mcp_env}}}
     (run_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2))
     return {
         **runtime,
+        **browser_action_timeout_config(),
         "mcp_command": command,
         "mcp_args": _redact_storage_state_args(args),
+        "mcp_env": {key: mcp_env[key] for key in sorted(mcp_env)},
         "artifacts_dir": str(artifacts_dir),
         "mcp_config_path": str(run_dir / ".mcp.json"),
+        "dialog_recovery_attempted": True,
+        "dialog_recovery_result": "init_page_registered",
+        "dialog_recovery_init_page": str(dialog_recovery_init_page),
     }

@@ -260,6 +260,30 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
             }
             session.add(run)
             session.commit()
+            if run.agent_type in {"custom", "exploratory"}:
+                try:
+                    from orchestrator.services.agent_native_runs import commit_agent_run_note
+
+                    commit_agent_run_note(
+                        run_id=run.id,
+                        agent_task_id=agent_task_id,
+                        phase="temporal_reattach_finalized",
+                        note_type="reporter_note",
+                        level="info" if run.status == "completed" else "warning" if run.status == PARTIAL_STATUS else "error",
+                        title=f"Agent run {run.status} after Temporal reattach",
+                        body=(run.result or {}).get("summary") if isinstance(run.result, dict) else None,
+                        source="temporal_reattach",
+                        tags=[run.agent_type, run.status],
+                        tool_use_id=agent_task_id,
+                        payload={
+                            "status": run.status,
+                            "contract_status": (run.result or {}).get("contract_status") if isinstance(run.result, dict) else None,
+                            "tool_call_count": len(tool_calls),
+                        },
+                        session=session,
+                    )
+                except Exception:
+                    pass
             create_agent_run_event(
                 run_id=run.id,
                 agent_task_id=agent_task_id,
@@ -381,8 +405,14 @@ def _finalize_reattached_agent_task(
         )
         run.status = finalized.status
         run.result = finalized.result
+        run.contract_status = finalized.result.get("contract_status")
+        run.finalization_status = "partial" if finalized.status == PARTIAL_STATUS else finalized.status
+        run.reporter_status = "completed"
+        run.verifier_status = "completed"
     except Exception as finalizer_error:
         run.status = PARTIAL_STATUS if result_text else "failed"
+        run.contract_status = "partial" if result_text else "invalid"
+        run.finalization_status = "partial" if result_text else "failed"
         run.result = {
             "summary": (result_text or str(finalizer_error))[:500],
             "output": result_text,

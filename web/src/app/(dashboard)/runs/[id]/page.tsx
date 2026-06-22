@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     ArrowLeft, CheckCircle, Copy, Check, Image as ImageIcon, Video as VideoIcon,
     ExternalLink, Code, Layout, FileText, Eye, Globe, Chrome, Compass, Clock, XCircle, Square, Monitor,
@@ -14,10 +14,11 @@ import { LiveBrowserView } from '@/components/LiveBrowserView';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
-import { extractLinkedAgentRunId, formatAge, resolveRunHealth } from '@/lib/run-observability';
+import { formatAge, resolveLinkedAgentRunId, resolveRunHealth } from '@/lib/run-observability';
 import { AgentRunObservabilityPanel } from '../../agents/agents-panels';
-import { agentRunTraceExportUrl, fetchAgentRun, fetchAgentRunEvents, fetchAgentRunTrace } from '../../agents/agents-api';
-import type { AgentRun, AgentRunEvent, AgentTraceBundle } from '../../agents/agents-model';
+import { agentRunEventsStreamUrl, agentRunTraceExportUrl, fetchAgentRun, fetchAgentRunEvents, fetchAgentRunTrace } from '../../agents/agents-api';
+import { agentRunNoteFromEvent, isAgentRunTerminal, LIVE_AGENT_STATUSES, mergeAgentRunNotes } from '../../agents/agents-model';
+import type { AgentRun, AgentRunEvent, AgentRunNote, AgentTraceBundle } from '../../agents/agents-model';
 
 interface Artifact {
     name: string;
@@ -35,6 +36,7 @@ interface VisualDiff {
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'pending', 'running', 'in_progress']);
 const STREAMING_RUN_STATUSES = new Set(['running', 'in_progress']);
+const AGENT_NOTE_LOG_SECTION_TITLES = new Set(['Agent Notes', 'Raw Agent Notes']);
 
 function getRunStatus(runData: any): string {
     const persistedStatus = runData?.status;
@@ -48,6 +50,42 @@ function isActiveRunData(runData: any): boolean {
 
 function isStreamingRunData(runData: any): boolean {
     return STREAMING_RUN_STATUSES.has(getRunStatus(runData));
+}
+
+function agentLogSectionsToNotes(sections: any[], runId: string, createdAt?: string | null): AgentRunNote[] {
+    const timestamp = createdAt || new Date(0).toISOString();
+    const notes: AgentRunNote[] = [];
+    sections.forEach((section, sectionIndex) => {
+        const title = String(section?.title || '').trim();
+        if (!AGENT_NOTE_LOG_SECTION_TITLES.has(title)) return;
+        const content = String(section?.content || '').trim();
+        if (!content) return;
+        const chunks = content.split(/\n{2,}/).map(chunk => chunk.trim()).filter(Boolean);
+        (chunks.length ? chunks : [content]).forEach((chunk, chunkIndex) => {
+            notes.push({
+                id: `recovered-${runId}-${sectionIndex}-${chunkIndex}`,
+                run_id: runId,
+                sequence: -1_000_000 + (sectionIndex * 1000) + chunkIndex,
+                note_type: 'observation',
+                level: 'info',
+                title: chunks.length > 1 ? `${title} ${chunkIndex + 1}` : title,
+                body: chunk,
+                source: typeof section?.source === 'string' && section.source ? section.source : 'test_run_log',
+                tags: ['recovered', 'test-run-log'],
+                actionable: false,
+                created_at: timestamp,
+            });
+        });
+    });
+    return notes;
+}
+
+function mergeAgentEventLists(existing: AgentRunEvent[], incoming: AgentRunEvent[]) {
+    const bySequence = new Map<number, AgentRunEvent>();
+    [...existing, ...incoming].forEach(item => {
+        if (Number.isFinite(item.sequence)) bySequence.set(item.sequence, item);
+    });
+    return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence);
 }
 
 export default function RunDetailPage() {
@@ -65,6 +103,10 @@ export default function RunDetailPage() {
     const [linkedAgentEvents, setLinkedAgentEvents] = useState<AgentRunEvent[]>([]);
     const [linkedAgentTrace, setLinkedAgentTrace] = useState<AgentTraceBundle | null>(null);
     const [linkedAgentTraceLoading, setLinkedAgentTraceLoading] = useState(false);
+    const linkedAgentEventsRef = useRef<AgentRunEvent[]>([]);
+    const linkedAgentCompletionTraceFetchedRef = useRef<string | null>(null);
+    const logPanelRef = useRef<HTMLDivElement | null>(null);
+    const [isLogPinnedToBottom, setIsLogPinnedToBottom] = useState(true);
 
     // Jira bug report state
     const [jiraIssue, setJiraIssue] = useState<{ exists: boolean; jira_issue_key?: string; jira_url?: string; summary?: string } | null>(null);
@@ -81,6 +123,15 @@ export default function RunDetailPage() {
     const currentRunStatus = getRunStatus(data);
     const currentRunIsActive = isActiveRunData(data);
     const currentRunIsStreaming = isStreamingRunData(data);
+    const resolvedLinkedAgentRunId = useMemo(() => resolveLinkedAgentRunId(data), [data]);
+
+    useEffect(() => {
+        linkedAgentEventsRef.current = linkedAgentEvents;
+    }, [linkedAgentEvents]);
+
+    const mergeLinkedAgentEvents = useCallback((incoming: AgentRunEvent[]) => {
+        setLinkedAgentEvents(prev => mergeAgentEventLists(prev, incoming));
+    }, []);
 
     const fetchRunData = useCallback(() => {
         if (!projectId) return Promise.resolve(null);
@@ -232,32 +283,234 @@ export default function RunDetailPage() {
     }, [currentRunIsStreaming, id, projectId, fetchRunData]);
 
     useEffect(() => {
-        const linkedAgentRunId = extractLinkedAgentRunId(data?.agentic_summary);
+        const linkedAgentRunId = resolvedLinkedAgentRunId;
         if (!linkedAgentRunId) {
             setLinkedAgentRun(null);
             setLinkedAgentEvents([]);
             setLinkedAgentTrace(null);
+            linkedAgentEventsRef.current = [];
+            linkedAgentCompletionTraceFetchedRef.current = null;
             return;
         }
 
         const controller = new AbortController();
         setLinkedAgentTraceLoading(true);
+        setLinkedAgentEvents([]);
+        linkedAgentEventsRef.current = [];
+        linkedAgentCompletionTraceFetchedRef.current = null;
         Promise.allSettled([
             fetchAgentRun(linkedAgentRunId, { projectId, signal: controller.signal }),
-            fetchAgentRunEvents(linkedAgentRunId, { limit: 150, signal: controller.signal }),
+            fetchAgentRunEvents(linkedAgentRunId, { limit: 150, projectId, signal: controller.signal }),
             fetchAgentRunTrace(linkedAgentRunId, projectId),
         ]).then(results => {
             if (controller.signal.aborted) return;
             const [runResult, eventsResult, traceResult] = results;
             setLinkedAgentRun(runResult.status === 'fulfilled' ? runResult.value : null);
-            setLinkedAgentEvents(eventsResult.status === 'fulfilled' ? eventsResult.value : []);
+            if (eventsResult.status === 'fulfilled') mergeLinkedAgentEvents(eventsResult.value);
             setLinkedAgentTrace(traceResult.status === 'fulfilled' ? traceResult.value : null);
         }).finally(() => {
             if (!controller.signal.aborted) setLinkedAgentTraceLoading(false);
         });
 
         return () => controller.abort();
-    }, [data?.agentic_summary, projectId]);
+    }, [resolvedLinkedAgentRunId, mergeLinkedAgentEvents, projectId]);
+
+    useEffect(() => {
+        const linkedAgentRunId = resolvedLinkedAgentRunId;
+        if (!linkedAgentRunId || !linkedAgentRun || !LIVE_AGENT_STATUSES.has(linkedAgentRun.status)) return;
+        const activeLinkedAgentRunId: string = linkedAgentRunId;
+
+        let cancelled = false;
+        let attempts = 0;
+        let source: EventSource | null = null;
+        let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const lastSequence = () => linkedAgentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
+
+        const backfillEvents = async () => {
+            const events = await fetchAgentRunEvents(activeLinkedAgentRunId, {
+                limit: 200,
+                afterSequence: lastSequence(),
+                projectId,
+            });
+            if (!cancelled) mergeLinkedAgentEvents(events);
+        };
+
+        const closeSource = () => {
+            source?.close();
+            source = null;
+        };
+
+        function scheduleReconnect() {
+            if (cancelled) return;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            attempts += 1;
+            const delay = Math.min(15000, 750 * Math.pow(2, Math.min(attempts, 5)));
+            reconnectTimer = setTimeout(async () => {
+                reconnectTimer = null;
+                try {
+                    await backfillEvents();
+                    if (!cancelled) {
+                        const latest = await fetchAgentRun(activeLinkedAgentRunId, { projectId });
+                        if (!cancelled) setLinkedAgentRun(latest);
+                    }
+                } catch {
+                    // The EventSource retry loop will try again.
+                }
+                connect();
+            }, delay);
+        }
+
+        function connect() {
+            if (cancelled || source) return;
+            source = new EventSource(agentRunEventsStreamUrl(activeLinkedAgentRunId, {
+                afterSequence: lastSequence(),
+                projectId,
+            }));
+
+            source.onmessage = (event) => {
+                try {
+                    attempts = 0;
+                    mergeLinkedAgentEvents([JSON.parse(event.data)]);
+                } catch {
+                    closeSource();
+                    scheduleReconnect();
+                }
+            };
+
+            source.addEventListener('complete', () => {
+                closeSource();
+                void fetchAgentRun(activeLinkedAgentRunId, { projectId })
+                    .then(setLinkedAgentRun)
+                    .catch(() => {});
+                void backfillEvents();
+                if (linkedAgentCompletionTraceFetchedRef.current !== activeLinkedAgentRunId) {
+                    linkedAgentCompletionTraceFetchedRef.current = activeLinkedAgentRunId;
+                    setLinkedAgentTraceLoading(true);
+                    void fetchAgentRunTrace(activeLinkedAgentRunId, projectId)
+                        .then(setLinkedAgentTrace)
+                        .catch(() => {})
+                        .finally(() => setLinkedAgentTraceLoading(false));
+                }
+            });
+
+            source.onerror = () => {
+                closeSource();
+                scheduleReconnect();
+            };
+        }
+
+        void backfillEvents().finally(connect);
+
+        return () => {
+            cancelled = true;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            closeSource();
+        };
+    }, [resolvedLinkedAgentRunId, linkedAgentRun?.id, linkedAgentRun?.status, mergeLinkedAgentEvents, projectId]);
+
+    useEffect(() => {
+        const linkedAgentRunId = resolvedLinkedAgentRunId;
+        if (!linkedAgentRunId || !linkedAgentRun || !LIVE_AGENT_STATUSES.has(linkedAgentRun.status)) return;
+        let cancelled = false;
+        let inFlight = false;
+
+        const refreshLinkedRun = async () => {
+            if (inFlight) return;
+            inFlight = true;
+            try {
+                const latest = await fetchAgentRun(linkedAgentRunId, { projectId });
+                if (cancelled) return;
+                setLinkedAgentRun(latest);
+                const events = await fetchAgentRunEvents(linkedAgentRunId, {
+                    limit: 200,
+                    afterSequence: linkedAgentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0),
+                    projectId,
+                });
+                if (!cancelled) mergeLinkedAgentEvents(events);
+                if (isAgentRunTerminal(latest.status) && linkedAgentCompletionTraceFetchedRef.current !== linkedAgentRunId) {
+                    linkedAgentCompletionTraceFetchedRef.current = linkedAgentRunId;
+                    setLinkedAgentTraceLoading(true);
+                    fetchAgentRunTrace(linkedAgentRunId, projectId)
+                        .then(trace => {
+                            if (!cancelled) setLinkedAgentTrace(trace);
+                        })
+                        .catch(() => {})
+                        .finally(() => {
+                            if (!cancelled) setLinkedAgentTraceLoading(false);
+                        });
+                }
+            } catch {
+                // Keep the last linked-agent snapshot; SSE/backfill may still recover.
+            } finally {
+                inFlight = false;
+            }
+        };
+
+        const interval = window.setInterval(() => {
+            void refreshLinkedRun();
+        }, 3000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+        };
+    }, [resolvedLinkedAgentRunId, linkedAgentRun?.id, linkedAgentRun?.status, mergeLinkedAgentEvents, projectId]);
+
+    const logContentSignature = useMemo(() => {
+        const sections = Array.isArray(data?.log_sections) ? data.log_sections : [];
+        if (sections.length > 0) {
+            return sections
+                .map((section: any) => `${section.source || ''}:${section.title || ''}:${String(section.content || '').length}`)
+                .join('|');
+        }
+        const text = isStreaming ? (streamingLog || data?.log || '') : (data?.log || '');
+        return `${isStreaming ? 'streaming' : 'static'}:${String(text).length}`;
+    }, [data?.log, data?.log_sections, isStreaming, streamingLog]);
+
+    useEffect(() => {
+        if (viewMode !== 'log' || !isLogPinnedToBottom) return;
+        const el = logPanelRef.current;
+        if (!el) return;
+        window.requestAnimationFrame(() => {
+            el.scrollTop = el.scrollHeight;
+        });
+    }, [isLogPinnedToBottom, logContentSignature, viewMode]);
+
+    const updateLogPinnedState = useCallback(() => {
+        const el = logPanelRef.current;
+        if (!el) return;
+        const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        setIsLogPinnedToBottom(distanceFromBottom <= 32);
+    }, []);
+
+    const jumpToLatestLog = useCallback(() => {
+        const el = logPanelRef.current;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+        setIsLogPinnedToBottom(true);
+    }, []);
+
+    const supplementalLinkedAgentNotes = useMemo(() => {
+        const sections = Array.isArray(data?.log_sections) ? data.log_sections : [];
+        return agentLogSectionsToNotes(
+            sections,
+            resolvedLinkedAgentRunId || linkedAgentRun?.id || id,
+            data?.completed_at || data?.started_at || data?.created_at || data?.run?.completed_at || data?.run?.started_at || data?.run?.created_at,
+        );
+    }, [data?.completed_at, data?.created_at, data?.log_sections, data?.run?.completed_at, data?.run?.created_at, data?.run?.started_at, data?.started_at, id, linkedAgentRun?.id, resolvedLinkedAgentRunId]);
+
+    const linkedNotesSummary = useMemo(() => {
+        if (!linkedAgentRun) return { count: 0, latest: null as AgentRunNote | null };
+        const liveTail = Array.isArray(linkedAgentRun.progress?.live_notes_tail)
+            ? linkedAgentRun.progress.live_notes_tail as AgentRunNote[]
+            : [];
+        const eventNotes = linkedAgentEvents.map(agentRunNoteFromEvent).filter(Boolean) as AgentRunNote[];
+        const notes = mergeAgentRunNotes(mergeAgentRunNotes(liveTail, eventNotes), supplementalLinkedAgentNotes);
+        return {
+            count: notes.length,
+            latest: notes[notes.length - 1] || null,
+        };
+    }, [linkedAgentEvents, linkedAgentRun, supplementalLinkedAgentNotes]);
 
     if (loading) return (
         <PageLayout tier="standard">
@@ -353,7 +606,7 @@ export default function RunDetailPage() {
         formatTimestamp(data.completed_at || data.run?.completed_at) ? ['Completed', formatTimestamp(data.completed_at || data.run?.completed_at)] : null,
     ].filter(Boolean) as [string, string][];
     const logSections = Array.isArray(data.log_sections) ? data.log_sections : [];
-    const shouldShowStructuredLogs = logSections.length > 0 && (!isStreaming || !streamingLog);
+    const shouldShowStructuredLogs = logSections.length > 0;
     const runHealth = resolveRunHealth(data);
     const temporalDiagnostics = data.diagnostics?.temporal || {};
     const browserPoolDiagnostics = data.diagnostics?.browser_pool || {};
@@ -361,7 +614,7 @@ export default function RunDetailPage() {
     const activeTemporalActivities = runHealth.temporal_started_activities || (temporalDiagnostics.activities || []).filter((activity: any) => activity?.status === 'started');
     const temporalPollers = temporalDiagnostics.task_queue_status;
     const browserSlotOwner = runHealth.browser_slot_owner || (browserPoolDiagnostics.running_requests || []).find((requestId: string) => requestId === id);
-    const linkedAgentRunId = extractLinkedAgentRunId(data.agentic_summary);
+    const linkedAgentRunId = resolvedLinkedAgentRunId;
     const exportLinkedAgentTrace = () => {
         if (!linkedAgentRunId || typeof window === 'undefined') return;
         window.open(agentRunTraceExportUrl(linkedAgentRunId, projectId), '_blank', 'noopener,noreferrer');
@@ -739,15 +992,27 @@ export default function RunDetailPage() {
 
                         {linkedAgentRun && (
                             <div style={{ marginTop: '1rem' }}>
-                                <div style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                    <Wrench size={16} /> Linked Tool Activity
+                                <div style={{ marginBottom: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                    <div style={{ fontSize: '0.9rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <Wrench size={16} /> Linked Tool Activity
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', minWidth: 0, color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                                        <span style={{ fontWeight: 700, color: 'var(--text)' }}>{linkedNotesSummary.count}</span>
+                                        <span>{linkedNotesSummary.count === 1 ? 'note' : 'notes'}</span>
+                                        {linkedNotesSummary.latest && (
+                                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '420px' }}>
+                                                Latest: {linkedNotesSummary.latest.title}
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
                                 <AgentRunObservabilityPanel
                                     run={linkedAgentRun}
                                     events={linkedAgentEvents}
+                                    supplementalNotes={supplementalLinkedAgentNotes}
                                     trace={linkedAgentTrace}
                                     traceLoading={linkedAgentTraceLoading}
-                                    activeTraceTab="tools"
+                                    activeTraceTab="notes"
                                     onExportTrace={exportLinkedAgentTrace}
                                 />
                             </div>
@@ -1006,85 +1271,105 @@ export default function RunDetailPage() {
 
                         {/* Execution Log */}
                         {viewMode === 'log' && (
-                            <div
-                                style={{
-                                    background: 'var(--background)',
-                                    padding: shouldShowStructuredLogs ? '0.75rem' : '1rem',
-                                    borderRadius: 'var(--radius)',
-                                    maxHeight: '500px',
-                                    overflow: 'auto',
-                                    color: 'var(--text)',
-                                    border: `1px solid ${isStreaming ? 'var(--primary)' : 'var(--border)'}`,
-                                    transition: 'border-color 0.3s'
-                                }}
-                                ref={(el) => {
-                                    // Auto-scroll to bottom when streaming
-                                    if (el && isStreaming) {
-                                        el.scrollTop = el.scrollHeight;
-                                    }
-                                }}
-                            >
-                                {shouldShowStructuredLogs ? (
-                                    <div style={{ display: 'grid', gap: '0.75rem' }}>
-                                        {data.blocker_message && (
-                                            <div style={{
-                                                padding: '0.75rem',
-                                                border: '1px solid rgba(245, 158, 11, 0.45)',
-                                                background: 'rgba(245, 158, 11, 0.10)',
-                                                borderRadius: 'var(--radius)',
-                                                fontSize: '0.86rem',
-                                                fontWeight: 650,
-                                                color: 'var(--text)'
-                                            }}>
-                                                {data.blocker_message}
-                                            </div>
-                                        )}
-                                        {logSections.map((section: any, index: number) => (
-                                            <section key={`${section.source || 'log'}-${index}`} style={{
-                                                border: '1px solid var(--border)',
-                                                borderRadius: 'var(--radius)',
-                                                overflow: 'hidden',
-                                                background: 'var(--surface)'
-                                            }}>
+                            <div style={{ position: 'relative' }}>
+                                <div
+                                    ref={logPanelRef}
+                                    onScroll={updateLogPinnedState}
+                                    style={{
+                                        background: 'var(--background)',
+                                        padding: shouldShowStructuredLogs ? '0.75rem' : '1rem',
+                                        borderRadius: 'var(--radius)',
+                                        maxHeight: '500px',
+                                        overflow: 'auto',
+                                        color: 'var(--text)',
+                                        border: `1px solid ${isStreaming ? 'var(--primary)' : 'var(--border)'}`,
+                                        transition: 'border-color 0.3s'
+                                    }}
+                                >
+                                    {shouldShowStructuredLogs ? (
+                                        <div style={{ display: 'grid', gap: '0.75rem' }}>
+                                            {data.blocker_message && (
                                                 <div style={{
-                                                    display: 'flex',
-                                                    justifyContent: 'space-between',
-                                                    gap: '0.75rem',
-                                                    padding: '0.55rem 0.75rem',
-                                                    borderBottom: '1px solid var(--border)',
-                                                    background: 'var(--surface-hover)',
-                                                    fontSize: '0.78rem',
-                                                    fontWeight: 700
-                                                }}>
-                                                    <span>{section.title || 'Log'}</span>
-                                                    <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>{section.source}</span>
-                                                </div>
-                                                <pre style={{
-                                                    margin: 0,
                                                     padding: '0.75rem',
-                                                    whiteSpace: 'pre-wrap',
-                                                    overflowWrap: 'anywhere',
-                                                    fontFamily: 'monospace',
-                                                    fontSize: '0.82rem',
-                                                    lineHeight: 1.45,
+                                                    border: '1px solid rgba(245, 158, 11, 0.45)',
+                                                    background: 'rgba(245, 158, 11, 0.10)',
+                                                    borderRadius: 'var(--radius)',
+                                                    fontSize: '0.86rem',
+                                                    fontWeight: 650,
                                                     color: 'var(--text)'
                                                 }}>
-                                                    {section.content || 'No entries yet.'}
-                                                </pre>
-                                            </section>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <pre style={{
-                                        margin: 0,
-                                        fontFamily: 'monospace',
-                                        fontSize: '0.85rem',
-                                        whiteSpace: 'pre-wrap',
-                                        overflowWrap: 'anywhere',
-                                        color: 'var(--text)'
-                                    }}>
-                                        {isStreaming ? (streamingLog || data.log || 'Waiting for output...') : (data.log || 'No logs available.')}
-                                    </pre>
+                                                    {data.blocker_message}
+                                                </div>
+                                            )}
+                                            {logSections.map((section: any, index: number) => (
+                                                <section key={`${section.source || 'log'}-${index}`} style={{
+                                                    border: '1px solid var(--border)',
+                                                    borderRadius: 'var(--radius)',
+                                                    overflow: 'hidden',
+                                                    background: 'var(--surface)'
+                                                }}>
+                                                    <div style={{
+                                                        display: 'flex',
+                                                        justifyContent: 'space-between',
+                                                        gap: '0.75rem',
+                                                        padding: '0.55rem 0.75rem',
+                                                        borderBottom: '1px solid var(--border)',
+                                                        background: 'var(--surface-hover)',
+                                                        fontSize: '0.78rem',
+                                                        fontWeight: 700
+                                                    }}>
+                                                        <span>{section.title || 'Log'}</span>
+                                                        <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>{section.source}</span>
+                                                    </div>
+                                                    <pre style={{
+                                                        margin: 0,
+                                                        padding: '0.75rem',
+                                                        whiteSpace: 'pre-wrap',
+                                                        overflowWrap: 'anywhere',
+                                                        fontFamily: 'monospace',
+                                                        fontSize: '0.82rem',
+                                                        lineHeight: 1.45,
+                                                        color: 'var(--text)'
+                                                    }}>
+                                                        {section.content || 'No entries yet.'}
+                                                    </pre>
+                                                </section>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <pre style={{
+                                            margin: 0,
+                                            fontFamily: 'monospace',
+                                            fontSize: '0.85rem',
+                                            whiteSpace: 'pre-wrap',
+                                            overflowWrap: 'anywhere',
+                                            color: 'var(--text)'
+                                        }}>
+                                            {isStreaming ? (streamingLog || data.log || 'Waiting for output...') : (data.log || 'No logs available.')}
+                                        </pre>
+                                    )}
+                                </div>
+                                {!isLogPinnedToBottom && (
+                                    <button
+                                        type="button"
+                                        onClick={jumpToLatestLog}
+                                        style={{
+                                            position: 'absolute',
+                                            right: '0.85rem',
+                                            bottom: '0.85rem',
+                                            border: '1px solid var(--border)',
+                                            borderRadius: '999px',
+                                            background: 'var(--surface)',
+                                            color: 'var(--text)',
+                                            boxShadow: '0 8px 24px rgba(0,0,0,0.28)',
+                                            padding: '0.4rem 0.7rem',
+                                            fontSize: '0.78rem',
+                                            fontWeight: 700,
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        Jump to latest
+                                    </button>
                                 )}
                             </div>
                         )}

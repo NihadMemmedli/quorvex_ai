@@ -73,6 +73,17 @@ class AgentBackgroundRunnerDependencies:
     record_tool_result_spans: Callable[..., None]
 
 
+def custom_agent_browser_tool_policy() -> str:
+    """Return the browser failure policy injected into custom QA agent prompts."""
+    return (
+        "Browser tool policy: use Playwright MCP browser tools to test the target application. "
+        "If a browser tool or MCP server fails before you can inspect the target, stop the browser task "
+        "and report the tooling failure, including the failed tool and error text. Do not debug Quorvex "
+        "source code, node_modules, generated MCP files, Playwright internals, or worker infrastructure "
+        "unless the user explicitly asks for infrastructure debugging."
+    )
+
+
 async def execute_agent_background(
     run_id: str,
     agent_type: str,
@@ -143,6 +154,30 @@ async def execute_agent_background(
     _merge_agent_failure_into_result = deps.merge_agent_failure_into_result
     _recover_exploratory_partial_result = deps.recover_exploratory_partial_result
     _run_artifact_counts = deps.run_artifact_counts
+
+    def _runtime_env_snapshot() -> dict[str, str]:
+        try:
+            from orchestrator.api.settings import runtime_env_vars
+
+            env_vars = runtime_env_vars()
+        except Exception as exc:
+            logger.debug("Unable to load Settings-backed runtime env for agent run %s: %s", run_id, exc)
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in (env_vars or {}).items()
+            if key and value is not None
+        }
+
+    def _commit_native_note(**kwargs: Any) -> None:
+        if agent_type not in {"custom", "exploratory"}:
+            return
+        try:
+            from orchestrator.services.agent_native_runs import commit_agent_run_note
+
+            commit_agent_run_note(run_id=run_id, **kwargs)
+        except Exception as native_error:
+            logger.debug("Native agent run note commit failed for %s: %s", run_id, native_error)
 
     await check_system_available("agent run")
 
@@ -263,6 +298,17 @@ async def execute_agent_background(
                 if not await _wait_if_agent_run_paused(run_id):
                     return
                 result = await agent.run(config)
+                _commit_native_note(
+                    phase="explorer_result_collected",
+                    note_type="observation",
+                    title="Explorer returned results",
+                    body=str(result.get("summary") or "Exploratory agent produced a result payload.")[:1200]
+                    if isinstance(result, dict)
+                    else None,
+                    source="explorer",
+                    tags=["exploratory", "result"],
+                    payload={"result_keys": sorted(result.keys()) if isinstance(result, dict) else []},
+                )
 
                 # Note: Persistence is now handled within ExploratoryAgent.run() -> _process_results()
 
@@ -447,6 +493,7 @@ async def execute_agent_background(
                     enable_file_checkpointing=True,
                     agents=coding_agent_subagents(),
                     tool_permission_guard=build_coding_tool_permission_guard(),
+                    env_vars=_runtime_env_snapshot(),
                     agent_name="CodingAgent",
                     metadata={
                         "agent_type": "coding",
@@ -530,7 +577,10 @@ async def execute_agent_background(
                     },
                 )
             elif agent_type == "custom":
-                allowed_tools = config.get("allowed_tools") or []
+                allowed_tools = list(config.get("allowed_tools") or [])
+                if "mcp__quorvex-agent__quorvex_record_note" not in [str(tool) for tool in allowed_tools]:
+                    allowed_tools.append("mcp__quorvex-agent__quorvex_record_note")
+                config["allowed_tools"] = allowed_tools
                 run_dir = None
                 has_browser_tools = _custom_agent_uses_browser_tools(allowed_tools)
                 has_screenshot_tool = any(str(tool).endswith("__browser_take_screenshot") for tool in allowed_tools)
@@ -546,14 +596,24 @@ async def execute_agent_background(
                             force_direct_execution=force_direct_execution,
                         )
                     candidate_run_dir = RUNS_DIR / run_id
-                    storage_state_path = _resolve_agent_browser_auth_storage_path(
-                        run_id=run_id,
-                        project_id=custom_project_id or config.get("project_id"),
-                        config=config,
-                        run_dir=candidate_run_dir,
+                    storage_state_path = (
+                        _resolve_agent_browser_auth_storage_path(
+                            run_id=run_id,
+                            project_id=custom_project_id or config.get("project_id"),
+                            config=config,
+                            run_dir=candidate_run_dir,
+                            preflight_enabled=True,
+                        )
+                        if has_browser_tools
+                        else None
                     )
-                    run_dir = _prepare_custom_agent_mcp_config(run_id, storage_state_path=storage_state_path)
-                    runtime = browser_runtime_status()
+                    run_dir = _prepare_custom_agent_mcp_config(
+                        run_id,
+                        storage_state_path=storage_state_path,
+                        include_browser_tools=has_browser_tools,
+                        include_agent_note_tool=True,
+                    )
+                    runtime = browser_runtime_status() if has_browser_tools else {}
 
                 _update_agent_run_progress(
                     run_id,
@@ -562,14 +622,27 @@ async def execute_agent_background(
                         "message": "Starting custom agent",
                         "tool_calls": 0,
                         "browser_tool_calls": 0,
-                            "interactions": 0,
-                            "has_browser_tools": has_browser_tools,
-                            "force_direct_execution": force_direct_execution,
-                            **runtime,
-                        },
-                    )
+                        "interactions": 0,
+                        "has_browser_tools": has_browser_tools,
+                        "force_direct_execution": force_direct_execution,
+                        **runtime,
+                    },
+                )
 
                 task_prompt = config.get("prompt", "")
+                _commit_native_note(
+                    phase="custom_starting",
+                    note_type="handoff",
+                    title="Custom agent starting",
+                    body=str(task_prompt or "Custom agent task started.")[:1200],
+                    source="runtime",
+                    tags=["custom", "starting"],
+                    payload={
+                        "runtime": runtime_name,
+                        "has_browser_tools": has_browser_tools,
+                        "allowed_tools": allowed_tools,
+                    },
+                )
                 target_url = config.get("url")
                 custom_config = config.get("custom_config") or {}
                 prompt_parts = [
@@ -583,6 +656,13 @@ async def execute_agent_background(
                         "While working in the browser, periodically call browser_take_screenshot with filenames "
                         "like live-step-001.png, live-step-002.png, etc. so the UI can show your current state."
                     )
+                if has_browser_tools:
+                    prompt_parts.append(custom_agent_browser_tool_policy())
+                prompt_parts.append(
+                    "Use quorvex_record_note for meaningful findings, decisions, blockers, handoff notes, "
+                    "validation observations, and verifier/reporter notes that should persist in the run Notes tab. "
+                    "Do not record routine low-level tool usage as notes."
+                )
                 if target_url:
                     if has_browser_tools:
                         prompt_parts.append(
@@ -659,6 +739,16 @@ async def execute_agent_background(
                             "agent_task_id": task_id,
                             "runtime_message": runtime_message,
                         },
+                    )
+                    _commit_native_note(
+                        phase="custom_task_queued",
+                        note_type="handoff",
+                        title="Agent task queued",
+                        body="Worker task accepted for custom agent execution.",
+                        source="runtime",
+                        tags=["custom", "queued"],
+                        agent_task_id=task_id,
+                        payload={"runtime": runtime_name},
                     )
 
                 def _on_custom_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
@@ -740,7 +830,7 @@ async def execute_agent_background(
                     trace_id=trace_snapshot.id if trace_snapshot else None,
                     prompt_hash=trace_snapshot.prompt_hash if trace_snapshot else None,
                     agent_run_id=run_id,
-                    env_vars=None,
+                    env_vars=_runtime_env_snapshot(),
                     is_cancelled=_agent_run_cancelled,
                 )
                 if not await _wait_if_agent_run_paused(run_id):
@@ -848,6 +938,16 @@ async def execute_agent_background(
                     )
                     run.completed_at = datetime.utcnow()
                     run.result = result
+                    run.contract_status = result.get("contract_status") if isinstance(result, dict) else None
+                    run.finalization_status = (
+                        "failed"
+                        if exploratory_failed
+                        else "partial"
+                        if partial_result or run.status == AGENT_PARTIAL_STATUS
+                        else "completed"
+                    )
+                    run.reporter_status = "completed" if finalized is not None else run.reporter_status
+                    run.verifier_status = "completed" if finalized is not None else run.verifier_status
                     if exploratory_failed:
                         run.progress = {
                             **(run.progress or {}),
@@ -861,15 +961,43 @@ async def execute_agent_background(
                         }
                     session.add(run)
                     session.commit()
+                    if agent_type in {"custom", "exploratory"}:
+                        _commit_native_note(
+                            phase=f"{agent_type}_finalized",
+                            note_type="reporter_note",
+                            level="error" if exploratory_failed else "warning" if partial_result else "info",
+                            title=f"Agent run {run.status}",
+                            body=result.get("summary") if isinstance(result, dict) else None,
+                            source="finalizer",
+                            tags=[agent_type, run.status],
+                            payload={
+                                "status": run.status,
+                                "contract_status": result.get("contract_status") if isinstance(result, dict) else None,
+                                "finalization_status": run.finalization_status,
+                            },
+                            evidence=[
+                                {
+                                    "type": item.get("type") or "artifact",
+                                    "title": item.get("name"),
+                                    "path": item.get("path"),
+                                    "stable_key": item.get("path") or item.get("name"),
+                                }
+                                for item in (_collect_agent_run_artifacts(run_id) or [])[:20]
+                                if isinstance(item, dict)
+                            ],
+                            session=session,
+                        )
                     _record_agent_run_event(
                         run_id,
-                        event_type="error" if exploratory_failed else "complete",
-                        level="error" if exploratory_failed else "info",
+                        event_type="error" if exploratory_failed else "partial" if run.status == AGENT_PARTIAL_STATUS else "complete",
+                        level="error" if exploratory_failed else "warning" if run.status == AGENT_PARTIAL_STATUS else "info",
                         message=(
                             result.get("summary")
                             if exploratory_failed and failure_reason == "runtime_auth_failed"
                             else "Exploratory agent run failed: result parsing failed and no structured data recovered."
                             if exploratory_failed
+                            else "Agent run completed with partial output."
+                            if run.status == AGENT_PARTIAL_STATUS
                             else "Agent run completed."
                         ),
                         payload={
@@ -905,8 +1033,11 @@ async def execute_agent_background(
 
         traceback.print_exc()
         logger.error(f"Agent {run_id} failed with exception: {e}")
+        auth_preflight_failed = e.__class__.__name__ == "AgentBrowserAuthPreflightError"
         retry_via_temporal = os.environ.get("QUORVEX_AGENT_TEMPORAL_ACTIVITY") == "true"
         should_reraise = retry_via_temporal
+        if auth_preflight_failed:
+            should_reraise = False
         with Session(engine) as session:
             run = session.get(AgentRun, run_id)
             if run and run.status not in AGENT_TERMINAL_STATUSES:
@@ -928,6 +1059,8 @@ async def execute_agent_background(
                     run.status = AGENT_PARTIAL_STATUS
                     run.completed_at = datetime.utcnow()
                     run.result = recovered
+                    run.contract_status = recovered.get("contract_status")
+                    run.finalization_status = "partial"
                     run.progress = {
                         **(run.progress or {}),
                         "phase": AGENT_PARTIAL_STATUS,
@@ -969,6 +1102,7 @@ async def execute_agent_background(
                     run.completed_at = datetime.utcnow()
                     existing_result = run.result if isinstance(run.result, dict) else {}
                     run.result = {**existing_result, "error": str(e)}
+                    run.finalization_status = "failed"
                     run.progress = {
                         **(run.progress or {}),
                         "phase": "failed",
@@ -982,6 +1116,19 @@ async def execute_agent_background(
                     event_payload = {"status": run.status, "error": str(e)}
                 session.add(run)
                 session.commit()
+                if agent_type in {"custom", "exploratory"} and event_type in {"partial", "error"}:
+                    _commit_native_note(
+                        phase=f"{agent_type}_{event_type}",
+                        note_type="blocker" if event_type == "error" else "reporter_note",
+                        level=event_level,
+                        title=event_message,
+                        body=str(event_payload.get("error") or ""),
+                        source="runtime",
+                        tags=[agent_type, event_type],
+                        actionable=event_type == "error",
+                        payload=event_payload,
+                        session=session,
+                    )
                 _record_agent_run_event(
                     run_id,
                     event_type=event_type,

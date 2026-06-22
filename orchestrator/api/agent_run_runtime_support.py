@@ -5,23 +5,29 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time as time_module
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from sqlmodel import Session
 
+from orchestrator.services.agent_run_events import create_agent_run_event
 from orchestrator.services.agent_runtimes import normalize_agent_runtime
 from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError
 from utils.agent_report import _build_custom_agent_structured_report, _clean_text
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.playwright_mcp import (
+    prepare_run_playwright_config_content,
     resolve_playwright_chromium_executable,
     write_playwright_mcp_config,
+    write_playwright_test_mcp_config,
 )
 
 from . import agent_run_observability, agent_run_runtime, spec_files
@@ -32,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 RUNS_DIR = spec_files.RUNS_DIR
 BASE_DIR = spec_files.BASE_DIR
+AGENT_NOTE_MCP_SERVER_NAME = "quorvex-agent"
+AGENT_NOTE_MCP_TOOL_NAME = "mcp__quorvex-agent__quorvex_record_note"
 
 
 def _current_runs_dir() -> Path:
@@ -160,6 +168,249 @@ class AgentBrowserAuthResolutionError(RuntimeError):
         self.use_default = use_default
 
 
+class AgentBrowserAuthPreflightError(AgentBrowserAuthResolutionError):
+    """Raised when an attached browser auth session cannot open the target."""
+
+
+@dataclass(frozen=True)
+class BrowserAuthPreflightResult:
+    status: str
+    url: str | None = None
+    title: str | None = None
+    failure_reason: str | None = None
+    failure_kind: str | None = None
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "passed"
+
+
+AUTH_PREFLIGHT_CHALLENGE_MESSAGE = (
+    "Saved browser session was attached, but target opened a security challenge. "
+    "Refresh the browser auth session or use a trusted browser context."
+)
+AUTH_PREFLIGHT_SESSION_FAILED_MESSAGE = (
+    "Saved browser session was attached, but target did not open as an authenticated session. "
+    "Refresh the browser auth session or use a trusted browser context."
+)
+
+
+def _sanitize_preflight_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        parts = urlsplit(str(value))
+    except ValueError:
+        return str(value)[:500]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))[:500]
+
+
+def _detect_browser_auth_preflight_failure(
+    *,
+    final_url: str | None,
+    title: str | None,
+    body_text: str | None,
+    has_password_field: bool = False,
+) -> tuple[str | None, str | None]:
+    haystack = "\n".join(str(part or "") for part in [final_url, title, body_text]).lower()
+    challenge_patterns = [
+        r"\bjust a moment\b",
+        r"\bsecurity check\b",
+        r"\bchecking your browser\b",
+        r"\bverify you are human\b",
+        r"\bcloudflare\b",
+        r"\bchallenge-platform\b",
+        r"\bcaptcha\b",
+        r"\bturnstile\b",
+    ]
+    if any(re.search(pattern, haystack, re.IGNORECASE) for pattern in challenge_patterns):
+        return "challenge", AUTH_PREFLIGHT_CHALLENGE_MESSAGE
+    if has_password_field:
+        return "login", (
+            "Saved browser session was attached, but target opened a password prompt. "
+            "Refresh the browser auth session or use a trusted browser context."
+        )
+    try:
+        path = urlsplit(str(final_url or "")).path.lower()
+    except ValueError:
+        path = str(final_url or "").lower()
+    if re.search(r"(^|/)(login|signin|sign-in|auth|account/login)(/|$)", path):
+        return "login", (
+            "Saved browser session was attached, but target opened a login page. "
+            "Refresh the browser auth session or use a trusted browser context."
+        )
+    login_text_patterns = [
+        r"\bsign in\b",
+        r"\blog in\b",
+        r"\bforgot password\b",
+        r"\bemail address\b.*\bpassword\b",
+    ]
+    if any(re.search(pattern, haystack, re.IGNORECASE | re.DOTALL) for pattern in login_text_patterns):
+        return "login", (
+            "Saved browser session was attached, but target still appears to require login. "
+            "Refresh the browser auth session or use a trusted browser context."
+        )
+    return None, None
+
+
+def _browser_auth_preflight_script(executable_path: str | None = None) -> str:
+    executable_option = f", executablePath: {json.dumps(executable_path)}" if executable_path else ""
+    return f"""
+const {{ chromium }} = require('playwright');
+const storageState = process.env.QUORVEX_AUTH_PREFLIGHT_STORAGE_STATE;
+const targetUrl = process.env.QUORVEX_AUTH_PREFLIGHT_TARGET_URL;
+const timeoutMs = Number(process.env.QUORVEX_AUTH_PREFLIGHT_TIMEOUT_MS || '15000');
+const headless = String(process.env.HEADLESS || process.env.PLAYWRIGHT_HEADLESS || 'true').toLowerCase() !== 'false';
+
+(async () => {{
+  const browser = await chromium.launch({{ headless{executable_option} }});
+  const context = await browser.newContext({{ storageState }});
+  const page = await context.newPage();
+  let responseStatus = null;
+  try {{
+    const response = await page.goto(targetUrl, {{ waitUntil: 'domcontentloaded', timeout: timeoutMs }});
+    responseStatus = response ? response.status() : null;
+    await page.waitForLoadState('domcontentloaded', {{ timeout: Math.min(timeoutMs, 5000) }}).catch(() => null);
+    const result = await page.evaluate(() => {{
+      const body = document.body ? document.body.innerText || '' : '';
+      return {{
+        url: window.location.href,
+        title: document.title || '',
+        body_text: body.slice(0, 5000),
+        has_password_field: Boolean(document.querySelector('input[type="password"]')),
+      }};
+    }});
+    console.log(JSON.stringify({{ ok: true, response_status: responseStatus, ...result }}));
+  }} finally {{
+    await browser.close();
+  }}
+}})().catch((error) => {{
+  console.log(JSON.stringify({{ ok: false, error: error && error.message ? error.message : String(error) }}));
+  process.exit(0);
+}});
+"""
+
+
+def _run_browser_auth_preflight(
+    *,
+    storage_state_path: Path,
+    target_url: str,
+    timeout_seconds: int = 20,
+    resolve_chromium_executable: Callable[[], Path | None] = resolve_playwright_chromium_executable,
+) -> BrowserAuthPreflightResult:
+    executable_path = resolve_chromium_executable()
+    env = os.environ.copy()
+    env["QUORVEX_AUTH_PREFLIGHT_STORAGE_STATE"] = str(storage_state_path)
+    env["QUORVEX_AUTH_PREFLIGHT_TARGET_URL"] = target_url
+    env["QUORVEX_AUTH_PREFLIGHT_TIMEOUT_MS"] = str(max(5, timeout_seconds) * 1000)
+    try:
+        result = subprocess.run(
+            ["node", "-e", _browser_auth_preflight_script(str(executable_path) if executable_path else None)],
+            cwd=str(BASE_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds + 5,
+        )
+    except subprocess.TimeoutExpired:
+        return BrowserAuthPreflightResult(
+            status="failed",
+            failure_kind="timeout",
+            failure_reason="Saved browser session validation timed out before the target page opened.",
+        )
+
+    output = (result.stdout or "").strip().splitlines()[-1] if (result.stdout or "").strip() else ""
+    try:
+        payload = json.loads(output) if output else {}
+    except json.JSONDecodeError:
+        payload = {}
+    if not payload.get("ok"):
+        error = str(payload.get("error") or result.stderr or "Browser auth session validation failed.").strip()
+        return BrowserAuthPreflightResult(
+            status="failed",
+            failure_kind="preflight_error",
+            failure_reason=f"Saved browser session validation failed before the target page opened: {error[:500]}",
+        )
+
+    failure_kind, failure_reason = _detect_browser_auth_preflight_failure(
+        final_url=payload.get("url"),
+        title=payload.get("title"),
+        body_text=payload.get("body_text"),
+        has_password_field=bool(payload.get("has_password_field")),
+    )
+    if failure_reason:
+        return BrowserAuthPreflightResult(
+            status="failed",
+            url=_sanitize_preflight_url(payload.get("url")),
+            title=str(payload.get("title") or "")[:300],
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
+        )
+    return BrowserAuthPreflightResult(
+        status="passed",
+        url=_sanitize_preflight_url(payload.get("url")),
+        title=str(payload.get("title") or "")[:300],
+    )
+
+
+def _preflight_progress_payload(
+    result: BrowserAuthPreflightResult,
+    *,
+    storage_state_attached: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "storage_state_attached": storage_state_attached,
+        "auth_preflight_status": result.status,
+        "auth_preflight_url": _sanitize_preflight_url(result.url),
+        "auth_preflight_title": result.title,
+    }
+    if result.failure_reason:
+        payload["auth_preflight_failure_reason"] = result.failure_reason
+    if result.failure_kind:
+        payload["auth_preflight_failure_kind"] = result.failure_kind
+    return payload
+
+
+def _record_browser_auth_preflight_event(run_id: str, result: BrowserAuthPreflightResult) -> None:
+    create_agent_run_event(
+        run_id=run_id,
+        event_type="auth_preflight",
+        level="info" if result.passed else "error",
+        message="Browser auth preflight passed." if result.passed else result.failure_reason or AUTH_PREFLIGHT_SESSION_FAILED_MESSAGE,
+        payload=_preflight_progress_payload(result, storage_state_attached=True),
+    )
+
+
+def _mark_agent_run_auth_preflight_failed(run_id: str, result: BrowserAuthPreflightResult) -> None:
+    message = result.failure_reason or AUTH_PREFLIGHT_SESSION_FAILED_MESSAGE
+    with Session(engine) as session:
+        run = session.get(AgentRun, run_id)
+        if not run:
+            return
+        if run.status in {"completed", "completed_partial", "failed", "cancelled", "timeout"}:
+            return
+        run.status = "failed"
+        run.completed_at = datetime.utcnow()
+        existing_result = run.result if isinstance(run.result, dict) else {}
+        run.result = {
+            **existing_result,
+            "error": message,
+            "failure_reason": "browser_auth_preflight_failed",
+            "auth_preflight": _preflight_progress_payload(result, storage_state_attached=True),
+        }
+        run.finalization_status = "failed"
+        run.progress = {
+            **(run.progress or {}),
+            **_preflight_progress_payload(result, storage_state_attached=True),
+            "phase": "failed",
+            "status": "failed",
+            "message": message,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        session.add(run)
+        session.commit()
+
+
 def _resolve_agent_browser_auth_storage_path(
     *,
     run_id: str,
@@ -168,6 +419,8 @@ def _resolve_agent_browser_auth_storage_path(
     run_dir: Path,
     resolve_browser_auth_for_run: Callable[..., Any],
     update_progress: Callable[[str, dict[str, Any]], None],
+    preflight_runner: Callable[..., BrowserAuthPreflightResult] = _run_browser_auth_preflight,
+    preflight_enabled: bool = False,
 ) -> Path | None:
     browser_auth_session_id, use_default = _browser_auth_selection(config)
     if not (browser_auth_session_id or use_default):
@@ -202,9 +455,25 @@ def _resolve_agent_browser_auth_storage_path(
             {
                 "browser_auth_session_id": resolved.session_id,
                 "browser_auth_session_name": resolved.session_name,
+                "storage_state_attached": True,
                 "message": "Using project browser auth session.",
             },
         )
+        target_url = str(config.get("url") or "").strip()
+        if preflight_enabled and target_url:
+            preflight = preflight_runner(
+                storage_state_path=resolved.storage_state_path,
+                target_url=target_url,
+            )
+            update_progress(run_id, _preflight_progress_payload(preflight, storage_state_attached=True))
+            _record_browser_auth_preflight_event(run_id, preflight)
+            if not preflight.passed:
+                _mark_agent_run_auth_preflight_failed(run_id, preflight)
+                raise AgentBrowserAuthPreflightError(
+                    preflight.failure_reason or AUTH_PREFLIGHT_SESSION_FAILED_MESSAGE,
+                    browser_auth_session_id=resolved.session_id,
+                    use_default=use_default,
+                )
     return resolved.storage_state_path if resolved else None
 
 
@@ -212,29 +481,81 @@ def _prepare_custom_agent_mcp_config(
     run_id: str,
     storage_state_path: Path | str | None = None,
     *,
+    include_browser_tools: bool = True,
+    include_agent_note_tool: bool = False,
     update_progress: Callable[[str, dict[str, Any]], None],
 ) -> Path:
-    """Create run-local Playwright MCP config for UI-created custom agents."""
+    """Create run-local MCP config for UI-created custom agents."""
     run_dir = _current_runs_dir() / run_id
-    runtime = write_playwright_mcp_config(
-        run_dir=run_dir,
-        server_name="playwright-test",
-        project_root=BASE_DIR,
-        storage_state_path=storage_state_path,
-    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    runtime: dict[str, Any] = {}
+    if include_browser_tools:
+        runtime = write_playwright_mcp_config(
+            run_dir=run_dir,
+            server_name="playwright-test",
+            project_root=BASE_DIR,
+            storage_state_path=storage_state_path,
+        )
+    if include_agent_note_tool:
+        _add_agent_note_mcp_server(run_dir=run_dir, run_id=run_id)
+        runtime = {
+            **runtime,
+            "agent_note_mcp_server": AGENT_NOTE_MCP_SERVER_NAME,
+            "agent_note_tool": AGENT_NOTE_MCP_TOOL_NAME,
+            "mcp_config_path": str(run_dir / ".mcp.json"),
+        }
     update_progress(run_id, runtime)
     return run_dir
+
+
+def _add_agent_note_mcp_server(*, run_dir: Path, run_id: str) -> None:
+    config_path = run_dir / ".mcp.json"
+    try:
+        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    except Exception:
+        config = {}
+    servers = config.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+        config["mcpServers"] = servers
+    pythonpath_parts = [str(BASE_DIR)]
+    if os.environ.get("PYTHONPATH"):
+        pythonpath_parts.append(os.environ["PYTHONPATH"])
+    servers[AGENT_NOTE_MCP_SERVER_NAME] = {
+        "command": sys.executable,
+        "args": [str(BASE_DIR / "tools" / "agent_note_mcp" / "server.py")],
+        "env": {
+            "PYTHONPATH": os.pathsep.join(pythonpath_parts),
+            "QUORVEX_AGENT_RUN_ID": run_id,
+        },
+    }
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
 def _prepare_spec_generation_mcp_config(
     run_dir: Path,
     storage_state_path: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Create run-local Playwright MCP config for browser-backed spec generation."""
-    return write_playwright_mcp_config(
+    """Create run-local Playwright Test MCP config for browser-backed spec generation."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    source_config_path = BASE_DIR / "playwright.config.ts"
+    run_config_path = run_dir / "playwright.config.ts"
+    config_content = source_config_path.read_text(encoding="utf-8")
+    run_config_path.write_text(
+        prepare_run_playwright_config_content(
+            config_content,
+            base_dir=BASE_DIR,
+            run_dir=run_dir,
+            headless=True,
+            storage_state_path=storage_state_path,
+        ),
+        encoding="utf-8",
+    )
+    return write_playwright_test_mcp_config(
         run_dir=run_dir,
         server_name="playwright-test",
-        project_root=BASE_DIR,
+        config_path=run_config_path,
+        headless=True,
         storage_state_path=storage_state_path,
     )
 
@@ -397,9 +718,27 @@ def _run_artifact_counts(run_id: str, artifacts: list[dict[str, Any]] | None = N
     return agent_run_observability._run_artifact_counts(run_id, artifacts)
 
 
+def _is_claude_code_auth_failure_text(value: Any) -> bool:
+    lowered = str(value or "").lower()
+    return (
+        "claude_code_auth_required" in lowered
+        or "authentication_failed" in lowered
+        or ("not logged in" in lowered and "run /login" in lowered)
+        or ("token expired or incorrect" in lowered and "401" in lowered)
+        or (
+            "claude code authentication" in lowered
+            and "claude_code_oauth_token" in lowered
+        )
+    )
+
+
 def _recover_custom_agent_partial_result(run: AgentRun, error: Exception | str) -> dict[str, Any] | None:
+    if _is_claude_code_auth_failure_text(error):
+        return None
     artifacts = _collect_agent_run_artifacts(run.id)
     raw_output = _read_run_text_artifact(run.id, "raw_output.txt")
+    if _is_claude_code_auth_failure_text(raw_output):
+        return None
     tool_calls = _read_run_json_artifact(run.id, "tool_calls.json")
     tool_calls = tool_calls if isinstance(tool_calls, list) else []
     counts = _run_artifact_counts(run.id, artifacts)
@@ -631,6 +970,13 @@ def update_agent_run_progress(
 
             if agent_task_id is not None:
                 progress_patch["agent_task_id"] = agent_task_id
+            existing_phase = str(existing.get("phase") or "").lower()
+            incoming_phase = str(progress_patch.get("phase") or "").lower()
+            active_phases = {"starting", "running", "tool_use", "tool_result", "browser_slot", "retrying"}
+            if incoming_phase == "queued" and existing_phase in active_phases:
+                progress_patch["phase"] = existing.get("phase")
+            elif incoming_phase == "queued" and progress_patch.get("agent_task_id"):
+                progress_patch["phase"] = "worker_wait"
             progress = {
                 **existing,
                 **progress_patch,
@@ -641,6 +987,20 @@ def update_agent_run_progress(
             run.progress = progress
             if progress_patch.get("agent_task_id"):
                 run.agent_task_id = str(progress_patch["agent_task_id"])
+            progress_phase = str(progress.get("phase") or "").lower()
+            execution_evidence = (
+                progress_phase in active_phases
+                or int(progress.get("tool_calls") or 0) > 0
+                or int(progress.get("browser_tool_calls") or progress.get("interactions") or 0) > 0
+            )
+            if run.status in {"queued", "pending", "waiting"} and execution_evidence:
+                run.status = "running"
+                if not run.started_at:
+                    run.started_at = datetime.utcnow()
+                progress["status"] = "running"
+                if progress_phase in {"queued", "pending", "waiting", ""}:
+                    progress["phase"] = "running"
+                run.progress = progress
             session.add(run)
             session.commit()
     except Exception as exc:

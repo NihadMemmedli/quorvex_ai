@@ -25,6 +25,7 @@ def _resolve_agent_browser_auth_storage_path(
     project_id: str | None,
     config: dict[str, Any],
     run_dir: Path,
+    preflight_enabled: bool = False,
     runtime: Any | None = None,
 ) -> Path | None:
     rt = _runtime(runtime)
@@ -35,6 +36,7 @@ def _resolve_agent_browser_auth_storage_path(
         run_dir=run_dir,
         resolve_browser_auth_for_run=rt.resolve_browser_auth_for_run,
         update_progress=rt._update_agent_run_progress,
+        preflight_enabled=preflight_enabled,
     )
 
 
@@ -42,12 +44,16 @@ def _prepare_custom_agent_mcp_config(
     run_id: str,
     storage_state_path: Path | str | None = None,
     *,
+    include_browser_tools: bool = True,
+    include_agent_note_tool: bool = False,
     runtime: Any | None = None,
 ) -> Path:
     rt = _runtime(runtime)
     return agent_run_runtime_support._prepare_custom_agent_mcp_config(
         run_id,
         storage_state_path=storage_state_path,
+        include_browser_tools=include_browser_tools,
+        include_agent_note_tool=include_agent_note_tool,
         update_progress=rt._update_agent_run_progress,
     )
 

@@ -5,6 +5,7 @@ import type {
     AgentQueueStatus,
     AgentReportSearchItem,
     AgentRunEvent,
+    AgentRunNote,
     AgentRun,
     AgentRunHistoryResponse,
     AgentTraceBundle,
@@ -57,21 +58,69 @@ export async function fetchAgentRuntimeSetting() {
     return String(data.agent_runtime || 'claude_sdk');
 }
 
+function safeObject(value: unknown): Record<string, any> {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function safeArray<T = any>(value: unknown): T[] {
+    return Array.isArray(value) ? value as T[] : [];
+}
+
+function normalizeStructuredReport(value: unknown) {
+    const report = safeObject(value);
+    return {
+        ...report,
+        pages_checked: safeArray(report.pages_checked),
+        findings: safeArray(report.findings),
+        test_ideas: safeArray(report.test_ideas),
+        requirements: safeArray(report.requirements),
+        evidence: safeArray(report.evidence),
+        follow_up_actions: safeArray(report.follow_up_actions),
+    };
+}
+
+export function normalizeAgentRun(value: AgentRun): AgentRun {
+    const raw = safeObject(value) as AgentRun;
+    const config = safeObject(raw.config);
+    const progress = safeObject(raw.progress);
+    const result = safeObject(raw.result);
+    const normalizedResult = result.structured_report !== undefined
+        ? { ...result, structured_report: normalizeStructuredReport(result.structured_report) }
+        : result;
+
+    return {
+        ...raw,
+        config: {
+            ...config,
+            selected_tools: safeArray(config.selected_tools),
+        },
+        progress: {
+            ...progress,
+            recent_tools: safeArray(progress.recent_tools),
+            live_notes_tail: safeArray(progress.live_notes_tail),
+        },
+        result: normalizedResult,
+        artifacts: safeArray(raw.artifacts),
+    };
+}
+
 export function normalizeAgentRunHistoryResponse(data: AgentRun[] | AgentRunHistoryResponse): AgentRunHistoryResponse {
     if (Array.isArray(data)) {
+        const items = data.map(normalizeAgentRun);
         return {
-            items: data,
-            total: data.length,
+            items,
+            total: items.length,
             counts: {
-                status: { ...EMPTY_AGENT_HISTORY_COUNTS.status, all: data.length },
-                type: { ...EMPTY_AGENT_HISTORY_COUNTS.type, all: data.length },
+                status: { ...EMPTY_AGENT_HISTORY_COUNTS.status, all: items.length },
+                type: { ...EMPTY_AGENT_HISTORY_COUNTS.type, all: items.length },
             },
             next_cursor: null,
         };
     }
 
+    const items = safeArray<AgentRun>(data.items).map(normalizeAgentRun);
     return {
-        items: data.items || [],
+        items,
         total: Number(data.total || 0),
         counts: data.counts || EMPTY_AGENT_HISTORY_COUNTS,
         next_cursor: data.next_cursor || null,
@@ -224,17 +273,50 @@ export async function fetchAgentRun(runId: string, options: { projectId?: string
     const res = await fetch(`${API_BASE}${appendProjectQuery(`/api/agents/runs/${runId}`, options.projectId)}`, {
         signal: options.signal,
     });
-    return readJsonResponse<AgentRun>(res, `HTTP ${res.status}`);
+    const data = await readJsonResponse<AgentRun>(res, `HTTP ${res.status}`);
+    return normalizeAgentRun(data);
 }
 
-export async function fetchAgentRunEvents(runId: string, options: { limit?: number; afterSequence?: number; signal?: AbortSignal } = {}) {
+export function looksLikeTestRunId(runId: string) {
+    return /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/.test(runId);
+}
+
+export async function fetchLinkedAgentRunForTestRun(runId: string, options: { projectId?: string | null; signal?: AbortSignal } = {}) {
+    const res = await fetch(`${API_BASE}${appendProjectQuery(`/runs/${runId}`, options.projectId)}`, {
+        signal: options.signal,
+    });
+    const data = await readJsonResponse<{ linked_agent_run_id?: string | null }>(res, `HTTP ${res.status}`);
+    const linkedAgentRunId = typeof data.linked_agent_run_id === 'string' ? data.linked_agent_run_id : '';
+    if (!linkedAgentRunId) {
+        throw new Error('No linked agent run found for test run');
+    }
+    return fetchAgentRun(linkedAgentRunId, options);
+}
+
+export async function fetchAgentRunResolvingTestRun(runId: string, options: { projectId?: string | null; signal?: AbortSignal } = {}) {
+    try {
+        return await fetchAgentRun(runId, options);
+    } catch (error) {
+        if (!looksLikeTestRunId(runId)) throw error;
+        return fetchLinkedAgentRunForTestRun(runId, options);
+    }
+}
+
+export async function fetchAgentRunEvents(runId: string, options: { limit?: number; afterSequence?: number; projectId?: string | null; signal?: AbortSignal } = {}) {
     const params = new URLSearchParams({
         limit: String(options.limit ?? 200),
     });
     if (options.afterSequence !== undefined) params.set('after_sequence', String(options.afterSequence));
+    if (options.projectId) params.set('project_id', options.projectId);
     const res = await fetch(`${API_BASE}/api/agents/runs/${runId}/events?${params}`, { signal: options.signal });
     const data = await readJsonResponse<AgentRunEvent[] | unknown>(res, `HTTP ${res.status}`);
     return Array.isArray(data) ? data as AgentRunEvent[] : [];
+}
+
+export async function fetchAgentRunNotes(runId: string, options: { limit?: number; afterSequence?: number; projectId?: string | null; signal?: AbortSignal } = {}) {
+    const res = await fetch(agentRunNotesUrl(runId, options), { signal: options.signal });
+    const data = await readJsonResponse<AgentRunNote[] | unknown>(res, `HTTP ${res.status}`);
+    return Array.isArray(data) ? data as AgentRunNote[] : [];
 }
 
 export async function fetchAgentRunTrace(runId: string, projectId?: string | null) {
@@ -347,14 +429,16 @@ export async function controlAgentRun(runId: string, action: 'pause' | 'resume' 
     const res = await fetch(`${API_BASE}${appendProjectQuery(`/api/agents/runs/${runId}/${action}`, projectId)}`, {
         method: 'POST',
     });
-    return readJsonResponse<AgentRun>(res, `Failed to ${action} agent run`);
+    const data = await readJsonResponse<AgentRun>(res, `Failed to ${action} agent run`);
+    return normalizeAgentRun(data);
 }
 
 export async function retryAgentRun(runId: string, projectId?: string | null) {
     const res = await fetch(`${API_BASE}${appendProjectQuery(`/api/agents/runs/${runId}/retry`, projectId)}`, {
         method: 'POST',
     });
-    return readJsonResponse<AgentRun>(res, 'Failed to retry agent run');
+    const data = await readJsonResponse<AgentRun>(res, 'Failed to retry agent run');
+    return normalizeAgentRun(data);
 }
 
 export async function synthesizeExploratorySpecs(runId: string) {
@@ -366,4 +450,11 @@ export function agentRunEventsStreamUrl(runId: string, options: { afterSequence:
     const params = new URLSearchParams({ after_sequence: String(options.afterSequence) });
     if (options.projectId) params.set('project_id', options.projectId);
     return `${API_BASE}/api/agents/runs/${runId}/events/stream?${params}`;
+}
+
+export function agentRunNotesUrl(runId: string, options: { limit?: number; afterSequence?: number; projectId?: string | null } = {}) {
+    const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
+    if (options.afterSequence !== undefined) params.set('after_sequence', String(options.afterSequence));
+    if (options.projectId) params.set('project_id', options.projectId);
+    return `${API_BASE}/api/agents/runs/${runId}/notes?${params}`;
 }

@@ -333,6 +333,7 @@ def _resolve_agent_browser_auth_storage_path(
     project_id: str | None,
     config: dict[str, Any],
     run_dir: Path,
+    preflight_enabled: bool = False,
 ) -> Path | None:
     return agent_compat_support.resolve_agent_browser_auth_storage_path(
         _runtime(),
@@ -340,17 +341,23 @@ def _resolve_agent_browser_auth_storage_path(
         project_id=project_id,
         config=config,
         run_dir=run_dir,
+        preflight_enabled=preflight_enabled,
     )
 
 
 def _prepare_custom_agent_mcp_config(
     run_id: str,
     storage_state_path: Path | str | None = None,
+    *,
+    include_browser_tools: bool = True,
+    include_agent_note_tool: bool = False,
 ) -> Path:
     return agent_compat_support.prepare_custom_agent_mcp_config(
         _runtime(),
         run_id,
         storage_state_path=storage_state_path,
+        include_browser_tools=include_browser_tools,
+        include_agent_note_tool=include_agent_note_tool,
     )
 
 

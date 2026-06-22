@@ -302,6 +302,24 @@ async def run_agent_definition(
         },
         session=session,
     )
+    from orchestrator.services.agent_native_runs import commit_agent_run_note
+
+    commit_agent_run_note(
+        run_id=run_id,
+        phase="created",
+        note_type="handoff",
+        title="Custom agent run accepted",
+        body="Saved custom agent run queued for Temporal execution.",
+        source="launcher",
+        tags=["queued", "custom"],
+        payload={
+            "status": initial_status,
+            "runtime": runtime,
+            "agent_definition_id": definition.id,
+            "queue_position": queue_position,
+        },
+        session=session,
+    )
 
     await rt._start_agent_run_temporal_or_fail(run, session)
     session.refresh(run)

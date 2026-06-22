@@ -55,8 +55,19 @@ from orchestrator.services.autonomous_events import create_event_for_work_item
 from orchestrator.services.browser_pool import OperationType as BrowserOpType
 from orchestrator.services.browser_pool import get_browser_pool
 from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree, kill_test_run_process_tree
+from orchestrator.utils.browser_dialog_recovery import browser_dialog_recovery_telemetry_from_text
+from orchestrator.utils.browser_failures import (
+    BrowserSessionFailedError,
+    classify_browser_failure,
+)
 from orchestrator.utils.claude_stream import (
     event_content_items as _shared_event_content_items,
+)
+from orchestrator.utils.claude_stream import (
+    event_input_json_deltas as _shared_event_input_json_deltas,
+)
+from orchestrator.utils.claude_stream import (
+    event_text_blocks as _shared_event_text_blocks,
 )
 from orchestrator.utils.claude_stream import (
     event_tool_results as _shared_event_tool_results,
@@ -67,7 +78,26 @@ from orchestrator.utils.claude_stream import (
 from orchestrator.utils.claude_stream import (
     tool_result_text as _shared_tool_result_text,
 )
+from orchestrator.utils.playwright_mcp import browser_action_timeout_config
 from orchestrator.utils.token_budget import build_agent_token_telemetry, extract_provider_usage
+
+DEFAULT_BROWSER_TOOL_TIMEOUT_SECONDS = 45.0
+BROWSER_TOOL_TIMEOUT_ENV = "AGENT_BROWSER_TOOL_TIMEOUT_SECONDS"
+NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV = "NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_SECONDS"
+CLAUDE_CODE_AUTH_ERROR_TYPE = "claude_code_auth_required"
+CLAUDE_CODE_AUTH_NEXT_ACTION = (
+    "Refresh Claude Code OAuth in Settings or run Claude Code login/token setup "
+    "for the backend runtime."
+)
+API_KEY_CREDENTIAL_ENV_KEYS = {
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKENS",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "QUORVEX_LLM_API_KEY",
+    "QUORVEX_LLM_API_KEYS",
+}
+CREDENTIAL_ENV_KEYS = API_KEY_CREDENTIAL_ENV_KEYS | {"CLAUDE_CODE_OAUTH_TOKEN"}
 
 
 def _resolve_claude_cli_path() -> str:
@@ -112,6 +142,64 @@ def _short_tool_name(tool_name: str) -> str:
     return tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
 
 
+def _has_planner_setup_tool(*tool_sources: object) -> bool:
+    for source in tool_sources:
+        if source is None:
+            continue
+        if isinstance(source, dict):
+            values = list(source.keys()) + list(source.values())
+        elif isinstance(source, str):
+            values = [source]
+        else:
+            try:
+                values = list(source)
+            except TypeError:
+                values = [source]
+        if any("planner_setup_page" in str(value) for value in values):
+            return True
+    return False
+
+
+def _browser_tool_timeout_seconds_for_tools(*tool_sources: object) -> float:
+    if _has_planner_setup_tool(*tool_sources):
+        raw_value = os.environ.get(NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV)
+    else:
+        raw_value = None
+    raw_value = raw_value or os.environ.get(BROWSER_TOOL_TIMEOUT_ENV, str(int(DEFAULT_BROWSER_TOOL_TIMEOUT_SECONDS)))
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return DEFAULT_BROWSER_TOOL_TIMEOUT_SECONDS
+
+
+def _browser_tool_timeout_config_for_tools(*tool_sources: object) -> dict[str, object]:
+    source_env = BROWSER_TOOL_TIMEOUT_ENV
+    raw_value = None
+    source = "default"
+    if _has_planner_setup_tool(*tool_sources) and os.environ.get(NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV):
+        source_env = NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV
+        raw_value = os.environ.get(NATIVE_PLANNER_BROWSER_TOOL_TIMEOUT_ENV)
+        source = "process_env"
+    elif os.environ.get(BROWSER_TOOL_TIMEOUT_ENV):
+        raw_value = os.environ.get(BROWSER_TOOL_TIMEOUT_ENV)
+        source = "process_env"
+    return {
+        "browser_tool_timeout_seconds": _browser_tool_timeout_seconds_for_tools(*tool_sources),
+        "browser_tool_timeout_env": source_env,
+        "browser_tool_timeout_source": source,
+        "browser_tool_timeout_raw": raw_value,
+    }
+
+
+def _is_claude_code_auth_error_text(text: object) -> bool:
+    lowered = str(text or "").lower()
+    return (
+        "authentication_failed" in lowered
+        or ("not logged in" in lowered and "run /login" in lowered)
+        or ("token expired or incorrect" in lowered and "401" in lowered)
+    )
+
+
 def _tool_result_text(content: object) -> str:
     """Extract text from common Claude stream-json tool_result shapes."""
     return _shared_tool_result_text(content)
@@ -133,7 +221,7 @@ def _iter_items_by_type(value: object, item_type: str):
 
 def _event_tool_uses(evt: dict[str, object]) -> list[dict[str, object]]:
     return [
-        {"id": item.id, "name": item.name, "input": item.input}
+        {"id": item.id, "name": item.name, "input": item.input, "index": item.index}
         for item in _shared_event_tool_uses(evt)
     ]
 
@@ -146,6 +234,21 @@ def _event_tool_results(evt: dict[str, object]) -> list[dict[str, object]]:
             "is_error": item.is_error,
         }
         for item in _shared_event_tool_results(evt)
+    ]
+
+
+def _event_text_blocks(evt: dict[str, object]) -> list[str]:
+    return _shared_event_text_blocks(evt)
+
+
+def _event_input_json_deltas(evt: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        {
+            "tool_use_id": item.tool_use_id,
+            "index": item.index,
+            "partial_json": item.partial_json,
+        }
+        for item in _shared_event_input_json_deltas(evt)
     ]
 
 
@@ -190,13 +293,33 @@ class BrowserToolTimeoutError(TimeoutError):
         )
 
     def telemetry(self) -> dict[str, object]:
+        classification = classify_browser_failure(
+            str(self),
+            tool_name=self.tool_name,
+            error_type="browser_tool_timeout",
+        )
+        telemetry = classification.telemetry() if classification else {}
         return {
             "error_type": "browser_tool_timeout",
             "browser_tool_timeout": True,
+            **browser_action_timeout_config(os.environ),
+            "suspected_browser_dialog_block": True,
+            "blocked_tool_name": self.tool_name,
             "timed_out_tool_name": self.tool_name,
             "timed_out_tool_use_id": self.tool_use_id,
             "timed_out_tool_elapsed_seconds": self.elapsed_seconds,
             "browser_tool_timeout_seconds": self.timeout_seconds,
+            "phase": "browser_session_failed",
+            "legacy_phase": "browser_tool_timeout",
+            "retryable_failure": True,
+            "requires_fresh_browser": True,
+            "browser_session_usable": False,
+            "last_browser_error": str(self),
+            "last_tool": self.tool_name,
+            "dialog_recovery_attempted": True,
+            "dialog_recovery_result": "tool_timeout_after_automatic_acceptance",
+            "snapshot_after_recovery": False,
+            **telemetry,
         }
 
 
@@ -229,13 +352,10 @@ class BrowserObservationRecorder:
 
     def observe_event(self, evt: dict[str, object]) -> None:
         try:
-            evt_type = evt.get("type")
-            if evt_type == "assistant":
-                for item in _event_tool_uses(evt):
-                    self.observe_tool_use(item)
-            elif evt_type == "user":
-                for item in _event_tool_results(evt):
-                    self.observe_tool_result(item)
+            for item in _event_tool_uses(evt):
+                self.observe_tool_use(item)
+            for item in _event_tool_results(evt):
+                self.observe_tool_result(item)
         except Exception as exc:
             self._record_error("observe_event", exc)
 
@@ -345,6 +465,16 @@ class BrowserObservationRecorder:
         }
 
     def flush_pending(self) -> None:
+        if self.last_url:
+            self._write_evidence_event(
+                {
+                    "event_type": "page_observed",
+                    "url": self.last_url,
+                    "title": self.last_url,
+                    "summary": "Last known browser URL before pending tool recovery.",
+                    "source": "browser_tool_stream",
+                }
+            )
         for tool_use_id, call in list(self.pending_tool_calls.items()):
             if call.short_name in INTERACTION_TOOLS:
                 self._write_evidence_event(
@@ -364,6 +494,7 @@ class BrowserObservationRecorder:
                 "event": "flush",
                 "pending_tool_calls": len(self.pending_tool_calls),
                 "has_pending_interaction": self.pending_interaction is not None,
+                "last_url": self.last_url,
                 **self.telemetry(),
             }
         )
@@ -1034,7 +1165,10 @@ class AgentWorker:
             if key.startswith("TESTDATA_"):
                 continue
             saved_env[key] = os.environ.get(key)
-            os.environ[key] = value
+            if key in CREDENTIAL_ENV_KEYS and str(value or "") == "":
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         logger.info(f"Applied {len(task.env_vars)} env var(s) from task: {list(task.env_vars.keys())}")
         return saved_env
 
@@ -1047,6 +1181,48 @@ class AgentWorker:
                 os.environ[key] = original_value
         if saved_env:
             logger.debug(f"Restored {len(saved_env)} env var(s) after task {task_id}")
+
+    @staticmethod
+    def _claude_code_auth_preflight(
+        env: dict[str, str],
+        task_env: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        auth_mode = str(env.get("QUORVEX_LLM_AUTH_MODE") or "").strip().lower()
+        task_auth_mode = str((task_env or {}).get("QUORVEX_LLM_AUTH_MODE") or "").strip().lower()
+        if task_env is not None and auth_mode in {"claude_code", "claude-code", "claude_code_subscription"}:
+            env = task_env
+            auth_mode = task_auth_mode or auth_mode
+        elif task_auth_mode in {"claude_code", "claude-code", "claude_code_subscription"}:
+            env = task_env or {}
+            auth_mode = task_auth_mode
+        if auth_mode not in {"claude_code", "claude-code", "claude_code_subscription"}:
+            return {"required": False}
+
+        oauth_token_set = bool(str(env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip())
+        active_api_aliases = sorted(
+            key
+            for key in API_KEY_CREDENTIAL_ENV_KEYS
+            if str(env.get(key) or "").strip()
+        )
+        diagnostics = {
+            "required": True,
+            "auth_mode": auth_mode,
+            "claude_code_oauth_token_set": oauth_token_set,
+            "active_api_key_aliases": active_api_aliases,
+        }
+        if not oauth_token_set:
+            raise RuntimeError(
+                "Claude Code authentication is required for queued agent execution: "
+                "CLAUDE_CODE_OAUTH_TOKEN is not set. "
+                f"{CLAUDE_CODE_AUTH_NEXT_ACTION}"
+            )
+        if active_api_aliases:
+            raise RuntimeError(
+                "Claude Code authentication preflight failed: API-key credential aliases "
+                f"are active in subscription mode: {', '.join(active_api_aliases)}. "
+                f"{CLAUDE_CODE_AUTH_NEXT_ACTION}"
+            )
+        return diagnostics
 
     def _clear_task_pause_state(self, task_id: str) -> None:
         with self._pause_lock:
@@ -1117,6 +1293,38 @@ class AgentWorker:
                 )
                 telemetry = self._build_task_telemetry(task, 0, error_type="unsupported_cli_options")
                 await self.queue.submit_result(task.id, "", success=False, error=error, telemetry=telemetry)
+                _result_submitted = True
+                return
+
+            try:
+                self._claude_code_auth_preflight(os.environ, task.env_vars or {})
+            except RuntimeError as exc:
+                telemetry = self._build_task_telemetry(
+                    task,
+                    0,
+                    error_type=CLAUDE_CODE_AUTH_ERROR_TYPE,
+                )
+                telemetry["claude_code_oauth_token_set"] = bool(
+                    (task.env_vars or {}).get("CLAUDE_CODE_OAUTH_TOKEN")
+                )
+                telemetry["active_api_key_aliases"] = sorted(
+                    key
+                    for key in API_KEY_CREDENTIAL_ENV_KEYS
+                    if (task.env_vars or {}).get(key)
+                )
+                message = str(exc)
+                with self._progress_lock:
+                    self._current_progress.update(
+                        {
+                            "status": "failed",
+                            "phase": "failed",
+                            "message": message,
+                            "error_type": CLAUDE_CODE_AUTH_ERROR_TYPE,
+                            "claude_code_oauth_token_set": telemetry["claude_code_oauth_token_set"],
+                            "active_api_key_aliases": telemetry["active_api_key_aliases"],
+                        }
+                    )
+                await self.queue.submit_result(task.id, "", success=False, error=message, telemetry=telemetry)
                 _result_submitted = True
                 return
 
@@ -1370,6 +1578,73 @@ class AgentWorker:
                         message=str(e),
                         payload={"telemetry": telemetry},
                     )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="agent_note",
+                        level="warning",
+                        message="Suspected browser dialog blocked a browser tool.",
+                        payload={
+                            "note_type": "blocker",
+                            "title": "Suspected browser dialog block",
+                            "body": (
+                                f"{e.tool_name or 'A browser tool'} did not return within "
+                                f"{e.timeout_seconds:.0f}s. Automatic dialog acceptance was enabled, "
+                                "but the action still timed out before a recovery snapshot could be captured."
+                            ),
+                            "source": "agent_worker",
+                            "tool_name": e.tool_name,
+                            "tags": ["browser", "dialog_recovery", "timeout"],
+                            "actionable": True,
+                            "telemetry": telemetry,
+                        },
+                    )
+                    self._emit_prd_generation_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=str(e),
+                        payload={"telemetry": telemetry},
+                    )
+                    await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
+                    _result_submitted = True
+                    return
+
+                except BrowserSessionFailedError as e:
+                    logger.error("Task %s browser session failed: %s", task.id, e)
+                    telemetry = {
+                        **self._build_task_telemetry(task, attempt, error_type=e.classification.error_type),
+                        **e.telemetry(),
+                    }
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "failed",
+                                "message": str(e),
+                                **e.telemetry(),
+                            }
+                        )
+                    self._emit_autonomous_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=str(e),
+                        payload={"telemetry": telemetry},
+                    )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=str(e),
+                        payload={"telemetry": telemetry},
+                    )
                     self._emit_prd_generation_event(
                         owner_type=task.owner_type,
                         owner_id=task.owner_id,
@@ -1449,6 +1724,64 @@ class AgentWorker:
                             payload={"telemetry": telemetry},
                         )
                         await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
+                        _result_submitted = True
+                        return
+                    if _is_claude_code_auth_error_text(error_str) or (
+                        "claude code authentication" in error_str.lower()
+                        and "claude_code_oauth_token" in error_str.lower()
+                    ):
+                        telemetry = self._build_task_telemetry(
+                            task,
+                            attempt,
+                            error_type=CLAUDE_CODE_AUTH_ERROR_TYPE,
+                        )
+                        telemetry["claude_code_oauth_token_set"] = bool(
+                            os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+                        )
+                        telemetry["active_api_key_aliases"] = sorted(
+                            key
+                            for key in API_KEY_CREDENTIAL_ENV_KEYS
+                            if os.environ.get(key)
+                        )
+                        message = (
+                            f"Claude Code authentication failed for queued agent execution. "
+                            f"{CLAUDE_CODE_AUTH_NEXT_ACTION}"
+                        )
+                        logger.error(
+                            "Task %s failed Claude Code auth preflight/runtime auth: %s",
+                            task.id,
+                            error_str,
+                        )
+                        with self._progress_lock:
+                            self._current_progress.update(
+                                {
+                                    "status": "failed",
+                                    "phase": "failed",
+                                    "message": message,
+                                    "error_type": CLAUDE_CODE_AUTH_ERROR_TYPE,
+                                    "claude_code_oauth_token_set": telemetry["claude_code_oauth_token_set"],
+                                    "active_api_key_aliases": telemetry["active_api_key_aliases"],
+                                }
+                            )
+                        self._emit_agent_run_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="error",
+                            level="error",
+                            message=message,
+                            payload={"telemetry": telemetry},
+                        )
+                        self._emit_prd_generation_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="error",
+                            level="error",
+                            message=message,
+                            payload={"telemetry": telemetry},
+                        )
+                        await self.queue.submit_result(task.id, "", success=False, error=message, telemetry=telemetry)
                         _result_submitted = True
                         return
                     if is_rate_limit_error(error_str):
@@ -1927,6 +2260,68 @@ class AgentWorker:
             }
         return error
 
+    def _mark_browser_session_failed(
+        self,
+        *,
+        record: dict[str, object] | None,
+        message: str,
+        error_type: str | None = None,
+        locked: bool = False,
+    ) -> BrowserSessionFailedError:
+        tool_name = str((record or {}).get("name") or "")
+        classification = classify_browser_failure(
+            message,
+            tool_name=tool_name or None,
+            error_type=error_type,
+        )
+        if classification is None:
+            classification = classify_browser_failure(
+                "browser connection closed",
+                tool_name=tool_name or None,
+                error_type="browser_connection_closed",
+            )
+        error = BrowserSessionFailedError(classification)
+        telemetry = error.telemetry()
+
+        def _apply() -> None:
+            if record is not None:
+                record["success"] = False
+                record["error"] = message
+                record["error_type"] = classification.error_type
+                record["duration_ms"] = int(
+                    max(0.0, (time.time() - float(record.get("started_at") or time.time())) * 1000)
+                )
+            self._current_progress.update(
+                {
+                    "status": "failed",
+                    "message": message,
+                    **telemetry,
+                }
+            )
+            self._last_execution_telemetry = {
+                **dict(self._last_execution_telemetry),
+                **telemetry,
+            }
+
+        if locked:
+            _apply()
+        else:
+            with self._progress_lock:
+                _apply()
+        return error
+
+    def _current_browser_session_failure(self) -> BrowserSessionFailedError | None:
+        with self._progress_lock:
+            progress = dict(self._current_progress)
+        if progress.get("phase") != "browser_session_failed":
+            return None
+        classification = classify_browser_failure(
+            progress.get("last_browser_error") or progress.get("message") or "browser session failed",
+            tool_name=str(progress.get("last_tool") or "") or None,
+            error_type=str(progress.get("error_type") or "") or None,
+        )
+        return BrowserSessionFailedError(classification) if classification else None
+
     @staticmethod
     def _kill_process_group(proc: subprocess.Popen, *, sig: int) -> None:
         try:
@@ -2051,6 +2446,14 @@ class AgentWorker:
                 env["HOME"] = "/home/agent"
                 env["USER"] = "agent"
 
+        auth_preflight = self._claude_code_auth_preflight(env)
+        if auth_preflight.get("required"):
+            logger.info(
+                "[CLI]   Claude Code auth preflight: oauth_token_set=%s, active_api_key_aliases=%s",
+                auth_preflight.get("claude_code_oauth_token_set"),
+                auth_preflight.get("active_api_key_aliases"),
+            )
+
         effective_cwd = cwd or self.cwd
         logger.info("[CLI] Starting Claude CLI (direct subprocess)")
         logger.info(f"[CLI]   Prompt length: {len(full_prompt)}")
@@ -2084,14 +2487,25 @@ class AgentWorker:
             "api_retries": 0,
             "exit_code": None,
         }
+        stream_tool_record_by_index: dict[int, dict[str, object]] = {}
+        stream_tool_record_by_id: dict[str, dict[str, object]] = {}
+        stream_tool_input_fragments: dict[str, list[str]] = {}
+        emitted_dialog_recovery_notes: set[tuple[object, object, object]] = set()
         browser_recorder = (
             BrowserObservationRecorder(session_id=owner_id, cwd=effective_cwd)
             if owner_type in {"exploration_session", "agent_run"} and owner_id
             else None
         )
-        browser_tool_timeout_seconds = float(
-            os.environ.get("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "120")
+        browser_tool_timeout_seconds = _browser_tool_timeout_seconds_for_tools(
+            effective_allowed_tools,
+            effective_tools,
         )
+        browser_timeout_diagnostics = {
+            **browser_action_timeout_config(os.environ),
+            **_browser_tool_timeout_config_for_tools(effective_allowed_tools, effective_tools),
+        }
+        with self._progress_lock:
+            self._current_progress.update(browser_timeout_diagnostics)
 
         # Build CLI command
         cli_args = [
@@ -2206,6 +2620,10 @@ class AgentWorker:
                         if line:
                             decoded = line.decode("utf-8", errors="replace")
                             output_chunks.append(decoded)
+                            line_dialog_recovery = browser_dialog_recovery_telemetry_from_text(decoded)
+                            if line_dialog_recovery:
+                                with self._progress_lock:
+                                    self._current_progress.update(line_dialog_recovery)
                             if stream_file is not None:
                                 try:
                                     stream_file.write(decoded)
@@ -2297,138 +2715,208 @@ class AgentWorker:
                                     if browser_recorder is not None:
                                         browser_recorder.observe_event(evt)
                                     with self._progress_lock:
-                                        if evt.get("type") == "assistant":
-                                            for item in _event_content_items(evt):
-                                                if isinstance(item, dict) and item.get("type") == "text":
-                                                    stream_stats["text_blocks"] += 1
-                                                    text = str(item.get("text") or "").strip()
-                                                    if text:
-                                                        self._current_progress["last_message"] = text[:500]
-                                                        self._emit_autonomous_event(
-                                                            owner_type=owner_type,
-                                                            owner_id=owner_id,
-                                                            task_id=task_id,
-                                                            event_type="assistant_output",
-                                                            message=text,
-                                                            payload={"chars": len(text)},
-                                                        )
-                                                        self._emit_agent_run_event(
-                                                            owner_type=owner_type,
-                                                            owner_id=owner_id,
-                                                            task_id=task_id,
-                                                            event_type="assistant_output",
-                                                            message=text,
-                                                            payload={"chars": len(text)},
-                                                        )
-                                                        self._emit_prd_generation_event(
-                                                            owner_type=owner_type,
-                                                            owner_id=owner_id,
-                                                            task_id=task_id,
-                                                            event_type="assistant_output",
-                                                            message=text[:1200],
-                                                            payload={"chars": len(text)},
-                                                        )
-                                            for item in _event_tool_uses(evt):
-                                                tool_name = str(item.get("name") or "")
-                                                self._current_progress["tool_calls"] += 1
-                                                self._current_progress["phase"] = "tool_use"
-                                                self._current_progress["message"] = f"Using {_short_tool_name(tool_name) or tool_name}"
-                                                self._current_progress["last_tool"] = tool_name
-                                                self._current_progress["current_tool"] = tool_name
-                                                tool_names = self._current_progress.setdefault("tool_names", [])
-                                                if isinstance(tool_names, list) and len(tool_names) < 200:
-                                                    tool_names.append(tool_name)
-                                                tool_records = self._current_progress.setdefault("tool_call_records", [])
-                                                if isinstance(tool_records, list) and len(tool_records) < 200:
-                                                    tool_records.append(
-                                                        {
-                                                            "name": tool_name,
-                                                            "tool_use_id": item.get("id"),
-                                                            "input": item.get("input") or {},
-                                                            "success": None,
-                                                            "error": None,
-                                                            "started_at": time.time(),
-                                                        }
+                                        for text in _event_text_blocks(evt):
+                                            text = str(text or "").strip()
+                                            if not text:
+                                                continue
+                                            stream_stats["text_blocks"] += 1
+                                            self._current_progress["last_message"] = text[:500]
+                                            self._emit_autonomous_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type="assistant_output",
+                                                message=text,
+                                                payload={"chars": len(text)},
+                                            )
+                                            self._emit_agent_run_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type="assistant_output",
+                                                message=text,
+                                                payload={"chars": len(text)},
+                                            )
+                                            self._emit_prd_generation_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type="assistant_output",
+                                                message=text[:1200],
+                                                payload={"chars": len(text)},
+                                            )
+
+                                        for item in _event_tool_uses(evt):
+                                            tool_name = str(item.get("name") or "")
+                                            tool_use_id = item.get("id")
+                                            existing_record = (
+                                                stream_tool_record_by_id.get(str(tool_use_id))
+                                                if tool_use_id
+                                                else None
+                                            )
+                                            if existing_record is not None:
+                                                if item.get("input"):
+                                                    existing_record["input"] = item.get("input") or {}
+                                                if item.get("index") is not None:
+                                                    stream_tool_record_by_index[int(item["index"])] = existing_record
+                                                continue
+                                            self._current_progress["tool_calls"] += 1
+                                            self._current_progress["phase"] = "tool_use"
+                                            self._current_progress["message"] = f"Using {_short_tool_name(tool_name) or tool_name}"
+                                            self._current_progress["last_tool"] = tool_name
+                                            self._current_progress["current_tool"] = tool_name
+                                            tool_names = self._current_progress.setdefault("tool_names", [])
+                                            if isinstance(tool_names, list) and len(tool_names) < 200:
+                                                tool_names.append(tool_name)
+                                            record: dict[str, object] = {
+                                                "name": tool_name,
+                                                "tool_use_id": item.get("id"),
+                                                "input": item.get("input") or {},
+                                                "success": None,
+                                                "error": None,
+                                                "started_at": time.time(),
+                                            }
+                                            tool_records = self._current_progress.setdefault("tool_call_records", [])
+                                            if isinstance(tool_records, list) and len(tool_records) < 200:
+                                                tool_records.append(record)
+                                            if tool_use_id:
+                                                stream_tool_record_by_id[str(tool_use_id)] = record
+                                                stream_tool_input_fragments.setdefault(str(tool_use_id), [])
+                                            if item.get("index") is not None:
+                                                stream_tool_record_by_index[int(item["index"])] = record
+                                            short_name = _short_tool_name(tool_name)
+                                            self._current_progress["last_tool_label"] = short_name
+                                            self._current_progress["current_tool_label"] = short_name
+                                            if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
+                                                self._current_progress["browser_tool_calls"] += 1
+                                                event_type = "browser_action"
+                                            else:
+                                                event_type = "tool_call"
+                                            if short_name in INTERACTION_TOOLS:
+                                                self._current_progress["interactions"] += 1
+                                            payload = {
+                                                "tool_name": tool_name,
+                                                "short_name": short_name,
+                                                "tool_label": short_name,
+                                                "current_tool": tool_name,
+                                                "current_tool_label": short_name,
+                                                "input": item.get("input") or {},
+                                            }
+                                            self._emit_autonomous_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type=event_type,
+                                                message=f"Tool call: {short_name or tool_name}",
+                                                payload=payload,
+                                            )
+                                            self._emit_agent_run_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type=event_type,
+                                                message=f"Tool call: {short_name or tool_name}",
+                                                payload=payload,
+                                            )
+                                            self._emit_prd_generation_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type=event_type,
+                                                message=f"Tool call: {short_name or tool_name}",
+                                                payload=payload,
+                                            )
+
+                                        for delta in _event_input_json_deltas(evt):
+                                            record = None
+                                            tool_use_id = delta.get("tool_use_id")
+                                            if tool_use_id:
+                                                record = stream_tool_record_by_id.get(str(tool_use_id))
+                                            if record is None and delta.get("index") is not None:
+                                                record = stream_tool_record_by_index.get(int(delta["index"]))
+                                                tool_use_id = record.get("tool_use_id") if record else None
+                                            if record is None:
+                                                continue
+                                            fragment_key = str(tool_use_id or id(record))
+                                            fragments = stream_tool_input_fragments.setdefault(fragment_key, [])
+                                            fragments.append(str(delta.get("partial_json") or ""))
+                                            try:
+                                                parsed_input = json.loads("".join(fragments))
+                                            except json.JSONDecodeError:
+                                                continue
+                                            if isinstance(parsed_input, dict):
+                                                record["input"] = parsed_input
+
+                                        for item in _event_tool_results(evt):
+                                            tool_use_id = item.get("tool_use_id")
+                                            if not tool_use_id:
+                                                continue
+                                            is_error = bool(item.get("is_error") or item.get("error"))
+                                            result_text = _tool_result_text(item.get("content"))
+                                            dialog_recovery = browser_dialog_recovery_telemetry_from_text(result_text)
+                                            failed_record: dict[str, object] | None = None
+                                            tool_records = self._current_progress.setdefault("tool_call_records", [])
+                                            if isinstance(tool_records, list):
+                                                for record in reversed(tool_records):
+                                                    if not isinstance(record, dict):
+                                                        continue
+                                                    if record.get("tool_use_id") != tool_use_id:
+                                                        continue
+                                                    record["success"] = not is_error
+                                                    record["error"] = str(item.get("error") or "") if is_error else None
+                                                    record["duration_ms"] = int(
+                                                        max(0.0, (time.time() - float(record.get("started_at") or time.time())) * 1000)
                                                     )
-                                                # Strip MCP prefix: mcp__playwright-test__browser_click -> browser_click
-                                                short_name = _short_tool_name(tool_name)
-                                                self._current_progress["last_tool_label"] = short_name
-                                                self._current_progress["current_tool_label"] = short_name
-                                                if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
-                                                    self._current_progress["browser_tool_calls"] += 1
-                                                    event_type = "browser_action"
-                                                else:
-                                                    event_type = "tool_call"
-                                                if short_name in INTERACTION_TOOLS:
-                                                    self._current_progress["interactions"] += 1
-                                                self._emit_autonomous_event(
-                                                    owner_type=owner_type,
-                                                    owner_id=owner_id,
-                                                    task_id=task_id,
-                                                    event_type=event_type,
-                                                    message=f"Tool call: {short_name or tool_name}",
-                                                    payload={
-                                                        "tool_name": tool_name,
-                                                        "short_name": short_name,
-                                                        "tool_label": short_name,
-                                                        "current_tool": tool_name,
-                                                        "current_tool_label": short_name,
-                                                        "input": item.get("input") or {},
-                                                    },
+                                                    record["result_preview"] = result_text[:500]
+                                                    if dialog_recovery:
+                                                        record["dialog_recovery"] = dict(dialog_recovery)
+                                                    failed_record = record
+                                                    break
+                                            if is_error:
+                                                browser_failure = classify_browser_failure(
+                                                    result_text or item.get("error") or "",
+                                                    tool_name=str((failed_record or {}).get("name") or "") or None,
                                                 )
-                                                self._emit_agent_run_event(
-                                                    owner_type=owner_type,
-                                                    owner_id=owner_id,
-                                                    task_id=task_id,
-                                                    event_type=event_type,
-                                                    message=f"Tool call: {short_name or tool_name}",
-                                                    payload={
-                                                        "tool_name": tool_name,
-                                                        "short_name": short_name,
-                                                        "tool_label": short_name,
-                                                        "current_tool": tool_name,
-                                                        "current_tool_label": short_name,
-                                                        "input": item.get("input") or {},
-                                                    },
+                                                if browser_failure:
+                                                    self._mark_browser_session_failed(
+                                                        record=failed_record,
+                                                        message=browser_failure.message,
+                                                        error_type=browser_failure.error_type,
+                                                        locked=True,
+                                                    )
+                                            if dialog_recovery:
+                                                self._current_progress.update(dialog_recovery)
+                                                note_key = (
+                                                    tool_use_id,
+                                                    dialog_recovery.get("dialog_recovery_dialog_type"),
+                                                    dialog_recovery.get("dialog_recovery_message"),
                                                 )
-                                                self._emit_prd_generation_event(
-                                                    owner_type=owner_type,
-                                                    owner_id=owner_id,
-                                                    task_id=task_id,
-                                                    event_type=event_type,
-                                                    message=f"Tool call: {short_name or tool_name}",
-                                                    payload={
-                                                        "tool_name": tool_name,
-                                                        "short_name": short_name,
-                                                        "tool_label": short_name,
-                                                        "current_tool": tool_name,
-                                                        "current_tool_label": short_name,
-                                                        "input": item.get("input") or {},
-                                                    },
-                                                )
-                                                self._current_progress["chars"] = sum(len(c) for c in output_chunks)
-                                        elif evt.get("type") == "user":
-                                            for item in _event_tool_results(evt):
-                                                tool_use_id = item.get("tool_use_id")
-                                                if not tool_use_id:
-                                                    continue
-                                                is_error = bool(item.get("is_error") or item.get("error"))
-                                                result_text = _tool_result_text(item.get("content"))
-                                                tool_records = self._current_progress.setdefault("tool_call_records", [])
-                                                if isinstance(tool_records, list):
-                                                    for record in reversed(tool_records):
-                                                        if not isinstance(record, dict):
-                                                            continue
-                                                        if record.get("tool_use_id") != tool_use_id:
-                                                            continue
-                                                        record["success"] = not is_error
-                                                        record["error"] = str(item.get("error") or "") if is_error else None
-                                                        record["duration_ms"] = int(
-                                                            max(0.0, (time.time() - float(record.get("started_at") or time.time())) * 1000)
-                                                        )
-                                                        record["result_preview"] = result_text[:500]
-                                                        break
-                                            self._current_progress["chars"] = sum(len(c) for c in output_chunks)
+                                                if note_key not in emitted_dialog_recovery_notes:
+                                                    emitted_dialog_recovery_notes.add(note_key)
+                                                    dialog_type = dialog_recovery.get("dialog_recovery_dialog_type") or "unknown"
+                                                    message = dialog_recovery.get("dialog_recovery_message") or ""
+                                                    body = f"Automatic browser dialog recovery accepted a {dialog_type} dialog."
+                                                    if message:
+                                                        body = f"{body} Message: {message}"
+                                                    self._emit_agent_run_event(
+                                                        owner_type=owner_type,
+                                                        owner_id=owner_id,
+                                                        task_id=task_id,
+                                                        event_type="agent_note",
+                                                        level="info",
+                                                        message="Browser dialog was auto-accepted.",
+                                                        payload={
+                                                            "note_type": "browser_dialog_recovery",
+                                                            "title": "Browser dialog auto-accepted",
+                                                            "body": body,
+                                                            "source": "agent_worker",
+                                                            "tool_use_id": tool_use_id,
+                                                            "tags": ["browser", "dialog_recovery"],
+                                                            "actionable": False,
+                                                            "telemetry": dialog_recovery,
+                                                        },
+                                                    )
+                                        self._current_progress["chars"] = sum(len(c) for c in output_chunks)
                                 except (json.JSONDecodeError, TypeError):
                                     stream_stats["parse_errors"] += 1
                                     pass
@@ -2457,6 +2945,15 @@ class AgentWorker:
                     self._kill_process_group(proc, sig=signal.SIGKILL)
                     proc.wait()
                     raise error
+
+                browser_session_error = self._current_browser_session_failure()
+                if browser_session_error is not None:
+                    logger.warning("[CLI] %s; killing process group", browser_session_error)
+                    if browser_recorder is not None:
+                        browser_recorder.flush_pending()
+                    self._kill_process_group(proc, sig=signal.SIGKILL)
+                    proc.wait()
+                    raise browser_session_error
 
                 if elapsed > timeout_seconds:
                     logger.warning(f"[CLI] Timeout after {elapsed:.1f}s active runtime, killing process group")
@@ -2494,6 +2991,8 @@ class AgentWorker:
                 time.sleep(0.5)
 
         except asyncio.TimeoutError:
+            raise
+        except BrowserSessionFailedError:
             raise
         except Exception as e:
             logger.error(f"[CLI] Execution error: {e}", exc_info=True)
@@ -2537,6 +3036,7 @@ class AgentWorker:
             self._last_execution_telemetry = {
                 **stream_stats,
                 **(browser_recorder.telemetry() if browser_recorder is not None else {}),
+                **browser_timeout_diagnostics,
                 **build_agent_token_telemetry(
                     prompt=full_prompt,
                     output=parsed_output,
@@ -2589,6 +3089,10 @@ class AgentWorker:
             except Exception as exc:
                 logger.debug("Failed to write agent artifacts for task %s: %s", task_id, exc)
 
+        if parse_error is not None and _is_claude_code_auth_error_text(raw_output):
+            raise RuntimeError(
+                f"Claude Code authentication failed: {raw_output[-2000:]}"
+            ) from parse_error
         if parse_error is not None:
             raise parse_error
 
@@ -2649,7 +3153,7 @@ class AgentWorker:
     def _parse_cli_output(self, raw_output: str) -> str:
         """Parse stream-json output from Claude CLI."""
         result_text = ""
-        accumulated_content = []
+        accumulated_content: list[str] = []
 
         for line in raw_output.split("\n"):
             line = line.strip()
@@ -2669,15 +3173,11 @@ class AgentWorker:
                         status_suffix = f" (status {api_error_status})" if api_error_status else ""
                         raise RuntimeError(f"CLI returned error{status_suffix}: {result_text[:2000]}")
 
-                elif msg_type == "assistant":
-                    message = data.get("message", {})
-                    content = message.get("content", [])
-                    for item in content:
-                        if item.get("type") == "text":
-                            text = item.get("text", "")
-                            accumulated_content.append(text)
+                for text in _event_text_blocks(data):
+                    if text:
+                        accumulated_content.append(str(text))
 
-                elif msg_type == "system":
+                if msg_type == "system":
                     subtype = data.get("subtype", "unknown")
                     logger.debug(f"[CLI] System message: {subtype}")
 
@@ -2685,7 +3185,7 @@ class AgentWorker:
                 # Non-JSON line (could be escape sequences, etc.)
                 pass
 
-        final_result = result_text or "\n".join(accumulated_content)
+        final_result = result_text or "".join(accumulated_content)
 
         if not final_result:
             # Log first 1000 chars of raw output for debugging

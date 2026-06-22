@@ -363,13 +363,56 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
         failed_title = failure_metadata.get("title") or failure_metadata.get(
             "full_title"
         )
+        failed_project = (
+            browser
+            or failure_metadata.get("project")
+            or failure_metadata.get("projectName")
+            or failure_metadata.get("projectId")
+            or "unknown"
+        )
+        failed_file = failure_metadata.get("file") or test_file
+        location = failure_metadata.get("location") if isinstance(failure_metadata.get("location"), dict) else {}
+        line_location = ""
+        if location.get("line"):
+            line_location = f"{failed_file}:{location.get('line')}"
+        preferred_scoped_input = json.dumps(
+            {
+                "file": failed_file,
+                "project": failed_project,
+                "grep": failed_title or "unknown",
+            }
+        )
+        location_scoped_input = json.dumps(
+            {
+                "locations": [line_location or failed_file],
+                "project": failed_project,
+                "grep": failed_title or "unknown",
+            }
+        )
         failure_section = f"""
 ## Failed Test Target
-- Browser/project: `{browser or failure_metadata.get("project") or "unknown"}`
-- File: `{failure_metadata.get("file") or test_file}`
+- Browser/project: `{failed_project}`
+- File: `{failed_file}`
 - Title: `{failed_title or "unknown"}`
+- Line location: `{line_location or "unknown"}`
 - Retry: `{failure_metadata.get("retry", "unknown")}`
 - Primary error: `{failure_metadata.get("primary_error") or "unknown"}`
+
+## Copy-Ready Required MCP Inputs
+Use these exact scoped inputs whenever available. If one value is `unknown`, call `test_list` scoped by file/project first and replace the unknown value before debugging.
+- Failed file: `{failed_file}`
+- Project: `{failed_project}`
+- Title/grep: `{failed_title or "unknown"}`
+- Location: `{line_location or "unknown"}`
+
+Preferred scoped calls:
+```json
+{preferred_scoped_input}
+```
+If the MCP server supports locations, this is also file-scoped:
+```json
+{location_scoped_input}
+```
 """
 
         test_data_section = ""
@@ -416,12 +459,19 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
 ## Your Workflow
 
-1. **Identify the exact failed test first**: If the failed test id/title is present in the metadata above, use it. If it is unknown or ambiguous, call `test_list` scoped to this file and browser/project `{browser or "the failed project"}` to find the matching failed test id/title before debugging.
-2. **Reproduce the exact failed state with `test_debug`**: When an exact failed test id/title is known, call `test_debug` scoped to this file, browser/project `{browser or "the failed project"}`, and title/id `{failed_title or "the failed title"}`. `test_debug` is the failure-state capture path because it pauses on the failed test state.
+Work as a staged internal team on every attempt:
+- **Triage agent**: classify the root cause and required evidence from the failed test target, code frame, and prior attempt history.
+- **Patch agent**: make the smallest test edit only after the triage evidence is captured.
+- **Verification agent**: rerun the exact failed test with the same file, project, and title/grep/location scope.
+- **Reviewer agent**: enforce guardrails before accepting the patch: scoped failure-state tool, DOM/network/console evidence, preserved assertions or explicit justified `test.fixme()`, and a structured note.
+
+1. **Identify the exact failed test first**: If the failed test id/title is present in the metadata above, use it. If it is unknown or ambiguous, call `test_list` scoped to this file and browser/project `{failed_project}` to find the matching failed test id/title before debugging.
+2. **Reproduce the exact failed state with `test_debug` or scoped `test_run`**: When an exact failed test id/title is known, call `test_debug` scoped to failed file `{failed_file}`, browser/project `{failed_project}`, and title/grep `{failed_title or "the failed title"}`. `test_debug` is preferred because it pauses on the failed test state; use scoped `test_run` when debug is unavailable.
 3. **Keep the paused debug browser open**: Do not call `browser_close`. Test runs may close automatically after completion, but a paused `test_debug` browser is evidence and must remain available until you have inspected it. The orchestrator owns cleanup after the attempt.
 4. **Capture failure-state evidence before editing**: Only after `test_debug` has paused, use `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, `browser_evaluate`, or tracing tools as needed. Use `browser_resume` only after capturing paused-state evidence and only when you need the same paused script to continue to the next action, assertion, or failure.
 5. **Use category-specific evidence before editing**:
    - Selector or timing failures: use `browser_snapshot` or `browser_generate_locator` before changing selectors, waits, or assertions.
+   - Sort/select/dropdown failures: use `browser_snapshot`, `browser_evaluate`, or `browser_generate_locator` to inspect valid options and current selected value before changing assertions.
    - Authentication, test-data, API, or server failures: use `browser_network_requests` or `browser_console_messages` before changing setup, data, navigation, or assertions.
 6. **Analyze the error**: Parse the previous error output and `test_debug` failure details (error message, stack trace, failed assertions) and compare them to the paused browser evidence.
 7. **Diagnose**: Determine the root cause:
@@ -431,6 +481,7 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
    - Data dependencies
 8. **Fix the code**: Use `Edit` or `MultiEdit` to update the test only after the evidence above is captured.
 9. **Verify**: Run the test again with `test_debug` when you still need paused-state evidence, or `test_run` for final pass/fail confirmation.
+10. **Record a durable structured note**: If `quorvex_record_note` is available, record evidence, diagnosis, attempted fix, validation result, blocker reason, changed selectors, and failure signature using note types such as `evidence`, `diagnosis`, `attempted_fix`, `validation`, or `blocker`.
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
@@ -445,6 +496,8 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - Use Playwright best practices
 - Preserve the debug browser state; do not close it manually after `test_debug`.
 - Preserve test intent. Do not remove assertions to make the test pass. If the behavior is genuinely not testable, use an explicit `test.fixme()` with a reason.
+- For sort/select/dropdown tests, do not assert a persisted default value unless live evidence proves it is deterministic. Prefer asserting valid options exist, then call `selectOption` and verify the selected value changes to the chosen option.
+- If `quorvex_record_note` is available, record durable notes only for meaningful findings, decisions, blockers, handoffs, or final root cause. Do not record routine low-level tool activity as notes.
 - In your final response, include `strategy: ...`, `root_cause: ...`, and `changed_selectors: ...`.
 - If a test cannot be fixed, mark it with `test.fixme()` and explain why
 - Never use deprecated APIs like `waitForNetworkIdle`

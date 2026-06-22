@@ -16,6 +16,25 @@ from utils.playwright_mcp import (
     live_browser_display_diagnostics as _default_live_browser_display_diagnostics,
 )
 
+try:
+    from utils.browser_dialog_recovery import playwright_dialog_auto_accept_handler
+except ImportError:  # pragma: no cover - package import mode
+    from orchestrator.utils.browser_dialog_recovery import playwright_dialog_auto_accept_handler
+try:
+    from utils.claude_stream import (
+        event_text_blocks,
+        event_tool_results,
+        event_tool_uses,
+        tool_result_text,
+    )
+except Exception:  # pragma: no cover - import path differs in some test contexts
+    from orchestrator.utils.claude_stream import (
+        event_text_blocks,
+        event_tool_results,
+        event_tool_uses,
+        tool_result_text,
+    )
+
 from . import spec_files
 from .models_db import TestRun as DBTestRun
 
@@ -286,6 +305,233 @@ def _extract_agent_progress_from_log(execution_log: str | None) -> dict[str, Any
     }
 
 
+SENSITIVE_TOOL_INPUT_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth",
+    "credential",
+    "cookie",
+)
+DEBUG_ONLY_AGENT_NOTE_MARKERS = (
+    "planner_draft_debug_status",
+    "root_cause: none",
+)
+
+
+def _safe_tool_input_summary(tool_input: Any) -> dict[str, Any]:
+    if not isinstance(tool_input, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for key, value in list(tool_input.items())[:12]:
+        key_text = str(key)
+        lowered = key_text.lower()
+        if any(part in lowered for part in SENSITIVE_TOOL_INPUT_PARTS):
+            summary[key_text] = "<redacted>"
+        elif isinstance(value, str):
+            summary[key_text] = value if len(value) <= 180 else value[:180] + "...<truncated>"
+        elif isinstance(value, (int, float, bool)) or value is None:
+            summary[key_text] = value
+        elif isinstance(value, list):
+            summary[key_text] = f"list[{len(value)}]"
+        elif isinstance(value, dict):
+            summary[key_text] = f"dict[{len(value)}]"
+        else:
+            summary[key_text] = str(value)[:180]
+    return summary
+
+
+def _agent_session_jsonl_candidates(run_dir: Path) -> list[Path]:
+    if not run_dir.exists():
+        return []
+    roots = [run_dir / "projects"]
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            candidates.extend(path for path in root.rglob("*.jsonl") if path.is_file())
+        except OSError:
+            continue
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def _is_debug_only_agent_note(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    return bool(normalized) and any(marker in normalized for marker in DEBUG_ONLY_AGENT_NOTE_MARKERS)
+
+
+def _extract_agent_session_activity_from_path(run_dir: Path, path: Path) -> dict[str, Any] | None:
+    notes: list[str] = []
+    tool_rows: list[str] = []
+    pending_tools: dict[str, dict[str, Any]] = {}
+    completed_tool_calls = 0
+    browser_tool_calls = 0
+    messages_received = 0
+    text_blocks_received = 0
+    output_chars = 0
+
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("type") in {"assistant", "user"}:
+            messages_received += 1
+
+        for text in event_text_blocks(event):
+            text = str(text or "").strip()
+            if not text:
+                continue
+            text_blocks_received += 1
+            output_chars += len(text)
+            if len(notes) < 40:
+                notes.append(text if len(text) <= 1200 else text[:1200] + "...<truncated>")
+
+        for tool_use in event_tool_uses(event):
+            tool_id = tool_use.id or f"tool-{len(pending_tools) + completed_tool_calls + 1}"
+            if tool_use.name.startswith("mcp__playwright") and "__browser_" in tool_use.name:
+                browser_tool_calls += 1
+            pending_tools[tool_id] = {
+                "name": tool_use.name,
+                "input": _safe_tool_input_summary(tool_use.input),
+            }
+            if len(tool_rows) < 80:
+                input_summary = pending_tools[tool_id]["input"]
+                input_text = f" input={json.dumps(input_summary, sort_keys=True)}" if input_summary else ""
+                tool_rows.append(f"CALL {tool_use.name}{input_text}")
+
+        for tool_result in event_tool_results(event):
+            completed_tool_calls += 1
+            pending = pending_tools.pop(tool_result.tool_use_id or "", None)
+            tool_name = pending.get("name") if pending else (tool_result.tool_use_id or "unknown_tool")
+            status = "ERROR" if tool_result.is_error else "OK"
+            preview = tool_result_text(tool_result.content).strip().replace("\n", " ")
+            if len(preview) > 240:
+                preview = preview[:240] + "...<truncated>"
+            if len(tool_rows) < 80:
+                suffix = f" -> {preview}" if preview else ""
+                tool_rows.append(f"{status} {tool_name}{suffix}")
+
+    tool_call_count = completed_tool_calls + len(pending_tools)
+    if not notes and not tool_rows:
+        return None
+    source = str(path.relative_to(run_dir))
+    substantive_notes = [note for note in notes if not _is_debug_only_agent_note(note)]
+    try:
+        modified_at = path.stat().st_mtime
+    except OSError:
+        modified_at = 0.0
+    return {
+        "source": source,
+        "progress": {
+            "source": source,
+            "phase": "session_jsonl",
+            "status": "recovered",
+            "messages_received": messages_received,
+            "text_blocks_received": text_blocks_received,
+            "tool_calls": tool_call_count,
+            "completed_tool_calls": completed_tool_calls,
+            "pending_tool_calls": len(pending_tools),
+            "browser_tool_calls": browser_tool_calls,
+            "output_chars": output_chars,
+            "unproductive_stream": False,
+        },
+        "notes": notes,
+        "tool_rows": tool_rows,
+        "_recovery_score": (
+            1 if substantive_notes or tool_rows else 0,
+            len(substantive_notes),
+            1 if tool_rows else 0,
+            tool_call_count,
+            output_chars if substantive_notes else 0,
+            modified_at,
+        ),
+    }
+
+
+def _extract_agent_session_activity(run_dir: Path) -> dict[str, Any] | None:
+    candidates = [
+        activity
+        for path in _agent_session_jsonl_candidates(run_dir)
+        if (activity := _extract_agent_session_activity_from_path(run_dir, path)) is not None
+    ]
+    if not candidates:
+        return None
+    selected = max(candidates, key=lambda activity: activity.get("_recovery_score") or ())
+    selected.pop("_recovery_score", None)
+    return selected
+
+
+def _structured_healer_notes(
+    healing_attempts: dict[str, Any] | None,
+    failure_evidence: dict[str, Any] | None,
+) -> str | None:
+    lines: list[str] = []
+
+    attempts = healing_attempts.get("attempts") if isinstance(healing_attempts, dict) else []
+    if isinstance(attempts, list):
+        for attempt in attempts[:5]:
+            if not isinstance(attempt, dict):
+                continue
+            header_bits = [f"Attempt {attempt.get('attempt') or '?'}"]
+            guardrail_status = attempt.get("guardrail_status")
+            if guardrail_status:
+                header_bits.append(f"guardrail={guardrail_status}")
+            if attempt.get("passed_after") is not None:
+                header_bits.append(f"passed_after={attempt.get('passed_after')}")
+            lines.append(" | ".join(header_bits))
+
+            evidence_tools = attempt.get("mcp_evidence_tools_used") or []
+            if evidence_tools:
+                lines.append("evidence_tools: " + ", ".join(str(tool) for tool in evidence_tools))
+            if attempt.get("root_cause"):
+                lines.append(f"diagnosis: {attempt.get('root_cause')}")
+            if attempt.get("strategy"):
+                lines.append(f"attempted_fix: {attempt.get('strategy')}")
+            elif attempt.get("healer_summary"):
+                lines.append(f"attempted_fix: {str(attempt.get('healer_summary'))[:500]}")
+            if attempt.get("changed_selectors"):
+                lines.append(f"changed_selectors: {attempt.get('changed_selectors')}")
+            if attempt.get("error_summary"):
+                lines.append(f"blocker_reason: {attempt.get('error_summary')}")
+            validation = "passed" if attempt.get("passed_after") is True else "failed" if attempt.get("passed_after") is False else None
+            if validation:
+                lines.append(f"validation_result: {validation}")
+            missing = attempt.get("missing_required_tools") or []
+            if missing:
+                lines.append("missing_required_tools: " + ", ".join(str(item) for item in missing))
+            lines.append("")
+
+    if isinstance(failure_evidence, dict):
+        signature = {
+            "attempt": failure_evidence.get("attempt"),
+            "failed_test": failure_evidence.get("failed_test"),
+            "error_summary": failure_evidence.get("error_summary"),
+            "mcp_evidence": failure_evidence.get("mcp_evidence"),
+        }
+        compact_signature = {key: value for key, value in signature.items() if value not in (None, {}, [])}
+        if compact_signature:
+            lines.append("Failure signature")
+            lines.append(json.dumps(compact_signature, indent=2, default=str))
+
+    text = "\n".join(lines).strip()
+    return text or None
+
+
 def _has_saved_planner_artifact(run_dir: Path) -> bool:
     if not run_dir.exists():
         return False
@@ -460,16 +706,27 @@ def build_run_observability_health(
     has_recent_output = bool(recent_candidates and min(recent_candidates) <= stale_after_seconds)
     warnings: list[str] = []
 
-    if active and last_log_age_seconds is None:
+    if active and last_log_age_seconds is None and not has_recent_output:
         warnings.append("No execution.log has been written while this run is active.")
-    elif active and last_log_age_seconds is not None and last_log_age_seconds > stale_after_seconds:
+    elif (
+        active
+        and last_log_age_seconds is not None
+        and last_log_age_seconds > stale_after_seconds
+        and not has_recent_output
+    ):
         warnings.append(f"No new execution.log output for {last_log_age_seconds // 60} minutes.")
 
     temporal = diagnostics.get("temporal") if isinstance(diagnostics.get("temporal"), dict) else {}
     history_last_event_at = temporal.get("history_last_event_at") if isinstance(temporal, dict) else None
     history_age_seconds = _age_seconds(history_last_event_at, now)
     started_activities = _started_temporal_activities(temporal)
-    if active and started_activities and history_age_seconds is not None and history_age_seconds > stale_after_seconds:
+    if (
+        active
+        and started_activities
+        and history_age_seconds is not None
+        and history_age_seconds > stale_after_seconds
+        and not has_recent_output
+    ):
         activity_names = ", ".join(
             str(activity.get("activity_type") or activity.get("activity_id") or "activity")
             for activity in started_activities[:3]
@@ -481,7 +738,13 @@ def build_run_observability_health(
     browser_pool = diagnostics.get("browser_pool") if isinstance(diagnostics.get("browser_pool"), dict) else {}
     running_requests = [str(item) for item in browser_pool.get("running_requests") or []] if browser_pool else []
     browser_slot_owner = run_db.id if run_db.id in running_requests else None
-    if active and browser_slot_owner and last_log_age_seconds is not None and last_log_age_seconds > stale_after_seconds:
+    if (
+        active
+        and browser_slot_owner
+        and last_log_age_seconds is not None
+        and last_log_age_seconds > stale_after_seconds
+        and not has_recent_output
+    ):
         warnings.append("Browser slot is still held by this run while planner/tool logs are stale.")
 
     agent_progress = diagnostics.get("agent_progress") if isinstance(diagnostics.get("agent_progress"), dict) else {}
@@ -659,11 +922,33 @@ async def compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict
                 ),
             }
         )
+    structured_healer_notes = _structured_healer_notes(healing_attempts, failure_evidence)
+    if structured_healer_notes:
+        diagnostics["structured_healer_notes"] = True
+        sections.append(
+            {
+                "source": "native_healer_structured",
+                "title": "Agent Notes",
+                "content": structured_healer_notes,
+            }
+        )
 
     execution_log = _read_text_if_exists(run_dir / "execution.log") if run_dir.exists() else None
+    session_activity = _extract_agent_session_activity(run_dir) if run_dir.exists() else None
     agent_progress = _read_json_if_exists(run_dir / "agent_progress.json") if run_dir.exists() else None
     if not agent_progress:
         agent_progress = _extract_agent_progress_from_log(execution_log)
+    if session_activity:
+        session_progress = session_activity.get("progress")
+        if isinstance(session_progress, dict):
+            current_tools = int((agent_progress or {}).get("tool_calls") or 0)
+            current_text = int((agent_progress or {}).get("text_blocks_received") or 0)
+            if not agent_progress or (current_tools == 0 and current_text == 0):
+                agent_progress = {
+                    **(agent_progress or {}),
+                    **session_progress,
+                    "session_stream_progress": agent_progress,
+                }
     if agent_progress:
         diagnostics["agent_progress"] = agent_progress
         sections.append(
@@ -673,6 +958,26 @@ async def compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict
                 "content": json.dumps(agent_progress, indent=2, sort_keys=True, default=str),
             }
         )
+    if session_activity:
+        source = session_activity.get("source") or "claude_session_jsonl"
+        notes = session_activity.get("notes") if isinstance(session_activity.get("notes"), list) else []
+        tool_rows = session_activity.get("tool_rows") if isinstance(session_activity.get("tool_rows"), list) else []
+        if notes:
+            sections.append(
+                {
+                    "source": source,
+                    "title": "Raw Agent Notes" if structured_healer_notes else "Agent Notes",
+                    "content": "\n\n".join(str(note) for note in notes),
+                }
+            )
+        if tool_rows:
+            sections.append(
+                {
+                    "source": source,
+                    "title": "Agent Tool Activity",
+                    "content": "\n".join(str(row) for row in tool_rows),
+                }
+            )
     if execution_log:
         sections.append({"source": "execution.log", "title": "Run Log", "content": execution_log})
     else:
@@ -888,6 +1193,7 @@ def write_run_seed_spec(run_dir: Path, target_url: str | None) -> Path:
             f"const targetUrl = {json.dumps(browser_url or '')};",
             "",
             "test('seed target page', async ({ page }) => {",
+            playwright_dialog_auto_accept_handler(indent="  "),
             "  await page.goto(targetUrl || 'about:blank');",
             "});",
             "",

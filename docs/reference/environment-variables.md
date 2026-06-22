@@ -100,7 +100,8 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `AGENT_TIMEOUT_SECONDS` | `1800` | No | Default timeout for all agents (30 minutes) |
-| `AGENT_BROWSER_TOOL_TIMEOUT_SECONDS` | `120` | No | Timeout for browser tool calls made by agent workers |
+| `AGENT_BROWSER_ACTION_TIMEOUT_SECONDS` | `30` | No | Inner Playwright browser action timeout used by MCP click/fill/action calls |
+| `AGENT_BROWSER_TOOL_TIMEOUT_SECONDS` | `45` | No | Outer Quorvex watchdog for browser tool calls made by agent workers |
 | `EXPLORATION_TIMEOUT_SECONDS` | `1800` | No | Timeout for the exploration agent |
 | `PRD_TIMEOUT_SECONDS` | `600` | No | Timeout for PRD processing jobs |
 | `PLANNER_TIMEOUT_SECONDS` | `1800` | No | Timeout for the planner agent |

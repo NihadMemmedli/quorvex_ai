@@ -389,12 +389,14 @@ def resolve_agent_browser_auth_storage_path(
     project_id: str | None,
     config: dict[str, Any],
     run_dir: Path,
+    preflight_enabled: bool = False,
 ) -> Path | None:
     return agent_runtime_alias_support._resolve_agent_browser_auth_storage_path(
         run_id=run_id,
         project_id=project_id,
         config=config,
         run_dir=run_dir,
+        preflight_enabled=preflight_enabled,
         runtime=runtime,
     )
 
@@ -403,10 +405,15 @@ def prepare_custom_agent_mcp_config(
     runtime: Any,
     run_id: str,
     storage_state_path: Path | str | None = None,
+    *,
+    include_browser_tools: bool = True,
+    include_agent_note_tool: bool = False,
 ) -> Path:
     return agent_runtime_alias_support._prepare_custom_agent_mcp_config(
         run_id,
         storage_state_path=storage_state_path,
+        include_browser_tools=include_browser_tools,
+        include_agent_note_tool=include_agent_note_tool,
         runtime=runtime,
     )
 
