@@ -2448,11 +2448,7 @@ class AgentWorker:
 
         auth_preflight = self._claude_code_auth_preflight(env)
         if auth_preflight.get("required"):
-            logger.info(
-                "[CLI]   Claude Code auth preflight: oauth_token_set=%s, active_api_key_aliases=%s",
-                auth_preflight.get("claude_code_oauth_token_set"),
-                auth_preflight.get("active_api_key_aliases"),
-            )
+            logger.info("[CLI]   Claude Code auth preflight completed")
 
         effective_cwd = cwd or self.cwd
         logger.info("[CLI] Starting Claude CLI (direct subprocess)")

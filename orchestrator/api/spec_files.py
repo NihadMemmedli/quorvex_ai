@@ -31,6 +31,7 @@ _MAX_SPEC_CACHE_SIZE = 5000
 _code_path_cache: dict[str, tuple] = {}
 _CODE_PATH_CACHE_TTL = 300
 _MAX_CODE_CACHE_SIZE = 200
+_SAFE_TEST_STEM_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def sync_spec_metadata_from_file(session: Session, metadata_file: Path = METADATA_FILE) -> int:
@@ -148,6 +149,8 @@ _spec_cache = SpecCache(SPECS_DIR)
 def get_try_code_path_fast(spec_path: Path, base_dir: Path = BASE_DIR) -> str | None:
     """Fast code path check - only checks filename patterns without scanning runs."""
     stem = spec_path.stem
+    if not _SAFE_TEST_STEM_RE.fullmatch(stem):
+        return None
     stem_slug = stem.replace("_", "-")
     candidates = [
         f"tests/generated/{stem}.spec.ts",
@@ -157,9 +160,15 @@ def get_try_code_path_fast(spec_path: Path, base_dir: Path = BASE_DIR) -> str | 
         f"tests/{stem}.spec.ts",
     ]
 
+    base_dir = base_dir.resolve()
     for c in candidates:
-        if (base_dir / c).exists():
-            return str(base_dir / c)
+        candidate = (base_dir / c).resolve()
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError:
+            continue
+        if candidate.exists():
+            return str(candidate)
     return None
 
 

@@ -566,28 +566,21 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             else {}
         )
         self.last_runtime_preflight = runtime_preflight
+        safe_runtime_preflight = {
+            key: runtime_preflight.get(key)
+            for key in (
+                "execution_path",
+                "provider",
+                "runtime",
+                "tier",
+                "model",
+                "auth_mode",
+                "queue",
+            )
+        }
         logger.info(
             "Native planner runtime preflight: %s",
-            json.dumps(
-                {
-                    key: runtime_preflight.get(key)
-                    for key in (
-                        "execution_path",
-                        "provider",
-                        "runtime",
-                        "tier",
-                        "model",
-                        "api_key_set",
-                        "api_key_env",
-                        "claude_code_oauth_token_set",
-                        "auth_mode",
-                        "queue",
-                        "runtime_env_keys",
-                    )
-                },
-                sort_keys=True,
-                default=str,
-            ),
+            json.dumps(safe_runtime_preflight, sort_keys=True, default=str),
         )
 
         result = await runner.run(prompt)

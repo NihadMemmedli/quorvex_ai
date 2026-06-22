@@ -222,13 +222,22 @@ def _mcp_server_configured(
     mcp_config_dir: Path | str | None = None,
     mcp_config_path: Path | str | None = None,
 ) -> bool:
-    path = Path(mcp_config_path) if mcp_config_path else None
-    if path is None and mcp_config_dir is not None:
-        path = Path(mcp_config_dir) / ".mcp.json"
-    if path is None:
-        path = Path(".mcp.json")
+    root = Path(mcp_config_dir) if mcp_config_dir is not None else Path.cwd()
+    root = root.expanduser().resolve(strict=False)
+
+    path = Path(mcp_config_path).expanduser() if mcp_config_path else root / ".mcp.json"
+    if not path.is_absolute():
+        path = root / path
     if path.is_dir():
         path = path / ".mcp.json"
+    path = path.resolve(strict=False)
+    if path.name != ".mcp.json":
+        return False
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+
     try:
         config = json.loads(path.read_text())
     except Exception:
