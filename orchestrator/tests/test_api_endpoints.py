@@ -2390,6 +2390,100 @@ class TestSpecEndpoints:
         assert search_items[0]["is_automated"] is True
         assert search_items[0]["code_path"] == str(run_code_path)
 
+    def test_automated_specs_and_folders_include_project_run_local_generated_tests(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Regression views should discover project specs generated only under runs/."""
+        from orchestrator.api import specs as specs_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import Project, RegressionBatch, SpecMetadata, get_spec_metadata
+        from orchestrator.api.models_db import TestRun as DBTestRun
+        from orchestrator.services import batch_executor
+
+        project_id = f"run-local-project-{uuid4().hex}"
+        spec_stem = f"run-local-flow-{uuid4().hex[:8]}"
+        spec_name = f"mygov/{spec_stem}.md"
+        specs_dir = tmp_path / "specs"
+        runs_dir = tmp_path / "runs"
+        run_generated_dir = runs_dir / "run-1" / "tests" / "generated"
+        (specs_dir / "mygov").mkdir(parents=True)
+        run_generated_dir.mkdir(parents=True)
+        (specs_dir / spec_name).write_text("# Run Local Flow\n", encoding="utf-8")
+        run_code_path = run_generated_dir / f"{spec_stem}.spec.ts"
+        run_code_path.write_text("import { test } from '@playwright/test';\n", encoding="utf-8")
+
+        monkeypatch.setattr(specs_module, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(specs_module, "RUNS_DIR", runs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(batch_executor, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(batch_executor, "RUNS_DIR", runs_dir)
+        monkeypatch.setattr(batch_executor, "SPECS_DIR", specs_dir)
+
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name=f"Run Local Project {uuid4().hex}"))
+            session.add(SpecMetadata(spec_name=spec_name, project_id=project_id, tags_json='["regression"]'))
+            session.commit()
+
+        try:
+            list_response = client.get(f"/specs/list?project_id={project_id}&automated_only=true")
+            assert list_response.status_code == 200
+            list_items = list_response.json()["items"]
+            assert [item["name"] for item in list_items] == [spec_name]
+            assert list_items[0]["is_automated"] is True
+            assert list_items[0]["code_path"] == str(run_code_path)
+
+            automated_response = client.get(f"/specs/automated?project_id={project_id}")
+            assert automated_response.status_code == 200
+            automated_data = automated_response.json()
+            assert automated_data["total"] == 1
+            assert automated_data["specs"][0]["name"] == spec_name
+            assert automated_data["specs"][0]["code_path"] == str(run_code_path)
+            assert automated_data["specs"][0]["tags"] == ["regression"]
+
+            folders_response = client.get(f"/specs/folders?project_id={project_id}")
+            assert folders_response.status_code == 200
+            folders_data = folders_response.json()
+            assert folders_data["total_specs"] == 1
+            assert folders_data["folders"] == [
+                {"name": "mygov", "path": "mygov", "spec_count": 1, "children": []}
+            ]
+
+            code_response = client.get(f"/specs/{spec_name}/generated-code?project_id={project_id}")
+            assert code_response.status_code == 200
+            code_data = code_response.json()
+            assert code_data["code_path"] == str(run_code_path.relative_to(tmp_path))
+            assert "import { test }" in code_data["content"]
+
+            with Session(engine) as session:
+                auto_config = batch_executor.BatchConfig(project_id=project_id, automated_only=True)
+                assert batch_executor.select_regression_specs(auto_config, session) == [spec_name]
+
+                explicit_config = batch_executor.BatchConfig(
+                    project_id=project_id,
+                    automated_only=True,
+                    spec_names=[spec_name],
+                )
+                assert batch_executor.select_regression_specs(explicit_config, session) == [spec_name]
+
+                batch = batch_executor.create_regression_batch(explicit_config, session)
+                assert len(batch.tasks_to_start) == 1
+                assert batch.tasks_to_start[0]["try_code_path"] == str(run_code_path)
+        finally:
+            with Session(engine) as session:
+                for run in session.exec(select(DBTestRun).where(DBTestRun.spec_name == spec_name)).all():
+                    session.delete(run)
+                for batch in session.exec(
+                    select(RegressionBatch).where(RegressionBatch.project_id == project_id)
+                ).all():
+                    session.delete(batch)
+                meta = get_spec_metadata(session, spec_name, project_id)
+                if meta:
+                    session.delete(meta)
+                project = session.get(Project, project_id)
+                if project:
+                    session.delete(project)
+                session.commit()
+
     def test_split_spec_regex_returns_extraction_metadata(self, client, tmp_path, monkeypatch):
         """POST /specs/split should report regex extraction when explicitly selected."""
         from orchestrator.api import specs as specs_module

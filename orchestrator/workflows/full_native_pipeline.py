@@ -26,11 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 def playwright_headed_args() -> str:
-    playwright_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "").lower()
-    generic_headless = os.environ.get("HEADLESS", "").lower()
-    if playwright_headless == "false" or generic_headless == "false":
-        return " --headed --workers=1"
-    return ""
+    from utils.playwright_mcp import playwright_headed_cli_args
+
+    return playwright_headed_cli_args()
 
 
 # Add orchestrator to path
@@ -59,6 +57,7 @@ from utils.generated_test_materializer import materialize_generated_test_for_run
 from utils.playwright_mcp import (
     playwright_config_cli_arg,
     prepare_run_playwright_config_content,
+    should_run_headless,
     validate_run_seed_spec_preflight,
     write_playwright_test_mcp_config,
 )
@@ -5091,10 +5090,7 @@ Requirements:
         playwright_config_src = project_root / "playwright.config.ts"
         playwright_config_dst = run_dir / "playwright.config.ts"
         if playwright_config_src.exists():
-            headless = not (
-                os.environ.get("PLAYWRIGHT_HEADLESS", "").lower() == "false"
-                or os.environ.get("HEADLESS", "").lower() == "false"
-            )
+            headless = should_run_headless()
             config_content = prepare_run_playwright_config_content(
                 playwright_config_src.read_text(),
                 base_dir=project_root,

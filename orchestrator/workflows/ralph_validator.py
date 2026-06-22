@@ -17,11 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 def playwright_headed_args() -> str:
-    playwright_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "").lower()
-    generic_headless = os.environ.get("HEADLESS", "").lower()
-    if playwright_headless == "false" or generic_headless == "false":
-        return " --headed --workers=1"
-    return ""
+    from utils.playwright_mcp import playwright_headed_cli_args
+
+    return playwright_headed_cli_args()
 
 
 # Load Claude credentials

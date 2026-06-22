@@ -10,6 +10,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from orchestrator.utils.playwright_mcp import (
+    display_aware_headless,
+    display_capable_vnc_enabled,
+    requested_headless_from_env,
+)
+
 _STARTUP_IMPORT_FAILURE_MESSAGE = (
     "Transient Docker bind-mount import failure while starting the test runner (Errno 35)."
 )
@@ -178,6 +184,25 @@ def run_test_cli_subprocess_with_retry(
     )
 
 
+def resolve_run_headless_mode(
+    *,
+    env: dict[str, str] | None = None,
+    execution_settings: Any | None = None,
+) -> bool:
+    """Resolve browser visibility for server-triggered test runs."""
+    explicit_headless = requested_headless_from_env(env)
+    if explicit_headless is not None:
+        return display_aware_headless(explicit_headless, env)
+
+    settings_headless = getattr(execution_settings, "headless_in_parallel", None)
+    if settings_headless is not None:
+        return display_aware_headless(bool(settings_headless), env)
+
+    if display_capable_vnc_enabled(env):
+        return False
+    return True
+
+
 def execute_run_task(
     runtime: Any,
     spec_path: str,
@@ -198,6 +223,7 @@ def execute_run_task(
     test_data_refs: list[str] | None = None,
 ):
     """Execute the native pipeline with optional hybrid healing mode."""
+    headless = display_aware_headless(headless, runtime.os.environ)
 
     def _append_workflow_log(message: str, **payload: Any) -> None:
         try:
@@ -361,15 +387,18 @@ async def execute_run_task_wrapper(
 
     _append_workflow_log("Test run wrapper started.", run_id=run_id, spec_path=spec_path)
 
-    headless = False
+    headless = True
     memory_enabled = True
     with runtime.Session(runtime.engine) as session:
         settings = session.get(runtime.DBExecutionSettings, 1)
         if settings:
-            headless = settings.headless_in_parallel
+            headless = resolve_run_headless_mode(
+                env=runtime.os.environ,
+                execution_settings=settings,
+            )
             memory_enabled = settings.memory_enabled
-    if runtime.os.environ.get("VNC_ENABLED", "").lower() == "true":
-        headless = False
+        else:
+            headless = resolve_run_headless_mode(env=runtime.os.environ)
 
     pool = runtime.BROWSER_POOL or await runtime.get_browser_pool()
     try:

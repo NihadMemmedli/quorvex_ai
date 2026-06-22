@@ -256,9 +256,14 @@ def get_spec_folders(project_id: str | None = None, session: Session = Depends(g
             query = select(DBSpecMetadata.spec_name).where(DBSpecMetadata.project_id == project_id)
             project_spec_names = set(session.exec(query).all())
 
-    # Use project_id as cache key (or "all" if no filter)
-    cache_key = f"folder_tree_{project_id or 'all'}"
-    folders, total_specs = build_folder_tree(SPECS_DIR, project_spec_names, excluded_spec_names, cache_key)
+    generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
+    folders, total_specs = build_folder_tree(
+        SPECS_DIR,
+        project_spec_names,
+        excluded_spec_names,
+        generated_test_index=generated_test_index,
+        base_dir=BASE_DIR,
+    )
     return FolderTreeResponse(folders=folders, total_specs=total_specs)
 
 
@@ -311,11 +316,11 @@ def list_automated_specs(
 
     all_specs = []
     tag_filter = tags.split(",") if tags else []
+    generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
 
     if SPECS_DIR.exists():
         for f in SPECS_DIR.glob("**/*.md"):
-            # Fast code path check - only include automated specs
-            code_path = get_try_code_path_fast(f)
+            code_path = resolve_generated_code_path(f, generated_test_index, BASE_DIR)
             if not code_path:
                 continue
 
@@ -476,7 +481,7 @@ def get_generated_code(
             elif meta.project_id != project_id:
                 raise HTTPException(status_code=404, detail="Spec not found")
 
-    code_path = get_try_code_path(name, spec_path)
+    code_path = get_try_code_path(name, spec_path, BASE_DIR, RUNS_DIR)
     if not code_path or not Path(code_path).exists():
         raise HTTPException(status_code=404, detail="No generated test found")
 
@@ -511,7 +516,7 @@ def update_generated_code(
             elif meta.project_id != project_id:
                 raise HTTPException(status_code=404, detail="Spec not found")
 
-    code_path = get_try_code_path(name, spec_path)
+    code_path = get_try_code_path(name, spec_path, BASE_DIR, RUNS_DIR)
     if not code_path or not Path(code_path).exists():
         raise HTTPException(status_code=404, detail="No generated test found")
 
@@ -539,7 +544,7 @@ def get_spec(
             elif meta.project_id != project_id:
                 raise HTTPException(status_code=404, detail="Spec not found")
 
-    code_path = get_try_code_path(name, f)
+    code_path = get_try_code_path(name, f, BASE_DIR, RUNS_DIR)
     return {
         "name": str(f.relative_to(SPECS_DIR)),
         "path": str(f.absolute()),

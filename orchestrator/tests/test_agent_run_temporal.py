@@ -287,6 +287,8 @@ def test_custom_agent_mcp_config_uses_installed_chromium_executable(tmp_path, mo
         lambda: {"command": "/app/node_modules/.bin/playwright-mcp", "args": ["--browser", "chromium"]},
     )
     monkeypatch.setenv("HEADLESS", "false")
+    monkeypatch.setenv("VNC_ENABLED", "true")
+    monkeypatch.setenv("DISPLAY", ":99")
 
     run_dir = _prepare_custom_agent_mcp_config("custom-agent-visible-browser")
     config = json.loads((run_dir / ".mcp.json").read_text())

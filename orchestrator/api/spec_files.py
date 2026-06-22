@@ -271,6 +271,8 @@ def build_folder_tree(
     project_spec_names: set | None = None,
     excluded_spec_names: set | None = None,
     cache_key: str | None = None,
+    generated_test_index: dict[str, str] | None = None,
+    base_dir: Path = BASE_DIR,
 ) -> tuple[list[FolderNode], int]:
     """Build folder tree with automated spec counts using O(n) construction."""
     if cache_key and cache_key in _folder_tree_cache:
@@ -280,10 +282,12 @@ def build_folder_tree(
 
     folder_counts: dict[str, int] = {}
     total_specs = 0
+    if generated_test_index is None:
+        generated_test_index = build_generated_test_index(base_dir, RUNS_DIR)
 
     if specs_dir.exists():
         for f in specs_dir.glob("**/*.md"):
-            code_path = get_try_code_path_fast(f)
+            code_path = resolve_generated_code_path(f, generated_test_index, base_dir=base_dir)
             if not code_path:
                 continue
 
@@ -344,18 +348,33 @@ def required_test_data_refs_for_spec(spec_path: Path, code_path: str | None = No
     return extract_test_data_refs_from_sources(markdown=markdown, generated_code=generated_code)
 
 
-def get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
+def get_try_code_path(
+    spec_name: str,
+    spec_path: Path,
+    base_dir: Path = BASE_DIR,
+    runs_dir: Path = RUNS_DIR,
+) -> str | None:
     """Get the generated test file path for a spec."""
-    if spec_name in _code_path_cache:
-        cached_path, cached_time = _code_path_cache[spec_name]
+    cache_key = f"{base_dir.resolve(strict=False)}::{runs_dir.resolve(strict=False)}::{spec_name}"
+    if cache_key in _code_path_cache:
+        cached_path, cached_time = _code_path_cache[cache_key]
         if time_module.time() - cached_time < _CODE_PATH_CACHE_TTL:
             if cached_path and Path(cached_path).exists():
                 return cached_path
 
-    try_code_path = get_try_code_path_fast(spec_path)
+    try_code_path = get_try_code_path_fast(spec_path, base_dir=base_dir)
     if try_code_path:
-        _cache_code_path(spec_name, try_code_path)
+        _cache_code_path(cache_key, try_code_path)
         return try_code_path
+
+    indexed_code_path = resolve_generated_code_path(
+        spec_path,
+        build_generated_test_index(base_dir, runs_dir),
+        base_dir,
+    )
+    if indexed_code_path:
+        _cache_code_path(cache_key, indexed_code_path)
+        return indexed_code_path
 
     spec_test_name = None
     if spec_path.exists():
@@ -365,9 +384,9 @@ def get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
                 spec_test_name = line.replace("# ", "").replace("Test:", "").strip()
                 break
 
-    if RUNS_DIR.exists():
+    if runs_dir.exists():
         run_dirs = sorted(
-            [d for d in RUNS_DIR.iterdir() if d.is_dir()], key=lambda x: os.path.getmtime(x), reverse=True
+            [d for d in runs_dir.iterdir() if d.is_dir()], key=lambda x: os.path.getmtime(x), reverse=True
         )[:100]
 
         for r_dir in run_dirs:
@@ -388,7 +407,7 @@ def get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
                         export = json.loads(export_file.read_text())
                         path_str = export.get("testFilePath")
                         if path_str:
-                            candidate = BASE_DIR / path_str
+                            candidate = base_dir / path_str
                             if not candidate.exists():
                                 candidate = r_dir / path_str
                             if candidate.exists():
@@ -408,11 +427,11 @@ def get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
             f"tests/generated/{test_slug}.spec.ts",
         ]
         for c in candidates:
-            if (BASE_DIR / c).exists():
-                try_code_path = str(BASE_DIR / c)
+            if (base_dir / c).exists():
+                try_code_path = str(base_dir / c)
                 break
 
-    _cache_code_path(spec_name, try_code_path)
+    _cache_code_path(cache_key, try_code_path)
     return try_code_path
 
 

@@ -23,6 +23,7 @@ from orchestrator.api.models_db import (
 from orchestrator.api.models_db import (
     TestRun as DBTestRun,
 )
+from orchestrator.api.spec_files import build_generated_test_index, resolve_generated_code_path
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,14 @@ def _get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
     try_code_path = _get_try_code_path_fast(spec_path)
     if try_code_path:
         return try_code_path
+
+    indexed_code_path = resolve_generated_code_path(
+        spec_path,
+        build_generated_test_index(BASE_DIR, RUNS_DIR),
+        BASE_DIR,
+    )
+    if indexed_code_path:
+        return indexed_code_path
 
     # Extract test name from spec content for fuzzy matching
     spec_test_name: str | None = None
@@ -172,9 +181,10 @@ def select_regression_specs(config: BatchConfig, session: Session) -> list[str]:
     if config.spec_names:
         spec_names_to_run = list(config.spec_names)
     elif config.automated_only:
+        generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
         if SPECS_DIR.exists():
             for f in SPECS_DIR.glob("**/*.md"):
-                code_path = _get_try_code_path_fast(f)
+                code_path = resolve_generated_code_path(f, generated_test_index, BASE_DIR)
                 if code_path:
                     spec_names_to_run.append(str(f.relative_to(SPECS_DIR)))
 
@@ -190,11 +200,12 @@ def select_regression_specs(config: BatchConfig, session: Session) -> list[str]:
 
     # Apply automated_only filter even when explicit spec_names were given
     if config.automated_only and config.spec_names:
+        generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
         filtered = []
         for spec_name in spec_names_to_run:
             spec_path = SPECS_DIR / spec_name
             if spec_path.exists():
-                code_path = _get_try_code_path_fast(spec_path)
+                code_path = resolve_generated_code_path(spec_path, generated_test_index, BASE_DIR)
                 if code_path:
                     filtered.append(spec_name)
         spec_names_to_run = filtered
