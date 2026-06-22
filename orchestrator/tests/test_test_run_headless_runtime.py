@@ -109,6 +109,7 @@ def test_execute_run_task_keeps_subprocess_headless_when_direct_headed_request_h
     monkeypatch,
 ):
     monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("HEADLESS", "false")
     monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "false")
     captured_env = {}
