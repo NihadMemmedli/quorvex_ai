@@ -1271,6 +1271,72 @@ def test_agent_worker_cli_args_preserve_supported_sdk_options(monkeypatch, tmp_p
     assert json.loads(args[args.index("--json-schema") + 1]) == {"type": "object"}
 
 
+def test_agent_worker_cli_args_include_mcp_tools_when_config_exists(monkeypatch, tmp_path):
+    from orchestrator.services import agent_worker as worker_module
+
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"playwright-test": {"command": "/bin/echo"}}})
+    )
+    captured: dict[str, list[str]] = {}
+
+    class _Stdout:
+        def readline(self):
+            return b""
+
+        def close(self):
+            return None
+
+    class _FakeProc:
+        pid = 12345
+        returncode = 0
+        stdout = _Stdout()
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["cwd"] = kwargs.get("cwd")
+        return _FakeProc()
+
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.cwd = str(tmp_path)
+    worker._process_lock = threading.Lock()
+    worker._running_processes = {}
+    worker._cancelled_task_ids = set()
+    worker._pause_lock = threading.Lock()
+    worker._paused_task_ids = set()
+    worker._pause_started_at = {}
+    worker._paused_duration_seconds = {}
+    worker._progress_lock = threading.Lock()
+    worker._current_progress = AgentWorker._empty_progress()
+    worker._last_execution_telemetry = {}
+    worker._parse_cli_output = lambda raw: "parsed"
+
+    monkeypatch.setattr(worker_module.subprocess, "Popen", fake_popen)
+
+    result = worker._run_cli_sync(
+        task_id="agent-cli-mcp",
+        prompt="open page",
+        cwd=str(tmp_path),
+        allowed_tools=["Read", "mcp__playwright-test__browser_navigate"],
+        tools=["Read", "mcp__playwright-test__browser_navigate"],
+        permission_mode="bypassPermissions",
+        strict_mcp_config=True,
+    )
+
+    args = captured["args"]
+    assert result == "parsed"
+    assert captured["cwd"] == str(tmp_path)
+    assert args[args.index("--tools") + 1] == "Read,mcp__playwright-test__browser_navigate"
+    assert args[args.index("--allowedTools") + 1] == "Read,mcp__playwright-test__browser_navigate"
+    assert args[args.index("--mcp-config") + 1] == str(tmp_path / ".mcp.json")
+    assert "--strict-mcp-config" in args
+
+
 def test_agent_worker_cli_parser_uses_stream_text_delta_without_result():
     worker = AgentWorker.__new__(AgentWorker)
     raw_output = "\n".join(

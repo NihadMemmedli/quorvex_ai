@@ -2503,6 +2503,14 @@ class AgentWorker:
         with self._progress_lock:
             self._current_progress.update(browser_timeout_diagnostics)
 
+        mcp_config_path = Path(effective_cwd) / ".mcp.json"
+        requested_tool_names = []
+        for tool_source in (
+            effective_allowed_tools,
+            effective_tools if isinstance(effective_tools, list) else [],
+        ):
+            requested_tool_names.extend(str(tool) for tool in tool_source)
+
         # Build CLI command
         cli_args = [
             CLAUDE_CLI_PATH,
@@ -2515,8 +2523,14 @@ class AgentWorker:
         if effective_tools is not None:
             if isinstance(effective_tools, list):
                 builtin_tools = self._builtin_cli_tools(effective_tools)
-                if builtin_tools or effective_tools == []:
-                    cli_args.extend(["--tools", ",".join(builtin_tools)])
+                mcp_tools = [
+                    str(tool)
+                    for tool in effective_tools
+                    if str(tool).startswith("mcp__") and mcp_config_path.exists()
+                ]
+                cli_tools = [*builtin_tools, *mcp_tools]
+                if cli_tools or effective_tools == []:
+                    cli_args.extend(["--tools", ",".join(cli_tools)])
             elif isinstance(effective_tools, dict) and effective_tools.get("preset") == "claude_code":
                 cli_args.extend(["--tools", "default"])
         if effective_allowed_tools:
@@ -2545,13 +2559,6 @@ class AgentWorker:
         if max_turns is not None:
             cli_args.extend(["--max-turns", str(max_turns)])
 
-        mcp_config_path = Path(effective_cwd) / ".mcp.json"
-        requested_tool_names = []
-        for tool_source in (
-            effective_allowed_tools,
-            effective_tools if isinstance(effective_tools, list) else [],
-        ):
-            requested_tool_names.extend(str(tool) for tool in tool_source)
         if mcp_config_path.exists():
             self._validate_mcp_config(mcp_config_path, requested_tool_names)
             cli_args.extend(["--mcp-config", str(mcp_config_path)])

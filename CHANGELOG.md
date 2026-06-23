@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.14] - 2026-06-23
+
+### Fixed
+
+- Register queued-worker MCP browser tools with the Claude CLI when a run-local `.mcp.json` exists, so Service Analyser custom-agent runs can call Playwright MCP tools after deployment.
+
 ## [1.2.13] - 2026-06-23
 
 ### Added
@@ -50,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tiered artifact storage with configurable retention policies
 - CLI mode for direct execution without a database
 
-[Unreleased]: https://github.com/NihadMemmedli/quorvex_ai/compare/v1.2.13...HEAD
+[Unreleased]: https://github.com/NihadMemmedli/quorvex_ai/compare/v1.2.14...HEAD
+[1.2.14]: https://github.com/NihadMemmedli/quorvex_ai/compare/v1.2.13...v1.2.14
 [1.2.13]: https://github.com/NihadMemmedli/quorvex_ai/compare/v1.0.0...v1.2.13
 [1.0.0]: https://github.com/NihadMemmedli/quorvex_ai/releases/tag/v1.0.0
