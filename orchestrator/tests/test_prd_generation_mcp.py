@@ -240,6 +240,33 @@ def test_upload_prd_surfaces_extraction_failure(monkeypatch, tmp_path):
     assert response.json()["detail"] == "AI feature extraction failed for every PRD chunk."
 
 
+def test_upload_prd_surfaces_unexpected_processing_failure_detail(monkeypatch, tmp_path):
+    import orchestrator.services.load_test_lock as load_test_lock
+    import orchestrator.workflows.prd_processor as prd_processor
+
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(prd_api, "get_browser_pool", _fake_get_browser_pool)
+    monkeypatch.setattr(load_test_lock, "check_system_available", _fake_check_system_available)
+
+    class UnexpectedPRDProcessor:
+        def process_prd(self, pdf_path, project_name, target_feature_count=15):
+            raise RuntimeError("metadata write failed after PDF parsing")
+
+    monkeypatch.setattr(prd_processor, "PRDProcessor", UnexpectedPRDProcessor)
+
+    app = FastAPI()
+    app.include_router(prd_api.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/prd/upload",
+        files={"file": ("wetravel-manage-rooms.pdf", b"%PDF-1.4\n", "application/pdf")},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "PRD upload failed unexpectedly: metadata write failed after PDF parsing"
+
+
 @pytest.mark.asyncio
 async def test_list_projects_marks_empty_metadata_as_stale(monkeypatch, tmp_path):
     monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)

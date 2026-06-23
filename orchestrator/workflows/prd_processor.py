@@ -2,13 +2,13 @@
 PRD Processor Workflow - Converts PDF PRDs to structured features and chunks
 """
 
-import asyncio
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
-import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +22,6 @@ import logging
 import httpx
 
 from orchestrator.services.ai_runtime_config import RuntimeAISelection, resolve_model, resolve_runtime_ai_selection
-from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils.string_utils import slugify
 
 logger = logging.getLogger(__name__)
@@ -33,6 +32,7 @@ PRD_MISSING_CREDENTIALS_MESSAGE = (
     "or configure a Claude Code subscription OAuth token in Settings, then use Test connection "
     "before uploading the PRD again."
 )
+PRD_PARSE_VERSION_MARKER = "<!-- quorvex-prd-parser:2 -->"
 
 
 @dataclass
@@ -55,9 +55,10 @@ class PRDProcessorConfig:
     min_requirements_per_feature: int = 1  # Filter features with fewer requirements
 
     # Chunk sizes (in characters, ~4 chars = 1 token)
-    extraction_chunk_size: int = 40000  # chars for LLM extraction
+    extraction_chunk_size: int = 16000  # chars for LLM extraction
     storage_chunk_size: int = 6000  # chars (~1500 tokens) for vector store
     overlap_size: int = 2000  # chars overlap between chunks
+    ai_extraction_timeout_seconds: float = 420.0  # leave time for fallback/enrichment before upload timeout
 
     # Semantic matching
     semantic_similarity_threshold: float = 0.3
@@ -179,52 +180,150 @@ class _PRDExtractionClient:
 
 
 class _PRDAgentExtractionClient:
-    """Synchronous JSON-completion client backed by the configured agent runtime."""
+    """Synchronous JSON-completion client backed by Claude Code direct execution.
+
+    PRD extraction is a plain markdown-to-JSON task. It must not go through the
+    Redis agent queue because uploads run inside worker threads and the queue path
+    can bind asyncio primitives to the wrong event loop. A short-lived subprocess
+    gives Claude Code a clean event loop and keeps this path isolated from queued
+    browser/planner agents.
+    """
+
+    max_parallel_requests = 2
 
     def __init__(self, env_vars: dict[str, str] | None):
         self.env_vars = env_vars
 
     def complete_json(self, prompt: str) -> str:
-        runner = AgentRunner(
-            timeout_seconds=300,
-            allowed_tools=[],
-            log_tools=False,
-            model_tier="deep",
-            env_vars=self.env_vars,
-        )
-        result = _run_agent_sync(runner.run(prompt))
-        if not result or not getattr(result, "success", False):
-            error = getattr(result, "error", None) or "Claude Code returned no successful result"
+        result = self._run_claude_code_subprocess(prompt)
+        if not result or not result.get("success"):
+            for value in (result or {}).get("output", ""), (result or {}).get("error", ""):
+                payload = self._valid_json_text(value)
+                if payload:
+                    return payload
+
+            error = (result or {}).get("error") or "Claude Code returned no successful result"
             raise PRDProcessingError(
                 "Claude Code PRD extraction failed. Check the Claude Code CLI, subscription login, "
                 f"and OAuth token configuration in Settings. Details: {error}"
             )
-        text = getattr(result, "output", "") or ""
+        text = result.get("output", "") or ""
         if not text.strip():
             raise PRDProcessingError("Claude Code PRD extraction returned an empty response.")
         return text
 
+    def _run_claude_code_subprocess(self, prompt: str) -> dict[str, Any]:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        env = os.environ.copy()
+        if self.env_vars:
+            env.update({key: str(value) for key, value in self.env_vars.items()})
+        env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}".rstrip(":")
+        env["USE_AGENT_QUEUE"] = "false"
+        env.setdefault("NO_COLOR", "1")
 
-def _run_agent_sync(coro):
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result: dict[str, Any] = {}
-
-    def _target() -> None:
+        cli_path = self._resolve_claude_cli(repo_root)
+        timeout = int(env.get("PRD_CLAUDE_CODE_TIMEOUT_SECONDS", "300") or "300")
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "features": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "requirements": {"type": "array", "items": {"type": "string"}},
+                            "merged_from": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["name", "description", "requirements"],
+                    },
+                }
+            },
+            "required": ["features"],
+        }
+        args = [
+            cli_path,
+            "--print",
+            "--output-format",
+            "json",
+            "--input-format",
+            "text",
+            "--json-schema",
+            json.dumps(schema, separators=(",", ":")),
+            "--permission-mode",
+            "dontAsk",
+            "--tools",
+            "none",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+        ]
+        model = str(env.get("QUORVEX_LLM_DEEP_MODEL") or env.get("ANTHROPIC_DEFAULT_OPUS_MODEL") or "").strip()
+        if model:
+            args.extend(["--model", model])
         try:
-            result["value"] = asyncio.run(coro)
-        except BaseException as exc:  # pragma: no cover - re-raised below
-            result["error"] = exc
+            completed = subprocess.run(
+                args,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                cwd=str(repo_root),
+                env=env,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PRDProcessingError(f"Claude Code PRD extraction timed out after {timeout}s") from exc
 
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join()
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
+        output = (completed.stdout or "").strip()
+        error = (completed.stderr or "").strip()
+        if completed.returncode == 0 and output:
+            try:
+                wrapper = json.loads(output)
+                structured_output = wrapper.get("structured_output") if isinstance(wrapper, dict) else None
+                if structured_output is not None:
+                    output = json.dumps(structured_output, ensure_ascii=False)
+                elif isinstance(wrapper, dict) and isinstance(wrapper.get("result"), str):
+                    output = wrapper["result"]
+            except json.JSONDecodeError:
+                pass
+        return {
+            "success": completed.returncode == 0 and bool(output),
+            "output": output,
+            "error": error or (f"Claude Code CLI exited with {completed.returncode}" if completed.returncode else None),
+            "error_type": None if completed.returncode == 0 else "ClaudeCodeCLIError",
+            "timed_out": False,
+            "cancelled": False,
+        }
+
+    @staticmethod
+    def _resolve_claude_cli(repo_root: Path) -> str:
+        configured = os.environ.get("CLAUDE_CODE_CLI_PATH", "").strip()
+        candidates = [
+            Path(configured).expanduser() if configured else None,
+            shutil.which("claude"),
+            repo_root / "node_modules" / ".bin" / "claude",
+            repo_root / "web" / "node_modules" / ".bin" / "claude",
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(candidate)
+            if path.exists() and os.access(path, os.X_OK):
+                return str(path)
+        raise PRDProcessingError("Claude Code CLI was not found in PATH or node_modules.")
+
+    @staticmethod
+    def _valid_json_text(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return json.dumps(_extract_json_payload(text), ensure_ascii=False)
+        except Exception:
+            return None
 
 
 def _env_value(env_vars: dict[str, str] | None, key: str) -> str:
@@ -290,6 +389,15 @@ def _feature_items_from_payload(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _feature_slug(name: str, index: int | None = None) -> str:
+    slug = slugify(name)
+    if slug:
+        return slug
+    if index is not None:
+        return f"feature-{index + 1:03d}"
+    return "feature"
+
+
 class PRDProcessor:
     # Base directory (project root, two levels up from this file)
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -306,6 +414,7 @@ class PRDProcessor:
 
         # Use provided config or defaults
         self.config = config or PRDProcessorConfig()
+        self._last_extraction_status: dict[str, Any] = {"mode": "not_started", "status": "not_started"}
 
     def process_prd(
         self, pdf_path: str, project_name: str | None = None, target_feature_count: int | None = None
@@ -364,9 +473,21 @@ class PRDProcessor:
         if not chunks:
             raise PRDProcessingError("PRD chunking produced zero searchable chunks. No project metadata was saved.")
 
-        # 5. Store in ChromaDB
+        # 5. Store in ChromaDB. Retrieval is useful, but metadata/features are the source of truth.
         logger.info("Storing vectors...")
-        self._store_chunks(chunks, project_name)
+        retrieval_indexing = {"status": "completed"}
+        try:
+            store_result = self._store_chunks(chunks, project_name)
+            if isinstance(store_result, dict):
+                retrieval_indexing = store_result
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            logger.error("PRD vector indexing failed; continuing with metadata-only import: %s", exc, exc_info=True)
+            retrieval_indexing = {
+                "status": "degraded",
+                "error": _sanitize_provider_error(str(exc)),
+            }
 
         # 6. Save final metadata with features
         metadata = {
@@ -377,9 +498,11 @@ class PRDProcessor:
             "config": {
                 "target_feature_count": self.config.target_feature_count,
                 "use_semantic_enrichment": self.config.use_semantic_enrichment,
+                "extraction": self._last_extraction_status,
+                "retrieval_indexing": retrieval_indexing,
             },
         }
-        (project_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+        (project_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
         logger.info(f"Successfully processed PRD: {project_name} ({len(features)} features)")
         return metadata
@@ -394,8 +517,11 @@ class PRDProcessor:
         # Check if already parsed
         target_md = output_dir / "content.md"
         if target_md.exists() and target_md.stat().st_size > 100:
-            logger.info("PDF already parsed, reusing existing markdown.")
-            return target_md
+            existing = target_md.read_text(encoding="utf-8", errors="ignore")
+            if PRD_PARSE_VERSION_MARKER in existing:
+                logger.info("PDF already parsed with current parser, reusing existing markdown.")
+                return target_md
+            logger.info("Existing parsed markdown is stale, reparsing PDF with table-aware parser.")
 
         try:
             import pdfplumber
@@ -407,7 +533,7 @@ class PRDProcessor:
 
         logger.info("Extracting text from PDF using pdfplumber...")
 
-        markdown_content = []
+        markdown_content = [PRD_PARSE_VERSION_MARKER, ""]
 
         try:
             with pdfplumber.open(str(pdf_path)) as pdf:
@@ -417,14 +543,12 @@ class PRDProcessor:
                 for i, page in enumerate(pdf.pages):
                     page_num = i + 1
 
+                    markdown_content.append(f"\n\n<!-- page:{page_num} -->\n\n")
+
                     # Extract text
                     text = page.extract_text() or ""
 
                     if text.strip():
-                        # Add page separator for long documents
-                        if page_num > 1:
-                            markdown_content.append("\n\n---\n\n")
-
                         # Try to detect headings (lines that are short and possibly bold/larger)
                         lines = text.split("\n")
                         processed_lines = []
@@ -450,6 +574,10 @@ class PRDProcessor:
 
                         markdown_content.append("\n".join(processed_lines))
 
+                    table_markdown = self._extract_page_tables_markdown(page, page_num)
+                    if table_markdown:
+                        markdown_content.append(table_markdown)
+
                     # Progress indicator
                     if page_num % 10 == 0:
                         logger.info(f"  Processed {page_num}/{total_pages} pages...")
@@ -469,6 +597,49 @@ class PRDProcessor:
         except Exception as e:
             raise RuntimeError(f"Failed to parse PDF: {str(e)}")
 
+    def _extract_page_tables_markdown(self, page: Any, page_num: int) -> str:
+        """Extract pdfplumber tables as markdown to preserve row/column requirement structure."""
+        try:
+            tables = page.extract_tables() or []
+        except Exception as exc:
+            logger.debug("Table extraction failed for page %s: %s", page_num, exc)
+            return ""
+
+        rendered_tables: list[str] = []
+        for table_index, rows in enumerate(tables, start=1):
+            table_md = self._markdown_table(rows)
+            if table_md:
+                rendered_tables.append(f"\n\n### Page {page_num} Table {table_index}\n\n{table_md}\n")
+        return "\n".join(rendered_tables)
+
+    @staticmethod
+    def _markdown_table(rows: list[list[Any]]) -> str:
+        cleaned_rows: list[list[str]] = []
+        for row in rows or []:
+            cleaned = [re.sub(r"\s+", " ", str(cell or "").strip()) for cell in row or []]
+            if any(cleaned):
+                cleaned_rows.append(cleaned)
+        if len(cleaned_rows) < 2:
+            return ""
+
+        width = max(len(row) for row in cleaned_rows)
+        normalized = [row + [""] * (width - len(row)) for row in cleaned_rows]
+        header = normalized[0]
+        if not any(header):
+            header = [f"Column {index + 1}" for index in range(width)]
+        body = normalized[1:]
+
+        def escape_cell(value: str) -> str:
+            return value.replace("|", "\\|")
+
+        lines = [
+            "| " + " | ".join(escape_cell(cell) for cell in header) + " |",
+            "| " + " | ".join("---" for _ in header) + " |",
+        ]
+        for row in body:
+            lines.append("| " + " | ".join(escape_cell(cell) for cell in row) + " |")
+        return "\n".join(lines)
+
     def _extract_features_with_llm(self, markdown_path: Path) -> list[Feature]:
         """
         Use the Settings-backed runtime (Map-Reduce) to intelligently extract features from potentially large PRD content.
@@ -480,51 +651,96 @@ class PRDProcessor:
         """
         content = markdown_path.read_text()
         client = self._create_prd_ai_client()
+        extraction_mode = "claude_code_direct" if isinstance(client, _PRDAgentExtractionClient) else "provider_json"
+        self._last_extraction_status = {
+            "mode": extraction_mode,
+            "status": "running",
+            "chunk_count": 0,
+            "raw_feature_count": 0,
+            "failure_count": 0,
+        }
 
-        # 1. Split content into logical chunks (approx 12k tokens / 50k chars to be safe)
-        # using our existing split helper but with larger size for LLM context
-        chunk_size_chars = 40000
-
-        chunks = []
-        if len(content) <= chunk_size_chars:
-            chunks.append(content)
-        else:
-            chunks = self._split_with_overlap(
-                content, max_tokens=10000, overlap_tokens=500
-            )  # helper uses 1 tok ~ 4 chars
+        # 1. Split content into configured, structure-aware chunks. Keep table rows
+        # together so table-heavy PRDs remain intelligible to the extractor.
+        extraction_chunk_size = self.config.extraction_chunk_size
+        if isinstance(client, _PRDAgentExtractionClient):
+            extraction_chunk_size = max(extraction_chunk_size, 20000)
+        chunks = self._split_prd_content_for_extraction(content, chunk_size=extraction_chunk_size)
 
         logger.info(f"Split PRD into {len(chunks)} chunks for processing.")
+        self._last_extraction_status["chunk_count"] = len(chunks)
 
         all_raw_features = []
         extraction_failures: list[str] = []
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
         # 2. Map Phase: Extract from each chunk logic parallelized
         logger.info(f"Starting parallel processing of {len(chunks)} chunks...")
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        max_workers = min(getattr(client, "max_parallel_requests", 5), max(1, len(chunks)))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        pending = set()
+        try:
             future_to_index = {
                 executor.submit(self._extract_chunk_features, client, chunk): i for i, chunk in enumerate(chunks)
             }
+            pending = set(future_to_index)
+            deadline = time.monotonic() + max(0.01, float(self.config.ai_extraction_timeout_seconds))
 
-            for future in as_completed(future_to_index):
-                i = future_to_index[future]
-                try:
-                    chunk_features = future.result()
-                    if chunk_features:
-                        all_raw_features.extend(chunk_features)
-                        logger.info(f"Chunk {i + 1} processed successfully ({len(chunk_features)} features).")
-                    else:
-                        logger.info(f"Chunk {i + 1} returned no features.")
-                except Exception as e:
-                    extraction_failures.append(f"chunk {i + 1}: {e}")
-                    logger.error(f"Error extracting from chunk {i + 1}: {e}")
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                done, pending = wait(pending, timeout=min(5.0, remaining), return_when=FIRST_COMPLETED)
+                for future in done:
+                    i = future_to_index[future]
+                    try:
+                        chunk_features = future.result()
+                        if chunk_features:
+                            all_raw_features.extend(chunk_features)
+                            logger.info(f"Chunk {i + 1} processed successfully ({len(chunk_features)} features).")
+                        else:
+                            logger.info(f"Chunk {i + 1} returned no features.")
+                    except Exception as e:
+                        extraction_failures.append(f"chunk {i + 1}: {e}")
+                        logger.error(f"Error extracting from chunk {i + 1}: {e}")
+
+            if pending:
+                timed_out = sorted(future_to_index[future] + 1 for future in pending)
+                extraction_failures.append(f"AI extraction timed out for chunks: {timed_out}")
+                logger.warning(
+                    "AI PRD extraction exceeded %.1fs with %s chunk(s) still pending; using available results or fallback.",
+                    self.config.ai_extraction_timeout_seconds,
+                    len(pending),
+                )
+                for future in pending:
+                    future.cancel()
+        finally:
+            executor.shutdown(wait=not pending, cancel_futures=True)
 
         logger.info(f"Collected {len(all_raw_features)} raw feature candidates.")
+        self._last_extraction_status["raw_feature_count"] = len(all_raw_features)
+        self._last_extraction_status["failure_count"] = len(extraction_failures)
 
         # 3. Reduce Phase: Merge and Deduplicate
         if not all_raw_features:
+            fallback_features = self._extract_features_deterministically(content)
+            if fallback_features:
+                self._last_extraction_status = {
+                    **self._last_extraction_status,
+                    "mode": "deterministic_fallback",
+                    "status": "degraded",
+                    "reason": "AI extraction returned no usable features.",
+                    "feature_count": len(fallback_features),
+                    "failures": extraction_failures[:5],
+                }
+                logger.warning(
+                    "AI feature extraction returned no usable features; using deterministic fallback (%s features).",
+                    len(fallback_features),
+                )
+                return fallback_features
             if extraction_failures and len(extraction_failures) == len(chunks):
                 raise PRDProcessingError(
                     "AI feature extraction failed for every PRD chunk. "
@@ -535,7 +751,11 @@ class PRDProcessor:
                 "Check that the uploaded PDF contains product requirements and that the configured model returns JSON features."
             )
 
-        final_features_data = self._merge_features(client, all_raw_features)
+        merge_status = "skipped_single_chunk"
+        final_features_data = all_raw_features
+        if len(chunks) > 1:
+            final_features_data = self._merge_features(client, all_raw_features)
+            merge_status = "failed_used_raw_features" if final_features_data is all_raw_features else "completed"
 
         # Validate and re-consolidate if too many features
         if len(final_features_data) > self.config.max_feature_count:
@@ -546,14 +766,22 @@ class PRDProcessor:
 
         # Convert to Feature objects
         features = []
-        for f in final_features_data:
-            name = f.get("name", "Unknown")
+        for index, f in enumerate(final_features_data):
+            name = str(f.get("name") or "").strip()
+            if not name:
+                continue
+            requirements = f.get("requirements", [])
+            if not isinstance(requirements, list):
+                requirements = [str(requirements)] if requirements else []
+            cleaned_requirements = [str(req).strip() for req in requirements if str(req).strip()]
+            if len(cleaned_requirements) < self.config.min_requirements_per_feature:
+                continue
             features.append(
                 Feature(
                     name=name,
-                    slug=slugify(name),
+                    slug=_feature_slug(name, index),
                     content=f.get("description", ""),
-                    requirements=f.get("requirements", []),
+                    requirements=cleaned_requirements,
                     merged_from=f.get("merged_from", []),  # Track consolidated sub-features
                 )
             )
@@ -561,12 +789,38 @@ class PRDProcessor:
         logger.info(f"Final consolidated feature count: {len(features)}")
 
         if not features:
+            fallback_features = self._extract_features_deterministically(content)
+            if fallback_features:
+                self._last_extraction_status = {
+                    **self._last_extraction_status,
+                    "mode": "deterministic_fallback",
+                    "status": "degraded",
+                    "reason": "AI consolidation returned no usable features.",
+                    "feature_count": len(fallback_features),
+                    "failures": extraction_failures[:5],
+                }
+                logger.warning(
+                    "AI feature consolidation returned no usable features; using deterministic fallback (%s features).",
+                    len(fallback_features),
+                )
+                return fallback_features
             raise PRDProcessingError(
                 "AI feature consolidation returned zero features. "
                 "Check the configured Settings model and retry the PRD upload."
             )
 
         # Note: Enrichment is now done in process_prd() after this method returns
+        extraction_status = "completed" if not extraction_failures else "partial"
+        if merge_status == "failed_used_raw_features":
+            extraction_status = "partial"
+        self._last_extraction_status = {
+            **self._last_extraction_status,
+            "mode": extraction_mode,
+            "status": extraction_status,
+            "merge_status": merge_status,
+            "feature_count": len(features),
+            "failures": extraction_failures[:5],
+        }
         return features
 
     def _runtime_env_vars(self) -> dict[str, str]:
@@ -600,11 +854,21 @@ class PRDProcessor:
     def _extract_chunk_features(self, client: "_PRDExtractionClient", text: str) -> list[dict[str, Any]]:
         """Map step: Extract features from a single text chunk."""
         target = self.config.target_feature_count
-        prompt = f"""Analyze this section of a PRD and extract HIGH-LEVEL TESTABLE FEATURES.
+        prompt = f"""Analyze this section of a PRD and extract HIGH-LEVEL TESTABLE FEATURES and TESTABLE REQUIREMENTS.
+
+The PRD may be written in any language, including Azerbaijani, Turkish, Russian, or mixed English.
+Preserve the source language of feature names and requirements when that language carries the
+product/legal meaning. Do not translate source-language requirements unless needed for clarity.
+You must still return strict JSON only.
 
 IMPORTANT GUIDELINES:
 - Extract FEATURES, not individual requirements or user stories
 - A feature is a MAJOR FUNCTIONAL AREA (e.g., "User Authentication", "Shopping Cart", "AI Assistant")
+- Extract every functional requirement from markdown tables. Each meaningful table row can become a requirement.
+- Preserve Azerbaijani legal/domain terms exactly when present, such as müraciət, şəhadətnamə, xidmət, sənəd, məlumat.
+- Use page markers like <!-- page:3 --> and table headings as source context, but do not include raw page marker syntax in requirement text.
+- Do not drop requirements just to match the target feature count. The target controls feature grouping, not requirement coverage.
+- Do not hallucinate behavior that is not present in the chunk.
 - Group related functionality under ONE feature:
   * All login/logout/password reset → "User Authentication"
   * All section editing/deletion/reorder → "Section Management"
@@ -631,7 +895,7 @@ Return JSON: {{ "features": [...] }}
 Each feature object must have:
 - "name": High-level feature name (e.g., "Content Library", not "Library Save Button")
 - "description": What this feature area does (1-2 sentences)
-- "requirements": List of specific testable requirements within this feature
+- "requirements": List of specific testable requirements within this feature, preserving source language
 
 Ignore generic intro text. Focus on functional requirements.
 Return ONLY valid JSON."""
@@ -655,6 +919,9 @@ Return ONLY valid JSON."""
 
         prompt = f"""You are a Product Manager consolidating features from a PRD.
 
+The input may contain non-English feature names and requirements. Preserve source-language
+requirements and domain terms while consolidating. Return strict JSON only.
+
 TASK: Merge and consolidate {len(raw_features)} extracted features into approximately {target} high-level features.
 
 RULES FOR HIERARCHICAL MERGING:
@@ -665,11 +932,11 @@ RULES FOR HIERARCHICAL MERGING:
    - "Itinerary List" + "Itinerary Search" + "Itinerary Filters" → "Itinerary Management"
    - "Book Now Button" + "Connect Trip" + "Trip Connection" → "Booking Integration"
 
-2. **Combine requirements**: Merge all requirement lists from consolidated features (deduplicate similar ones)
+2. **Preserve requirement coverage**: Merge all requirement lists from consolidated features and deduplicate only near-identical requirements. Do not drop unique requirements to hit the target count.
 
 3. **Track merged sources**: For each output feature, list which input features were merged into it
 
-4. **Target count**: Aim for approximately {target} features (±5 is acceptable)
+4. **Target count**: Aim for approximately {target} features (±5 is acceptable), but preserving all unique requirements is more important than exact feature count.
 
 5. **Naming conventions**:
    - Use concise, professional names
@@ -703,11 +970,213 @@ Each feature must have:
             logger.info(f"Merge completed successfully. Returning {len(final_features)} consolidated features.")
 
             return final_features
-        except PRDProcessingError:
-            raise
+        except PRDProcessingError as e:
+            logger.error(f"Merge step PRD processing error: {e}")
+            return raw_features
         except Exception as e:
             logger.error(f"Merge step error: {e}")
             return raw_features  # Fallback to raw list if merge fails
+
+    def _extract_features_deterministically(self, content: str) -> list[Feature]:
+        """Best-effort markdown extractor used only when AI extraction returns no usable features."""
+        sections: list[tuple[str, list[str]]] = []
+        current_title = "Document Requirements"
+        current_lines: list[str] = []
+
+        def flush_section() -> None:
+            nonlocal current_lines
+            if any(line.strip() for line in current_lines):
+                sections.append((current_title, current_lines))
+            current_lines = []
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line:
+                current_lines.append("")
+                continue
+
+            heading = self._fallback_heading_from_line(line)
+            if heading:
+                flush_section()
+                current_title = heading
+                continue
+
+            current_lines.append(line)
+
+        flush_section()
+
+        features: list[Feature] = []
+        seen_slugs: set[str] = set()
+        for title, lines in sections:
+            requirements = self._fallback_requirements_from_lines(lines)
+            if not requirements:
+                continue
+
+            name = self._fallback_feature_name(title, requirements)
+            slug = _feature_slug(name, len(features))
+            if slug in seen_slugs:
+                slug = f"{slug}-{len(features) + 1:03d}"
+            seen_slugs.add(slug)
+
+            features.append(
+                Feature(
+                    name=name,
+                    slug=slug,
+                    content="\n".join(requirements[:20]),
+                    requirements=requirements,
+                    merged_from=[],
+                    category="deterministic_fallback",
+                )
+            )
+
+            if len(features) >= self.config.max_feature_count:
+                break
+
+        if features:
+            return features
+
+        global_requirements = self._fallback_requirements_from_lines(content.splitlines())
+        if not global_requirements:
+            return []
+
+        return [
+            Feature(
+                name="Document Requirements",
+                slug="document-requirements",
+                content="\n".join(global_requirements[:20]),
+                requirements=global_requirements,
+                merged_from=[],
+                category="deterministic_fallback",
+            )
+        ]
+
+    def _fallback_heading_from_line(self, line: str) -> str | None:
+        markdown_heading = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        if markdown_heading:
+            return self._clean_fallback_text(markdown_heading.group(1))
+
+        cleaned = self._clean_fallback_text(line.rstrip(":"))
+        if len(cleaned) > 120:
+            return None
+
+        lower = cleaned.lower()
+        heading_terms = {
+            "requirements",
+            "requirement",
+            "tələblər",
+            "tələb",
+            "use case",
+            "iş axını",
+            "is axini",
+            "workflow",
+            "scenario",
+            "ssenari",
+            "xidmət",
+            "xidmet",
+            "api",
+            "functional",
+            "funksional",
+        }
+        if line.endswith(":") and any(term in lower for term in heading_terms):
+            return cleaned
+        if re.match(r"^\d+(?:\.\d+)*\.?\s+\S", cleaned) and any(term in lower for term in heading_terms):
+            return cleaned
+        return None
+
+    def _fallback_requirements_from_lines(self, lines: list[str]) -> list[str]:
+        requirements: list[str] = []
+        seen: set[str] = set()
+
+        for raw_line in lines:
+            for candidate in self._fallback_requirement_candidates(raw_line):
+                cleaned = self._clean_fallback_text(candidate)
+                if len(cleaned) < 12 or len(cleaned) > 600:
+                    continue
+                if not self._looks_like_requirement(cleaned):
+                    continue
+                key = cleaned.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                requirements.append(cleaned)
+
+        return requirements
+
+    def _fallback_requirement_candidates(self, line: str) -> list[str]:
+        stripped = line.strip()
+        if not stripped:
+            return []
+
+        if "|" in stripped:
+            cells = [self._clean_fallback_text(cell) for cell in stripped.strip("|").split("|")]
+            cells = [cell for cell in cells if cell and not re.fullmatch(r"[-:\s]+", cell)]
+            if len(cells) >= 2:
+                return [" - ".join(cells)]
+
+        return [re.sub(r"^\s*(?:[-*•]+|\d+(?:\.\d+)*[.)])\s*", "", stripped)]
+
+    def _looks_like_requirement(self, text: str) -> bool:
+        lower = text.lower()
+        requirement_terms = {
+            "requirement",
+            "requirements",
+            "shall",
+            "must",
+            "should",
+            "user can",
+            "users can",
+            "system can",
+            "acceptance criteria",
+            "business rule",
+            "use case",
+            "workflow",
+            "scenario",
+            "api",
+            "service",
+            "tələb",
+            "tələblər",
+            "istifadəçi",
+            "sistem",
+            "olmalıdır",
+            "edilməlidir",
+            "bilməlidir",
+            "mümkün olmalıdır",
+            "iş axını",
+            "ssenari",
+            "xidmət",
+            "müraciət",
+            "şəhadətnam",
+            "doğum",
+            "məlumat",
+            "sənəd",
+        }
+        return any(term in lower for term in requirement_terms)
+
+    def _fallback_feature_name(self, title: str, requirements: list[str]) -> str:
+        cleaned_title = self._clean_fallback_text(title)
+        generic_titles = {
+            "requirements",
+            "requirement",
+            "tələblər",
+            "tələb",
+            "functional requirements",
+            "funksional tələblər",
+            "document requirements",
+        }
+        if cleaned_title and cleaned_title.lower() not in generic_titles:
+            return cleaned_title[:100]
+
+        first_requirement = requirements[0] if requirements else "Document Requirements"
+        for separator in [":", " - ", ". "]:
+            if separator in first_requirement:
+                candidate = first_requirement.split(separator, 1)[0]
+                if 8 <= len(candidate) <= 100:
+                    return self._clean_fallback_text(candidate)
+        return cleaned_title or "Document Requirements"
+
+    @staticmethod
+    def _clean_fallback_text(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value).strip().strip("#*_`~-")).strip()
 
     def _get_embeddings(self, client, texts: list[str]) -> list[list[float]]:
         """Get embeddings for a list of texts using OpenAI."""
@@ -942,10 +1411,97 @@ Each feature must have:
         # Approx chars
         chunk_size = max_tokens * 4
         overlap_size = overlap_tokens * 4
+        return self._split_text_by_chars(text, chunk_size=chunk_size, overlap_size=overlap_size)
 
+    def _split_prd_content_for_extraction(self, text: str, chunk_size: int | None = None) -> list[str]:
+        """Split parsed PRD markdown without cutting tables or page markers in half."""
+        blocks = self._markdown_blocks(text)
+        if not blocks:
+            return []
+
+        chunks: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        budget = max(1000, int(chunk_size or self.config.extraction_chunk_size or 0))
+
+        def flush() -> None:
+            nonlocal current, current_size
+            if current:
+                chunks.append("\n\n".join(current).strip())
+            current = []
+            current_size = 0
+
+        for block in blocks:
+            block_size = len(block)
+            if current and current_size + block_size + 2 > budget:
+                flush()
+
+            if block_size > budget:
+                flush()
+                chunks.extend(
+                    self._split_text_by_chars(
+                        block,
+                        chunk_size=budget,
+                        overlap_size=min(self.config.overlap_size, budget // 5),
+                    )
+                )
+                continue
+
+            current.append(block)
+            current_size += block_size + 2
+
+        flush()
+        return [chunk for chunk in chunks if chunk.strip()]
+
+    @staticmethod
+    def _markdown_blocks(text: str) -> list[str]:
+        blocks: list[str] = []
+        paragraph: list[str] = []
+        table: list[str] = []
+
+        def flush_paragraph() -> None:
+            nonlocal paragraph
+            if paragraph:
+                blocks.append("\n".join(paragraph).strip())
+            paragraph = []
+
+        def flush_table() -> None:
+            nonlocal table
+            if table:
+                blocks.append("\n".join(table).strip())
+            table = []
+
+        for raw_line in text.splitlines():
+            line = raw_line.rstrip()
+            is_table_line = line.lstrip().startswith("|") and "|" in line.rstrip().rstrip("|")
+            if is_table_line:
+                flush_paragraph()
+                table.append(line)
+                continue
+
+            flush_table()
+            if not line.strip():
+                flush_paragraph()
+                continue
+            if line.startswith("<!-- page:") or re.match(r"^#{1,6}\s+", line):
+                flush_paragraph()
+                blocks.append(line.strip())
+                continue
+            paragraph.append(line)
+
+        flush_paragraph()
+        flush_table()
+        return [block for block in blocks if block]
+
+    def _split_text_by_chars(self, text: str, chunk_size: int, overlap_size: int) -> list[str]:
+        """Split text using character budgets while preferring newline boundaries."""
+        chunk_size = max(1000, int(chunk_size or 0))
+        overlap_size = max(0, min(int(overlap_size or 0), chunk_size // 2))
         chunks = []
         start = 0
         text_len = len(text)
+        if text_len == 0:
+            return []
 
         while start < text_len:
             end = min(start + chunk_size, text_len)
@@ -971,7 +1527,7 @@ Each feature must have:
 
         return chunks
 
-    def _store_chunks(self, chunks: list[Chunk], project_name: str):
+    def _store_chunks(self, chunks: list[Chunk], project_name: str) -> dict[str, Any]:
         """
         Store chunks in ChromaDB.
         """
@@ -980,6 +1536,7 @@ Each feature must have:
             from orchestrator.memory import get_memory_manager
 
             manager = get_memory_manager(project_id=project_name)
+            stored = 0
 
             for chunk in chunks:
                 # Assuming add_prd_chunk exists in vector_store (we need to add it next)
@@ -987,11 +1544,18 @@ Each feature must have:
                     manager.vector_store.add_prd_chunk(
                         chunk_id=chunk.id, content=chunk.content, metadata=chunk.metadata
                     )
+                    stored += 1
                 else:
                     logger.warning("add_prd_chunk method not found in VectorStore")
+                    return {
+                        "status": "skipped",
+                        "reason": "Vector store does not support PRD chunk indexing.",
+                    }
+            return {"status": "completed", "stored_chunks": stored}
 
         except ImportError:
             logger.warning("Memory system not available, skipping vector storage")
+            return {"status": "skipped", "reason": "Memory system not available."}
 
 
 if __name__ == "__main__":

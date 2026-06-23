@@ -389,7 +389,9 @@ async def upload_prd(
         raise
     except Exception as e:
         logger.error(f"Failed to upload PRD: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        detail = str(e).strip() or e.__class__.__name__
+        detail = " ".join(detail.split())[:300]
+        raise HTTPException(status_code=500, detail=f"PRD upload failed unexpectedly: {detail}")
     finally:
         if temp_path and temp_path.exists():
             os.remove(temp_path)

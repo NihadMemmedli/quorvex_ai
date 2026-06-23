@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import orchestrator.workflows.prd_processor as prd_processor
-from orchestrator.workflows.prd_processor import PRDProcessingError, PRDProcessor
+from orchestrator.workflows.prd_processor import PRDProcessingError, PRDProcessor, PRDProcessorConfig
 
 
 class FakeHTTPResponse:
@@ -144,23 +145,16 @@ def test_prd_processor_uses_claude_code_subscription_runtime(monkeypatch, tmp_pa
         }
     ]
 
-    class FakeAgentResult:
-        success = True
-        output = json.dumps({"features": response_features})
-
-    class FakeRunner:
-        def __init__(self, **kwargs):
-            captured["kwargs"] = kwargs
-
-        async def run(self, prompt):
-            captured["prompts"].append(prompt)
-            return FakeAgentResult()
-
     def fake_runtime_env_vars(session=None):
         return env_vars
 
+    def fake_claude_subprocess(self, prompt):
+        captured["prompts"].append(prompt)
+        captured["env_vars"] = self.env_vars
+        return {"success": True, "output": json.dumps({"features": response_features})}
+
     monkeypatch.setattr(settings_api, "runtime_env_vars", fake_runtime_env_vars)
-    monkeypatch.setattr(prd_processor, "AgentRunner", FakeRunner)
+    monkeypatch.setattr(prd_processor._PRDAgentExtractionClient, "_run_claude_code_subprocess", fake_claude_subprocess)
     monkeypatch.setattr(
         prd_processor.httpx,
         "post",
@@ -171,11 +165,10 @@ def test_prd_processor_uses_claude_code_subscription_runtime(monkeypatch, tmp_pa
     features = processor._extract_features_with_llm(markdown_path)
 
     assert [feature.name for feature in features] == ["Room Management"]
-    assert captured["kwargs"]["allowed_tools"] == []
-    assert captured["kwargs"]["log_tools"] is False
-    assert captured["kwargs"]["model_tier"] == "deep"
-    assert captured["kwargs"]["env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-1234567890"
-    assert len(captured["prompts"]) >= 2
+    assert captured["env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-1234567890"
+    assert len(captured["prompts"]) == 1
+    assert processor._last_extraction_status["mode"] == "claude_code_direct"
+    assert processor._last_extraction_status["status"] == "completed"
 
 
 def test_prd_processor_claude_code_mode_without_token_is_actionable(monkeypatch, tmp_path):
@@ -229,11 +222,17 @@ def test_prd_processor_missing_settings_api_key_is_actionable(monkeypatch, tmp_p
     assert "No AI API key is configured" in str(excinfo.value)
 
 
-def test_prd_processor_all_chunk_failures_are_actionable(monkeypatch, tmp_path):
+def test_prd_processor_all_chunk_failures_use_deterministic_fallback(monkeypatch, tmp_path):
     from orchestrator.api import settings as settings_api
 
     markdown_path = tmp_path / "content.md"
-    markdown_path.write_text("Users need room inventory, allocation, and package management.")
+    markdown_path.write_text(
+        """
+## Doğum şəhadətnaməsinə müraciət xidməti
+- İstifadəçi doğum şəhadətnaməsinə müraciət yaratmalıdır.
+- Sistem müraciət məlumatlarını yoxlamalıdır.
+"""
+    )
 
     def fake_runtime_env_vars(session=None):
         return {
@@ -250,10 +249,167 @@ def test_prd_processor_all_chunk_failures_are_actionable(monkeypatch, tmp_path):
     monkeypatch.setattr(prd_processor.httpx, "post", fake_post)
     processor = PRDProcessor(prds_dir=str(tmp_path / "prds"))
 
-    with pytest.raises(PRDProcessingError) as excinfo:
-        processor._extract_features_with_llm(markdown_path)
+    features = processor._extract_features_with_llm(markdown_path)
 
-    assert "AI feature extraction failed for every PRD chunk" in str(excinfo.value)
+    assert features
+    assert features[0].category == "deterministic_fallback"
+    assert "müraciət yaratmalıdır" in features[0].requirements[0]
+
+
+def test_prd_processor_splits_long_non_english_prd_with_configured_chunk_size(monkeypatch, tmp_path):
+    markdown_path = tmp_path / "content.md"
+    section = """
+## Doğum şəhadətnaməsinə müraciət xidməti
+- İstifadəçi doğum şəhadətnaməsinə müraciət məlumatlarını daxil etməlidir.
+- Sistem müraciət üzrə API cavabını göstərməlidir.
+"""
+    markdown_path.write_text(section * 220, encoding="utf-8")
+
+    class ChunkCountingClient:
+        def __init__(self):
+            self.extraction_prompts: list[str] = []
+
+        def complete_json(self, prompt):
+            if prompt.startswith("Analyze this section"):
+                self.extraction_prompts.append(prompt)
+                index = len(self.extraction_prompts)
+                return json.dumps(
+                    {
+                        "features": [
+                            {
+                                "name": f"Müraciət xidməti {index}",
+                                "description": "Doğum şəhadətnaməsi müraciətinin emalı.",
+                                "requirements": ["İstifadəçi müraciət məlumatlarını daxil etməlidir."],
+                            }
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "features": [
+                        {
+                            "name": "Doğum şəhadətnaməsinə müraciət xidməti",
+                            "description": "Doğum şəhadətnaməsi müraciətinin emalı.",
+                            "requirements": [
+                                "İstifadəçi müraciət məlumatlarını daxil etməlidir.",
+                                "Sistem müraciət üzrə API cavabını göstərməlidir.",
+                            ],
+                            "merged_from": [],
+                        }
+                    ]
+                }
+            )
+
+    client = ChunkCountingClient()
+    processor = PRDProcessor(
+        prds_dir=str(tmp_path / "prds"),
+        config=PRDProcessorConfig(extraction_chunk_size=12000, overlap_size=1000),
+    )
+    monkeypatch.setattr(processor, "_create_prd_ai_client", lambda: client)
+
+    features = processor._extract_features_with_llm(markdown_path)
+
+    assert len(client.extraction_prompts) >= 3
+    assert features[0].name == "Doğum şəhadətnaməsinə müraciət xidməti"
+    assert features[0].slug
+    assert "İstifadəçi müraciət" in features[0].requirements[0]
+
+
+def test_prd_processor_zero_usable_ai_features_use_deterministic_fallback(monkeypatch, tmp_path):
+    markdown_path = tmp_path / "content.md"
+    markdown_path.write_text(
+        """
+## API tələbləri
+- Sistem müraciət statusu üçün API cavabı qaytarmalıdır.
+- İstifadəçi ssenari üzrə məlumatları görməlidir.
+""",
+        encoding="utf-8",
+    )
+
+    class EmptyRequirementClient:
+        def complete_json(self, prompt):
+            return json.dumps(
+                {
+                    "features": [
+                        {
+                            "name": "API",
+                            "description": "Shell feature without testable requirements.",
+                            "requirements": [],
+                        }
+                    ]
+                }
+            )
+
+    processor = PRDProcessor(prds_dir=str(tmp_path / "prds"))
+    monkeypatch.setattr(processor, "_create_prd_ai_client", lambda: EmptyRequirementClient())
+
+    features = processor._extract_features_with_llm(markdown_path)
+
+    assert features
+    assert features[0].category == "deterministic_fallback"
+    assert "API cavabı" in features[0].requirements[0]
+
+
+def test_prd_processor_preserves_markdown_tables_in_extraction_chunks(tmp_path):
+    processor = PRDProcessor(
+        prds_dir=str(tmp_path / "prds"),
+        config=PRDProcessorConfig(extraction_chunk_size=220, overlap_size=0),
+    )
+    table = processor._markdown_table(
+        [
+            ["Xidmət", "Tələb"],
+            ["Doğum şəhadətnaməsi", "İstifadəçi müraciət yaratmalıdır."],
+            ["API", "Sistem müraciət statusunu qaytarmalıdır."],
+        ]
+    )
+    assert "| Xidmət | Tələb |" in table
+    assert "| Doğum şəhadətnaməsi | İstifadəçi müraciət yaratmalıdır. |" in table
+
+    content = f"""
+<!-- quorvex-prd-parser:2 -->
+<!-- page:1 -->
+## Xidmət cədvəli
+
+{table}
+
+## Digər tələblər
+Sistem əlavə məlumatları yoxlamalıdır.
+"""
+    chunks = processor._split_prd_content_for_extraction(content)
+
+    assert chunks
+    assert any("| Doğum şəhadətnaməsi | İstifadəçi müraciət yaratmalıdır. |" in chunk for chunk in chunks)
+    assert not any("| Xidmət | Tələb |" in chunk and "| API |" not in chunk for chunk in chunks)
+
+
+def test_prd_processor_slow_ai_times_out_to_deterministic_fallback(monkeypatch, tmp_path):
+    markdown_path = tmp_path / "content.md"
+    markdown_path.write_text(
+        """
+## Xidmət tələbləri
+- Sistem müraciət məlumatlarını qəbul etməlidir.
+- İstifadəçi müraciət statusunu görməlidir.
+""",
+        encoding="utf-8",
+    )
+
+    class SlowClient:
+        def complete_json(self, prompt):
+            time.sleep(0.2)
+            return json.dumps({"features": []})
+
+    processor = PRDProcessor(
+        prds_dir=str(tmp_path / "prds"),
+        config=PRDProcessorConfig(extraction_chunk_size=1000, overlap_size=0, ai_extraction_timeout_seconds=0.01),
+    )
+    monkeypatch.setattr(processor, "_create_prd_ai_client", lambda: SlowClient())
+
+    started = time.monotonic()
+    features = processor._extract_features_with_llm(markdown_path)
+
+    assert time.monotonic() - started < 0.15
+    assert features
+    assert features[0].category == "deterministic_fallback"
 
 
 def test_prd_processor_parses_fenced_json_from_zai(monkeypatch, tmp_path):
@@ -361,7 +517,7 @@ def test_process_prd_does_not_write_success_metadata_on_empty_extraction(monkeyp
     pdf_path = tmp_path / "prd.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
     parsed_path = tmp_path / "content.md"
-    parsed_path.write_text("Room Management\nUsers can allocate rooms and manage availability.")
+    parsed_path.write_text("Overview\nThis document introduces the product context without functional statements.")
 
     def fake_runtime_env_vars(session=None):
         return {
@@ -432,3 +588,44 @@ def test_process_prd_writes_non_empty_metadata_with_settings_runtime(monkeypatch
     assert saved_metadata["features"]
     assert saved_metadata["features"][0]["name"] == "Room Management"
     assert saved_metadata["total_chunks"] > 0
+    assert saved_metadata["config"]["extraction"]["status"] == "completed"
+    assert saved_metadata["config"]["extraction"]["mode"] == "provider_json"
+
+
+def test_process_prd_writes_metadata_when_vector_indexing_fails(monkeypatch, tmp_path):
+    class NativeVectorStorePanic(BaseException):
+        pass
+
+    pdf_path = tmp_path / "prd.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    parsed_path = tmp_path / "content.md"
+    parsed_path.write_text("Room Management\nUsers can allocate rooms and manage availability.")
+
+    monkeypatch.setattr(PRDProcessor, "_parse_pdf", lambda self, pdf, output_dir: parsed_path)
+    monkeypatch.setattr(
+        PRDProcessor,
+        "_extract_features_with_llm",
+        lambda self, markdown_path: [
+            prd_processor.Feature(
+                name="Room Management",
+                slug="room-management",
+                content="Users can allocate rooms.",
+                requirements=["Users can allocate rooms."],
+            )
+        ],
+    )
+
+    def fail_store_chunks(self, chunks, project_name):
+        raise NativeVectorStorePanic("embedding endpoint unavailable")
+
+    monkeypatch.setattr(PRDProcessor, "_store_chunks", fail_store_chunks)
+
+    processor = PRDProcessor(prds_dir=str(tmp_path / "prds"))
+    metadata = processor.process_prd(str(pdf_path), "runtime-prd", target_feature_count=8)
+
+    metadata_path = tmp_path / "prds" / "runtime-prd" / "metadata.json"
+    saved_metadata = json.loads(metadata_path.read_text())
+    assert metadata["features"]
+    assert saved_metadata["features"][0]["name"] == "Room Management"
+    assert saved_metadata["config"]["retrieval_indexing"]["status"] == "degraded"
+    assert "embedding endpoint unavailable" in saved_metadata["config"]["retrieval_indexing"]["error"]
