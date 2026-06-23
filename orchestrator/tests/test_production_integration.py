@@ -7,9 +7,9 @@ These tests start the actual API and verify behavior.
 Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_production_integration.py -v
 """
 
+import importlib
 import os
 import sys
-import importlib
 from io import BytesIO
 from pathlib import Path
 
