@@ -403,7 +403,13 @@ async def test_run_captures_claude_sdk_tool_telemetry_when_output_is_malformed(t
         )
 
     agent = ExploratoryAgent()
-    agent.agent_cwd = str(tmp_path / "run-sdk")
+    run_dir = tmp_path / "run-sdk"
+    run_dir.mkdir()
+    (run_dir / ".mcp.json").write_text(
+        '{"mcpServers":{"playwright-test":{"command":"/bin/echo","args":["playwright-mcp"]}}}',
+        encoding="utf-8",
+    )
+    agent.agent_cwd = str(run_dir)
     monkeypatch.setattr(agent, "_run_dir", lambda run_id: tmp_path / run_id)
     monkeypatch.setattr(base_agent_module, "query", fake_query)
     monkeypatch.setattr(
