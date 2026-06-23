@@ -8,6 +8,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const BACKEND_URL = process.env.INTERNAL_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+const PROXY_TIMEOUT_MS = Number(process.env.BACKEND_PROXY_TIMEOUT_MS || process.env.API_TIMEOUT_MS || 620_000);
+
+function createBackendDispatcher(): unknown {
+  try {
+    const requireUndici = eval('require') as NodeRequire;
+    const { Agent } = requireUndici('undici');
+    return new Agent({
+      headersTimeout: PROXY_TIMEOUT_MS,
+      bodyTimeout: PROXY_TIMEOUT_MS,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+const BACKEND_DISPATCHER = createBackendDispatcher();
 
 // Hop-by-hop headers that must not be forwarded by proxies
 const HOP_BY_HOP_HEADERS = [
@@ -24,6 +40,8 @@ async function proxyRequest(request: NextRequest, { params }: { params: Promise<
   const headers = new Headers(request.headers);
   // Remove host header so the backend gets its own host
   headers.delete('host');
+  // The request body is re-materialized below, so let fetch calculate this.
+  headers.delete('content-length');
   // Remove hop-by-hop headers (not valid to forward through a proxy)
   for (const h of HOP_BY_HOP_HEADERS) {
     headers.delete(h);
@@ -37,17 +55,21 @@ async function proxyRequest(request: NextRequest, { params }: { params: Promise<
       ? await request.arrayBuffer()
       : undefined;
 
-    // 620s timeout (slightly longer than nginx proxy_read_timeout of 600s)
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 620_000);
+    const timeoutId = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
 
-    const response = await fetch(targetUrl, {
-      method: request.method,
-      headers,
-      body,
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
+    let response: Response;
+    try {
+      response = await fetch(targetUrl, {
+        method: request.method,
+        headers,
+        body,
+        signal: controller.signal,
+        dispatcher: BACKEND_DISPATCHER,
+      } as RequestInit & { dispatcher?: unknown });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const responseHeaders = new Headers(response.headers);
     // Remove transfer-encoding as Next.js handles this
