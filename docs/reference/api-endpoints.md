@@ -82,6 +82,8 @@ Source: `orchestrator/api/specs.py`
 | PUT | `/specs/{name}/generated-code` | Update generated test code | Optional |
 | GET | `/specs/{name}/info` | Get spec type, test count, categories | Optional |
 | POST | `/specs/split` | Split a multi-test PRD spec into individual specs | Optional |
+| POST | `/specs/split-jobs` | Start a durable multi-test spec split job | Optional |
+| GET | `/specs/split-jobs/{job_id}` | Poll a durable multi-test spec split job | Optional |
 
 ## Spec Metadata
 
@@ -1393,6 +1395,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/specs/register-folder` | `orchestrator/api/specs.py` |
 | POST | `/specs/rename` | `orchestrator/api/specs.py` |
 | POST | `/specs/split` | `orchestrator/api/specs.py` |
+| POST | `/specs/split-jobs` | `orchestrator/api/specs.py` |
+| GET | `/specs/split-jobs/{job_id}` | `orchestrator/api/specs.py` |
 | DELETE | `/specs/{name}` | `orchestrator/api/specs.py` |
 | GET | `/specs/{name}` | `orchestrator/api/specs.py` |
 | PUT | `/specs/{name}` | `orchestrator/api/specs.py` |

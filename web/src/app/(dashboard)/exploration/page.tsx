@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Compass, Plus, Play, Square, Eye, FileText, Clock, Globe, Zap, Activity, X, Loader2, Bot, Terminal, ChevronRight, CheckCircle2, AlertTriangle, RotateCcw, Lock, Settings, Download, Sparkles, ArrowRight, Info, RefreshCw, Scissors, ExternalLink, Edit, Trash2, Save, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { splitSpecWithJob } from '@/lib/spec-split-jobs';
 import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
 import { useJobPoller } from '@/hooks/useJobPoller';
 import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
@@ -1387,22 +1388,12 @@ export default function DiscoveryPage() {
             const specsIndex = specFile.indexOf('/specs/');
             const specName = specsIndex !== -1 ? specFile.substring(specsIndex + 7) : specFile.split('/').slice(-2).join('/');
 
-            const res = await fetch(`${API_BASE}/specs/split`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_name: specName })
-            });
-
-            if (res.ok) {
-                const data = await res.json();
-                setSplitResult(data);
-            } else {
-                const error = await res.json();
-                alert(`Failed to split spec: ${error.detail || 'Unknown error'}`);
-            }
+            const data = await splitSpecWithJob({ spec_name: specName });
+            setSplitResult(data);
         } catch (e) {
             console.error("Failed to split spec", e);
-            alert("Failed to split spec. Please try again.");
+            const message = e instanceof Error ? e.message : "Please try again.";
+            alert(`Failed to split spec: ${message}`);
         } finally {
             setSplittingSpec(false);
         }

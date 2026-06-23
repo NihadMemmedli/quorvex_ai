@@ -2562,6 +2562,261 @@ Category: Happy Path
         assert response.status_code == 400
         assert response.json()["detail"] == "Smart Groups requires AI extraction."
 
+    def test_split_spec_ai_failure_returns_sanitized_provider_detail(self, client, tmp_path, monkeypatch):
+        """POST /specs/split should surface actionable AI provider errors."""
+        from orchestrator.api import specs as specs_module
+        from orchestrator.utils.prd_spec_splitter import PRDSpecSplitter
+
+        specs_dir = tmp_path / "specs"
+        specs_dir.mkdir()
+        (specs_dir / "multi.md").write_text(
+            """# Checkout Tests
+
+### TC-001: First flow
+
+### TC-002: Second flow
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
+
+        def fake_split_spec(*_args, **_kwargs):
+            raise RuntimeError("Provider returned HTTP 401: api_key=sk-test-secret-token invalid")
+
+        monkeypatch.setattr(PRDSpecSplitter, "split_spec", staticmethod(fake_split_spec))
+        try:
+            from utils.prd_spec_splitter import PRDSpecSplitter as LegacyPRDSpecSplitter
+
+            monkeypatch.setattr(LegacyPRDSpecSplitter, "split_spec", staticmethod(fake_split_spec))
+        except ImportError:
+            pass
+
+        response = client.post(
+            "/specs/split",
+            json={"spec_name": "multi.md", "mode": "individual", "extraction_method": "ai"},
+        )
+
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert "Provider returned HTTP 401" in detail
+        assert "invalid" in detail
+        assert "sk-test-secret-token" not in detail
+        assert "[redacted]" in detail
+
+    def test_split_spec_job_returns_job_id_immediately(self, client, tmp_path, monkeypatch):
+        """POST /specs/split-jobs should create a queued durable job without running the split inline."""
+        from orchestrator.api import specs as specs_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import DomainJob
+        from orchestrator.services import temporal_client
+
+        specs_dir = tmp_path / "specs"
+        specs_dir.mkdir()
+        (specs_dir / "missing-later.md").write_text("# Placeholder", encoding="utf-8")
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
+
+        async def fake_start_domain_job_workflow(job_type, job_id, payload):
+            assert job_type == "spec_split"
+            assert payload["spec_name"] == "missing-later.md"
+            return types.SimpleNamespace(workflow_id=f"domain-job-spec_split-{job_id}", run_id="run-1")
+
+        monkeypatch.setattr(temporal_client, "start_domain_job_workflow", fake_start_domain_job_workflow)
+
+        response = client.post(
+            "/specs/split-jobs",
+            json={"spec_name": "missing-later.md", "mode": "individual", "extraction_method": "regex"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"]
+        assert data["status"] == "queued"
+
+        try:
+            status_response = client.get(f"/specs/split-jobs/{data['job_id']}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            assert status["status"] == "queued"
+            assert status["temporal_workflow_id"] == f"domain-job-spec_split-{data['job_id']}"
+        finally:
+            with Session(engine) as session:
+                job = session.get(DomainJob, data["job_id"])
+                if job:
+                    session.delete(job)
+                    session.commit()
+
+    def test_split_spec_job_completes_with_sync_payload_and_project_metadata(self, client, tmp_path, monkeypatch):
+        """Polling should return completed with the same response shape as POST /specs/split."""
+        from orchestrator.api import specs as specs_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import DomainJob, SpecMetadata
+        from orchestrator.services import temporal_client
+        from orchestrator.utils.prd_spec_splitter import PRDSpecSplitter
+
+        specs_dir = tmp_path / "specs"
+        specs_dir.mkdir()
+        source = specs_dir / "multi.md"
+        source.write_text(
+            """# Test: First flow
+
+## Source
+Test ID: TC-001
+
+# Test: Second flow
+
+## Source
+Test ID: TC-002
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
+
+        def fake_split_spec(_spec_path, output_dir, **_kwargs):
+            target_dir = output_dir or (specs_dir / "multi")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            first = target_dir / "first-flow.md"
+            second = target_dir / "second-flow.md"
+            first.write_text("# Test: First flow", encoding="utf-8")
+            second.write_text("# Test: Second flow", encoding="utf-8")
+            return [first, second], None, {"extraction_method": "regex", "ai_used": False, "warning": None}
+
+        monkeypatch.setattr(PRDSpecSplitter, "split_spec", staticmethod(fake_split_spec))
+        try:
+            from utils.prd_spec_splitter import PRDSpecSplitter as LegacyPRDSpecSplitter
+
+            monkeypatch.setattr(LegacyPRDSpecSplitter, "split_spec", staticmethod(fake_split_spec))
+        except ImportError:
+            pass
+
+        async def fake_start_domain_job_workflow(job_type, job_id, payload):
+            return types.SimpleNamespace(workflow_id=f"domain-job-{job_type}-{job_id}", run_id="run-1")
+
+        monkeypatch.setattr(temporal_client, "start_domain_job_workflow", fake_start_domain_job_workflow)
+
+        response = client.post(
+            "/specs/split-jobs",
+            json={
+                "spec_name": "multi.md",
+                "project_id": "default",
+                "mode": "individual",
+                "extraction_method": "regex",
+            },
+        )
+
+        assert response.status_code == 200
+        job_id = response.json()["job_id"]
+
+        try:
+            asyncio.run(
+                specs_module._run_spec_split_job(
+                    job_id,
+                    {
+                        "spec_name": "multi.md",
+                        "project_id": "default",
+                        "mode": "individual",
+                        "extraction_method": "regex",
+                    },
+                )
+            )
+
+            status_response = client.get(f"/specs/split-jobs/{job_id}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            assert status["status"] == "completed"
+            result = status["result"]
+            assert result == {
+                "count": 2,
+                "files": ["multi/first-flow.md", "multi/second-flow.md"],
+                "output_dir": "multi",
+                "groups": None,
+                "extraction_method": "regex",
+                "ai_used": False,
+                "warning": None,
+            }
+
+            sync_response = client.post(
+                "/specs/split",
+                json={
+                    "spec_name": "multi.md",
+                    "project_id": "default",
+                    "mode": "individual",
+                    "extraction_method": "regex",
+                },
+            )
+            assert sync_response.status_code == 200
+            assert sync_response.json() == result
+
+            with Session(engine) as session:
+                metadata = session.get(SpecMetadata, ("default", "multi/first-flow.md"))
+                assert metadata is not None
+        finally:
+            with Session(engine) as session:
+                for spec_name in ("multi/first-flow.md", "multi/second-flow.md"):
+                    metadata = session.get(SpecMetadata, ("default", spec_name))
+                    if metadata:
+                        session.delete(metadata)
+                job = session.get(DomainJob, job_id)
+                if job:
+                    session.delete(job)
+                session.commit()
+
+    def test_split_spec_job_failure_returns_sanitized_error(self, client, tmp_path, monkeypatch):
+        """Failed jobs should expose the sanitized provider detail through polling."""
+        from orchestrator.api import specs as specs_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import DomainJob
+        from orchestrator.services import temporal_client
+        from orchestrator.utils.prd_spec_splitter import PRDSpecSplitter
+
+        specs_dir = tmp_path / "specs"
+        specs_dir.mkdir()
+        (specs_dir / "multi.md").write_text("### TC-001: First\n\n### TC-002: Second", encoding="utf-8")
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
+
+        def fake_split_spec(*_args, **_kwargs):
+            raise RuntimeError("Provider returned HTTP 401: api_key=sk-test-secret-token invalid")
+
+        monkeypatch.setattr(PRDSpecSplitter, "split_spec", staticmethod(fake_split_spec))
+        try:
+            from utils.prd_spec_splitter import PRDSpecSplitter as LegacyPRDSpecSplitter
+
+            monkeypatch.setattr(LegacyPRDSpecSplitter, "split_spec", staticmethod(fake_split_spec))
+        except ImportError:
+            pass
+
+        async def fake_start_domain_job_workflow(job_type, job_id, payload):
+            return types.SimpleNamespace(workflow_id=f"domain-job-{job_type}-{job_id}", run_id="run-1")
+
+        monkeypatch.setattr(temporal_client, "start_domain_job_workflow", fake_start_domain_job_workflow)
+
+        response = client.post(
+            "/specs/split-jobs",
+            json={"spec_name": "multi.md", "mode": "individual", "extraction_method": "ai"},
+        )
+        assert response.status_code == 200
+        job_id = response.json()["job_id"]
+
+        try:
+            asyncio.run(
+                specs_module._run_spec_split_job(
+                    job_id,
+                    {"spec_name": "multi.md", "mode": "individual", "extraction_method": "ai"},
+                )
+            )
+            status_response = client.get(f"/specs/split-jobs/{job_id}")
+            assert status_response.status_code == 200
+            status = status_response.json()
+            assert status["status"] == "failed"
+            assert "Provider returned HTTP 401" in status["error"]
+            assert "sk-test-secret-token" not in status["error"]
+            assert "[redacted]" in status["error"]
+        finally:
+            with Session(engine) as session:
+                job = session.get(DomainJob, job_id)
+                if job:
+                    session.delete(job)
+                    session.commit()
+
     def test_list_specs_excludes_templates_by_default_and_can_return_templates(self, client, tmp_path, monkeypatch):
         """GET /specs/list should keep templates separate unless templates_only=true."""
         from orchestrator.api import specs as specs_module

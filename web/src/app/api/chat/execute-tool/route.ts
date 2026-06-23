@@ -54,6 +54,19 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  if (payload.toolName === 'splitSpec') {
+    return executeSplitSpecAction({
+      actionId: payload.id,
+      args,
+      authToken,
+      body,
+      path,
+      projectId,
+      risk: config.risk,
+      label: config.label,
+    });
+  }
+
   console.info('[assistant-action] approved', {
     id: payload.id,
     toolName: payload.toolName,
@@ -96,6 +109,92 @@ export async function POST(req: NextRequest) {
       args: redactAssistantActionArgs(args),
     },
   });
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function executeSplitSpecAction({
+  actionId,
+  args,
+  authToken,
+  body,
+  path,
+  projectId,
+  risk,
+  label,
+}: {
+  actionId: string;
+  args: Record<string, unknown>;
+  authToken?: string;
+  body?: unknown;
+  path: string;
+  projectId?: string;
+  risk: string;
+  label: string;
+}) {
+  console.info('[assistant-action] approved', {
+    id: actionId,
+    toolName: 'splitSpec',
+    risk,
+    projectId,
+    path,
+  });
+
+  const startRes = await backendFetch<{ job_id?: string; status?: string }>(path, {
+    method: 'POST',
+    body,
+    authToken,
+    projectId,
+    timeoutMs: 30000,
+  });
+
+  if (!startRes.ok || !startRes.data?.job_id) {
+    return NextResponse.json(
+      { error: startRes.error || 'Split job did not return a job id' },
+      { status: startRes.status || 500 }
+    );
+  }
+
+  const timeoutAt = Date.now() + 15 * 60 * 1000;
+  while (Date.now() < timeoutAt) {
+    await sleep(2000);
+    const statusRes = await backendFetch<{
+      status?: string;
+      result?: Record<string, unknown>;
+      error?: string;
+    }>(`/specs/split-jobs/${encodeURIComponent(startRes.data.job_id)}`, {
+      authToken,
+      projectId,
+      timeoutMs: 30000,
+    });
+
+    if (!statusRes.ok) {
+      return NextResponse.json({ error: statusRes.error }, { status: statusRes.status || 500 });
+    }
+    if (statusRes.data?.status === 'completed') {
+      return NextResponse.json({
+        ...(statusRes.data.result || {}),
+        _assistantAction: {
+          id: actionId,
+          toolName: 'splitSpec',
+          label,
+          risk,
+          projectId,
+          args: redactAssistantActionArgs(args),
+        },
+      });
+    }
+    if (statusRes.data?.status === 'failed') {
+      return NextResponse.json({ error: statusRes.data.error || 'Failed to split spec' }, { status: 500 });
+    }
+  }
+
+  return NextResponse.json(
+    { error: 'Split job is still running. Check the Specs page again in a few minutes.' },
+    { status: 202 }
+  );
 }
 
 async function validateActionRole(requiredRole: string, authToken?: string) {

@@ -9,7 +9,9 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,25 @@ def fetch_json(url: str, timeout: float = 10.0) -> dict[str, Any]:
     if status >= 400:
         raise RuntimeError(f"HTTP {status}")
     return json.loads(body)
+
+
+def request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    data = None
+    headers = {"User-Agent": "quorvex-deploy-check/1.0"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    return json.loads(body) if body else {}
 
 
 def wait_for_url(name: str, url: str, timeout: int) -> bool:
@@ -128,6 +149,104 @@ def check_agent_runtime(api_base: str, timeout: int) -> bool:
     return False
 
 
+def _split_job_smoke_content() -> str:
+    return """# Test: Deploy Smoke First Flow
+
+## Source
+Test ID: TC-001
+Category: Deployment Smoke
+
+## Steps
+1. Navigate to the dashboard.
+
+## Expected Outcome
+- The dashboard loads.
+
+# Test: Deploy Smoke Second Flow
+
+## Source
+Test ID: TC-002
+Category: Deployment Smoke
+
+## Steps
+1. Open the specs list.
+
+## Expected Outcome
+- The specs list loads.
+"""
+
+
+def check_split_job_smoke(api_base: str, timeout: int, *, use_ai: bool = False) -> bool:
+    folder = f"deploy-smoke-{uuid.uuid4().hex[:8]}"
+    spec_name = f"{folder}/multi.md"
+    output_dir = f"{folder}/split"
+    extraction_method = "ai" if use_ai else "regex"
+    created = False
+
+    try:
+        request_json(
+            f"{api_base}/specs",
+            method="POST",
+            payload={"name": spec_name, "content": _split_job_smoke_content()},
+        )
+        created = True
+
+        started = request_json(
+            f"{api_base}/specs/split-jobs",
+            method="POST",
+            payload={
+                "spec_name": spec_name,
+                "output_dir": output_dir,
+                "mode": "individual",
+                "extraction_method": extraction_method,
+            },
+        )
+        job_id = str(started.get("job_id") or "")
+        if not job_id:
+            log("Split-job smoke did not return a job_id.")
+            return False
+
+        deadline = time.monotonic() + timeout
+        last_status = ""
+        while time.monotonic() < deadline:
+            job = request_json(f"{api_base}/specs/split-jobs/{urllib.parse.quote(job_id)}")
+            status = str(job.get("status") or "")
+            last_status = status or json.dumps(job)[:500]
+            if status == "completed":
+                result = job.get("result") if isinstance(job.get("result"), dict) else {}
+                files = result.get("files") if isinstance(result, dict) else None
+                if not isinstance(files, list) or len(files) < 2:
+                    log(f"Split-job smoke completed without split files: {result}")
+                    return False
+                missing_prefix = [path for path in files if not str(path).startswith(f"{output_dir}/")]
+                if missing_prefix:
+                    log(f"Split-job smoke returned files outside expected output dir: {missing_prefix}")
+                    return False
+                log(f"Split-job smoke passed with {len(files)} file(s) via {extraction_method} extraction.")
+                return True
+            if status == "failed":
+                log(f"Split-job smoke failed: {job.get('error') or job}")
+                return False
+            time.sleep(2)
+
+        log(f"Split-job smoke did not complete after {timeout}s: {last_status}")
+        return False
+    except Exception as exc:  # noqa: BLE001 - deployment smoke reports readiness failures
+        log(f"Split-job smoke failed: {exc}")
+        return False
+    finally:
+        if created:
+            try:
+                request_json(
+                    f"{api_base}/specs/folder/{urllib.parse.quote(folder, safe='')}",
+                    method="DELETE",
+                    timeout=10.0,
+                )
+                log(f"Cleaned up split-job smoke folder: {folder}")
+            except Exception as exc:  # noqa: BLE001 - cleanup failure should not hide smoke result
+                log(f"Split-job smoke cleanup failed for {folder}: {exc}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", default=os.environ.get("QUORVEX_BACKEND_URL", "http://localhost:8001"))
@@ -135,6 +254,17 @@ def main() -> int:
     parser.add_argument("--env-file", default=os.environ.get("QUORVEX_ENV_FILE", ".env.prod"))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("DEPLOY_CHECK_TIMEOUT", "180")))
     parser.add_argument("--skip-agent", action="store_true", default=os.environ.get("DEPLOY_CHECK_SKIP_AGENT") == "true")
+    parser.add_argument(
+        "--skip-split-job",
+        action="store_true",
+        default=os.environ.get("DEPLOY_CHECK_SKIP_SPLIT_JOB") == "true",
+    )
+    parser.add_argument(
+        "--ai-smoke",
+        action="store_true",
+        default=os.environ.get("QUORVEX_DEPLOY_AI_SMOKE") == "true",
+        help="Use AI extraction for the split-job smoke; regex is the default.",
+    )
     args = parser.parse_args()
 
     backend = args.backend.rstrip("/")
@@ -168,6 +298,13 @@ def main() -> int:
         failures += 1
 
     if not args.skip_agent and not check_agent_runtime(backend, args.timeout):
+        failures += 1
+
+    if not args.skip_split_job and not check_split_job_smoke(
+        f"{frontend}/backend-proxy",
+        args.timeout,
+        use_ai=args.ai_smoke,
+    ):
         failures += 1
 
     if failures:

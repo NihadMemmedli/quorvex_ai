@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -15,7 +17,7 @@ from sqlmodel import Session, select
 
 from logging_config import get_logger
 
-from .db import get_session
+from .db import engine, get_session
 from .models import (
     CreateFolderRequest,
     CreateFolderResponse,
@@ -522,6 +524,27 @@ def update_generated_code(
 
     Path(code_path).write_text(request.content)
     return {"status": "updated", "code_path": code_path}
+
+
+class SplitSpecJobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    project_id: str | None = None
+    temporal_workflow_id: str | None = None
+    temporal_run_id: str | None = None
+
+
+@router.get("/specs/split-jobs/{job_id}", response_model=SplitSpecJobStatusResponse)
+async def get_split_spec_job(job_id: str):
+    """Poll a durable split job."""
+    from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
+
+    job = get_domain_job(job_id)
+    if not job or job.job_type != "spec_split":
+        raise HTTPException(status_code=404, detail="Job not found")
+    return domain_job_to_dict(job)
 
 
 @router.get("/specs/{name:path}")
@@ -1205,6 +1228,153 @@ class SplitSpecResponse(BaseModel):
     warning: str | None = None
 
 
+class SplitSpecJobStartResponse(BaseModel):
+    job_id: str
+    status: str
+    temporal_workflow_id: str | None = None
+    temporal_run_id: str | None = None
+
+
+def _sanitize_ai_split_error(error: Exception) -> str:
+    """Return an actionable provider error without exposing credentials."""
+    message = str(error).strip() or error.__class__.__name__
+    patterns = (
+        r"(sk-ant-[A-Za-z0-9._:/+=-]{8,})",
+        r"(sk-[A-Za-z0-9._:/+=-]{8,})",
+        r"(Bearer\s+)[A-Za-z0-9._:/+=-]+",
+        r"((?:api[-_]?key|x-api-key|authorization)['\"]?\s*[:=]\s*['\"]?)[A-Za-z0-9._:/+=-]+",
+    )
+    for pattern in patterns:
+        message = re.sub(
+            pattern,
+            lambda match: f"{match.group(1)}[redacted]"
+            if match.group(0).lower().startswith("bearer ")
+            or re.match(r"(?i)(?:api[-_]?key|x-api-key|authorization)", match.group(0))
+            else "[redacted]",
+            message,
+            flags=re.IGNORECASE,
+        )
+    return message[:1200]
+
+
+def _split_prd_spec_impl(request: SplitSpecRequest, session: Session) -> SplitSpecResponse:
+    """Split a spec and return the public response shape used by sync and async flows."""
+    from utils.prd_spec_splitter import PRDSpecSplitter
+    from utils.spec_detector import SpecDetector, SpecType
+
+    spec_path = SPECS_DIR / request.spec_name
+    if not spec_path.exists():
+        raise HTTPException(status_code=404, detail="Spec not found")
+
+    spec_type = SpecDetector.detect_spec_type(spec_path)
+    is_splittable = spec_type in (SpecType.PRD, SpecType.NATIVE_PLAN, SpecType.STANDARD_MULTI)
+
+    if not is_splittable:
+        content = spec_path.read_text()
+        pattern_count = SpecDetector.count_test_patterns(content)
+        if pattern_count < 2:
+            raise HTTPException(status_code=400, detail=f"Spec is not a multi-test spec (detected type: {spec_type})")
+
+    output_dir = SPECS_DIR / request.output_dir if request.output_dir else None
+
+    from orchestrator.api.settings import runtime_env_vars
+
+    use_ai = request.extraction_method == "ai"
+    if request.mode == "grouped" and not use_ai:
+        raise HTTPException(status_code=400, detail="Smart Groups requires AI extraction.")
+
+    split_files, groups, metadata = PRDSpecSplitter.split_spec(
+        spec_path,
+        output_dir,
+        use_ai=use_ai,
+        mode=request.mode or "individual",
+        runtime_env_vars=runtime_env_vars(session) if use_ai else None,
+        ai_fallback=False if use_ai else True,
+        return_metadata=True,
+    )
+
+    file_names = [str(f.relative_to(SPECS_DIR)) for f in split_files]
+
+    if request.project_id and file_names:
+        for spec_name in file_names:
+            existing = get_db_spec_metadata(session, spec_name, request.project_id)
+
+            if existing:
+                session.add(existing)
+            else:
+                new_metadata = DBSpecMetadata(spec_name=spec_name, project_id=request.project_id)
+                session.add(new_metadata)
+
+        session.commit()
+
+    return SplitSpecResponse(
+        count=len(split_files),
+        files=file_names,
+        output_dir=str(split_files[0].parent.relative_to(SPECS_DIR)) if split_files else "",
+        groups=groups,
+        extraction_method=str(metadata.get("extraction_method") or request.extraction_method),
+        ai_used=bool(metadata.get("ai_used")),
+        warning=metadata.get("warning"),
+    )
+
+
+def _request_payload(request: SplitSpecRequest) -> dict[str, Any]:
+    return request.model_dump() if hasattr(request, "model_dump") else request.dict()
+
+
+def _split_response_payload(response: SplitSpecResponse) -> dict[str, Any]:
+    return response.model_dump() if hasattr(response, "model_dump") else response.dict()
+
+
+def _http_exception_detail(error: HTTPException) -> str:
+    detail = error.detail
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+        return detail["message"]
+    return str(detail or error.status_code)
+
+
+async def _run_spec_split_job(job_id: str, payload: dict[str, Any]) -> None:
+    """Execute a durable spec split job and persist the terminal result."""
+    await asyncio.to_thread(_run_spec_split_job_blocking, job_id, payload)
+
+
+def _run_spec_split_job_blocking(job_id: str, payload: dict[str, Any]) -> None:
+    """Blocking split implementation run from the Temporal activity thread."""
+    from orchestrator.services.domain_jobs import update_domain_job
+
+    update_domain_job(job_id, status="running", progress={"status": "running"}, started=True)
+    try:
+        request = SplitSpecRequest(**payload)
+        with Session(engine) as session:
+            response = _split_prd_spec_impl(request, session)
+        update_domain_job(
+            job_id,
+            status="completed",
+            progress={"status": "completed"},
+            result=_split_response_payload(response),
+            completed=True,
+        )
+    except HTTPException as exc:
+        detail = _http_exception_detail(exc)
+        logger.warning("Spec split job %s failed: %s", job_id, detail)
+        update_domain_job(job_id, status="failed", progress={"status": "failed"}, error=detail, completed=True)
+    except RuntimeError as exc:
+        detail = _sanitize_ai_split_error(exc)
+        logger.warning("Spec split job %s failed: %s", job_id, detail)
+        update_domain_job(job_id, status="failed", progress={"status": "failed"}, error=detail, completed=True)
+    except Exception as exc:
+        logger.error("Spec split job %s failed: %s", job_id, exc, exc_info=True)
+        update_domain_job(
+            job_id,
+            status="failed",
+            progress={"status": "failed"},
+            error="Internal server error",
+            completed=True,
+        )
+
+
 @router.get("/specs/{name:path}/info", response_model=SpecInfoResponse)
 def get_spec_info(name: str):
     """Get information about a spec, including PRD detection."""
@@ -1228,82 +1398,54 @@ def get_spec_info(name: str):
 @router.post("/specs/split", response_model=SplitSpecResponse)
 def split_prd_spec(request: SplitSpecRequest, session: Session = Depends(get_session)):
     """Split a multi-test spec (PRD, Native Plan, or multi-test) into individual test specs."""
-    from utils.prd_spec_splitter import PRDSpecSplitter
-    from utils.spec_detector import SpecDetector, SpecType
-
-    spec_path = SPECS_DIR / request.spec_name
-    if not spec_path.exists():
-        raise HTTPException(status_code=404, detail="Spec not found")
-
-    # Verify it's a splittable spec
-    spec_type = SpecDetector.detect_spec_type(spec_path)
-    is_splittable = spec_type in (SpecType.PRD, SpecType.NATIVE_PLAN, SpecType.STANDARD_MULTI)
-
-    # Also allow STANDARD specs that have TC patterns (AI will handle extraction)
-    if not is_splittable:
-        content = spec_path.read_text()
-        pattern_count = SpecDetector.count_test_patterns(content)
-        if pattern_count < 2:
-            raise HTTPException(status_code=400, detail=f"Spec is not a multi-test spec (detected type: {spec_type})")
-
-    # Determine output directory
-    if request.output_dir:
-        output_dir = SPECS_DIR / request.output_dir
-    else:
-        output_dir = None  # Will use default
-
-    # Split the spec
     try:
-        from orchestrator.api.settings import runtime_env_vars
-
-        use_ai = request.extraction_method == "ai"
-        if request.mode == "grouped" and not use_ai:
-            raise HTTPException(status_code=400, detail="Smart Groups requires AI extraction.")
-
-        split_files, groups, metadata = PRDSpecSplitter.split_spec(
-            spec_path,
-            output_dir,
-            use_ai=use_ai,
-            mode=request.mode or "individual",
-            runtime_env_vars=runtime_env_vars(session) if use_ai else None,
-            ai_fallback=False if use_ai else True,
-            return_metadata=True,
-        )
-
-        # Convert paths to relative names
-        file_names = [str(f.relative_to(SPECS_DIR)) for f in split_files]
-
-        # Assign split specs to project if specified
-        if request.project_id and file_names:
-            for spec_name in file_names:
-                # Create or update spec metadata with project assignment
-                existing = get_db_spec_metadata(session, spec_name, request.project_id)
-
-                if existing:
-                    session.add(existing)
-                else:
-                    new_metadata = DBSpecMetadata(spec_name=spec_name, project_id=request.project_id)
-                    session.add(new_metadata)
-
-            session.commit()
-
-        return SplitSpecResponse(
-            count=len(split_files),
-            files=file_names,
-            output_dir=str(split_files[0].parent.relative_to(SPECS_DIR)) if split_files else "",
-            groups=groups,
-            extraction_method=str(metadata.get("extraction_method") or request.extraction_method),
-            ai_used=bool(metadata.get("ai_used")),
-            warning=metadata.get("warning"),
-        )
+        return _split_prd_spec_impl(request, session)
     except HTTPException:
         raise
     except RuntimeError as e:
-        logger.warning(f"Failed to split spec with {request.extraction_method} extraction: {e}")
-        raise HTTPException(status_code=502, detail=f"AI extraction failed: {e}")
+        detail = _sanitize_ai_split_error(e)
+        logger.warning(f"Failed to split spec with {request.extraction_method} extraction: {detail}")
+        raise HTTPException(status_code=502, detail=detail)
     except Exception as e:
         logger.error(f"Failed to split spec: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/specs/split-jobs", response_model=SplitSpecJobStartResponse)
+async def create_split_spec_job(request: SplitSpecRequest):
+    """Queue a durable split job and return immediately."""
+    job_id = str(uuid.uuid4())
+    payload = _request_payload(request)
+
+    from orchestrator.services.domain_jobs import create_domain_job, update_domain_job
+
+    create_domain_job(
+        job_id=job_id,
+        job_type="spec_split",
+        project_id=request.project_id,
+        payload=payload,
+        progress={"status": "queued"},
+    )
+
+    try:
+        from orchestrator.services.temporal_client import start_domain_job_workflow
+
+        temporal = await start_domain_job_workflow("spec_split", job_id, payload)
+        update_domain_job(
+            job_id,
+            temporal_workflow_id=temporal.workflow_id,
+            temporal_run_id=temporal.run_id,
+        )
+        return SplitSpecJobStartResponse(
+            job_id=job_id,
+            status="queued",
+            temporal_workflow_id=temporal.workflow_id,
+            temporal_run_id=temporal.run_id,
+        )
+    except Exception as exc:
+        error = f"Temporal start failed: {exc}"
+        update_domain_job(job_id, status="failed", progress={"status": "failed"}, error=error, completed=True)
+        raise HTTPException(status_code=503, detail=f"Temporal is required for spec splitting: {exc}") from exc
 
 
 # ========= Metadata =========
