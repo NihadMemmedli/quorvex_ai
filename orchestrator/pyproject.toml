@@ -1,6 +1,6 @@
 [project]
 name = "playwright-agent-orchestrator"
-version = "1.0.0"
+version = "1.2.13"
 requires-python = ">=3.10"
 
 [tool.ruff]

@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.13] - 2026-06-23
+
 ### Added
 
 - `--validate-only` / `--dry-run` CLI flag: validate spec format, template includes, and target URL reachability without running the pipeline (useful for CI pre-checks). Optional `--validate-timeout SECONDS` for URL check timeout (default: 10).
 - Documentation refresh covering current features, install paths, Make targets, AutoPilot/autonomous agents, long-running missions, support policies, and GitHub-facing project positioning.
 - GitHub presentation refresh with a shorter README, curated examples index, support/security/maintainer/release docs, issue forms, label taxonomy, Dependabot expansion, security automation workflows, and a dry-run issue cleanup playbook.
+
+### Fixed
+
+- Attach run-local MCP configs for custom BaseAgent browser runs, validate requested MCP server prefixes before execution, and remove the stale Chromium revision pin from private deploy templates.
 
 ## [1.0.0] - 2026-03-01
 
@@ -44,4 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tiered artifact storage with configurable retention policies
 - CLI mode for direct execution without a database
 
+[Unreleased]: https://github.com/NihadMemmedli/quorvex_ai/compare/v1.2.13...HEAD
+[1.2.13]: https://github.com/NihadMemmedli/quorvex_ai/compare/v1.0.0...v1.2.13
 [1.0.0]: https://github.com/NihadMemmedli/quorvex_ai/releases/tag/v1.0.0

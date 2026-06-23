@@ -151,7 +151,15 @@ def resolve_playwright_chromium_executable() -> Path | None:
             continue
     if not existing:
         return None
-    return sorted(existing, key=lambda path: path.parent.parent.name, reverse=True)[0]
+
+    def _browser_revision_sort_key(path: Path) -> tuple[str, int, str]:
+        browser_dir = path.parent.parent.name
+        match = re.match(r"([a-z-]+)-(\d+)$", browser_dir)
+        if match:
+            return match.group(1), int(match.group(2)), browser_dir
+        return browser_dir, -1, browser_dir
+
+    return sorted(existing, key=_browser_revision_sort_key, reverse=True)[0]
 
 
 def _env_bool_value(value: Any) -> bool | None:

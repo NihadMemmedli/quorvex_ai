@@ -112,6 +112,10 @@ if rg -n 'RECORDER_BROWSER_URL: (http://localhost|http://127\.0\.0\.1|.*host\.do
   printf 'Rendered recorder browser URL exposes a direct/local VNC endpoint.\n' >&2
   exit 1
 fi
+if rg -n 'PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH|chromium-1200' "${TMP_DIR}/rendered-compose.yml"; then
+  printf 'Rendered Compose contains a stale Playwright Chromium pin.\n' >&2
+  exit 1
+fi
 if grep -q "${ROOT_DIR}/specs\\|${ROOT_DIR}/tests\\|${ROOT_DIR}/prds" "${TMP_DIR}/rendered-compose.yml"; then
   printf 'Rendered standard deployment still references public checkout data directories.\n' >&2
   exit 1

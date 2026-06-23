@@ -559,6 +559,74 @@ def test_base_agent_unknown_profile_uses_conservative_fallback():
     assert agent._resolved_permission_mode() == "dontAsk"
 
 
+def test_base_agent_attaches_strict_local_mcp_config_to_sdk_options(tmp_path):
+    mcp_command = tmp_path / "mcp-server-playwright"
+    mcp_command.write_text("#!/bin/sh\n")
+    (tmp_path / ".mcp.json").write_text(
+        f"""
+{{
+  "mcpServers": {{
+    "playwright-test": {{
+      "command": "{mcp_command}"
+    }}
+  }}
+}}
+"""
+    )
+    agent = BaseAgent()
+    agent.allowed_tools = ["mcp__playwright-test__browser_navigate"]
+
+    kwargs = agent._claude_options_kwargs(cwd=tmp_path)
+
+    assert kwargs["mcp_servers"] == tmp_path / ".mcp.json"
+    if BaseAgent._claude_options_accepts("strict_mcp_config"):
+        assert kwargs["strict_mcp_config"] is True
+    else:
+        assert kwargs["extra_args"]["strict-mcp-config"] is None
+    if BaseAgent._claude_options_accepts("cwd"):
+        assert kwargs["cwd"] == tmp_path
+
+
+def test_base_agent_fails_fast_when_mcp_config_missing(tmp_path):
+    agent = BaseAgent()
+    agent.allowed_tools = ["mcp__playwright-test__browser_navigate"]
+
+    try:
+        agent._validate_mcp_config_for_allowed_tools(tmp_path)
+    except RuntimeError as exc:
+        assert "no .mcp.json exists" in str(exc)
+    else:
+        raise AssertionError("Expected missing MCP config to fail fast")
+
+
+def test_base_agent_fails_fast_when_mcp_server_prefix_mismatches(tmp_path):
+    mcp_command = tmp_path / "mcp-server-playwright"
+    mcp_command.write_text("#!/bin/sh\n")
+    (tmp_path / ".mcp.json").write_text(
+        f"""
+{{
+  "mcpServers": {{
+    "playwright": {{
+      "command": "{mcp_command}"
+    }}
+  }}
+}}
+"""
+    )
+    agent = BaseAgent()
+    agent.allowed_tools = ["mcp__playwright-test__browser_navigate"]
+
+    try:
+        agent._validate_mcp_config_for_allowed_tools(tmp_path)
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Allowed MCP tools do not match configured MCP servers" in message
+        assert "mcp__playwright-test__" in message
+        assert "mcp__playwright__" in message
+    else:
+        raise AssertionError("Expected mismatched MCP server prefix to fail fast")
+
+
 def test_no_runtime_agent_wildcard_call_sites():
     root = Path(__file__).resolve().parents[2]
     checked_files = [

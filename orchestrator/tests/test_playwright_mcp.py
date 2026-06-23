@@ -550,6 +550,27 @@ def test_resolve_playwright_chromium_executable_finds_chrome_linux64(tmp_path, m
     assert resolve_playwright_chromium_executable() == chromium
 
 
+def test_resolve_playwright_chromium_executable_picks_newest_installed_revision(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import resolve_playwright_chromium_executable
+
+    browser_root = tmp_path / "ms-playwright"
+    older = browser_root / "chromium-1226" / "chrome-linux64" / "chrome"
+    newer = browser_root / "chromium-1228" / "chrome-linux64" / "chrome"
+    lexicographic_trap = browser_root / "chromium-999" / "chrome-linux64" / "chrome"
+    older.parent.mkdir(parents=True)
+    newer.parent.mkdir(parents=True)
+    lexicographic_trap.parent.mkdir(parents=True)
+    older.write_text("#!/bin/sh\n")
+    newer.write_text("#!/bin/sh\n")
+    lexicographic_trap.write_text("#!/bin/sh\n")
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browser_root))
+    monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_MCP_EXECUTABLE_PATH", raising=False)
+
+    assert resolve_playwright_chromium_executable() == newer
+
+
 def test_resolve_playwright_chromium_executable_skips_inaccessible_home_cache(tmp_path, monkeypatch):
     from orchestrator.utils import playwright_mcp
 

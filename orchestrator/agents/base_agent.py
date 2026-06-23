@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import subprocess
@@ -523,6 +524,147 @@ class BaseAgent:
             return
         raise RuntimeError(CLAUDE_AUTH_FAILURE_MESSAGE)
 
+    @staticmethod
+    def _claude_options_accepts(option_name: str) -> bool:
+        try:
+            signature = inspect.signature(ClaudeAgentOptions)
+        except (TypeError, ValueError):
+            return True
+        if option_name in signature.parameters:
+            return True
+        return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+    def _requested_mcp_tools(self, tool_config: dict[str, Any] | None = None) -> list[str]:
+        config = tool_config or self._resolved_tool_config()
+        requested: list[str] = []
+        for source in (config.get("allowed_tools"), config.get("tools")):
+            if isinstance(source, list):
+                requested.extend(str(tool) for tool in source if str(tool).startswith("mcp__"))
+        return requested
+
+    def _should_attach_mcp_config(self, cwd: Path, tool_config: dict[str, Any]) -> bool:
+        mcp_path = cwd / ".mcp.json"
+        if not mcp_path.exists():
+            return False
+        allowed_tools = tool_config.get("allowed_tools") or []
+        return "*" in allowed_tools or bool(self._requested_mcp_tools(tool_config))
+
+    def _validate_mcp_config_for_allowed_tools(
+        self,
+        cwd: Path | str | None = None,
+        tool_config: dict[str, Any] | None = None,
+    ) -> None:
+        """Fail fast when MCP tools are requested but no matching server is configured."""
+        config = tool_config or self._resolved_tool_config()
+        mcp_tools = self._requested_mcp_tools(config)
+        if not mcp_tools:
+            return
+
+        base_dir = Path(cwd or self.agent_cwd or os.getcwd())
+        mcp_path = base_dir / ".mcp.json"
+        if not mcp_path.exists():
+            raise RuntimeError(
+                f"MCP tools were requested but no .mcp.json exists in {base_dir}. "
+                "Create a per-run MCP config before invoking the agent."
+            )
+
+        try:
+            mcp_config = json.loads(mcp_path.read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Invalid MCP config at {mcp_path}: {exc}") from exc
+
+        servers = mcp_config.get("mcpServers") or {}
+        if not isinstance(servers, dict) or not servers:
+            raise RuntimeError(f"MCP config at {mcp_path} does not define any mcpServers")
+
+        configured_prefixes = {f"mcp__{name}__" for name in servers}
+        requested_prefixes = {
+            f"{parts[0]}__{parts[1]}__"
+            for tool in mcp_tools
+            if len(parts := str(tool).split("__", 2)) >= 3
+        }
+        missing_prefixes = sorted(requested_prefixes - configured_prefixes)
+        if missing_prefixes:
+            raise RuntimeError(
+                f"Allowed MCP tools do not match configured MCP servers in {mcp_path}. "
+                f"Missing prefixes: {', '.join(missing_prefixes)}; configured: {', '.join(sorted(configured_prefixes))}"
+            )
+
+        for server_name, server in servers.items():
+            command = (server or {}).get("command")
+            if not command:
+                raise RuntimeError(f"MCP server '{server_name}' in {mcp_path} has no command")
+            if os.path.isabs(command) and not Path(command).exists():
+                raise RuntimeError(
+                    f"MCP server '{server_name}' command does not exist: {command}. "
+                    "Install dependencies or set PLAYWRIGHT_MCP_COMMAND."
+                )
+
+    def _claude_options_kwargs(
+        self,
+        *,
+        tool_config: dict[str, Any] | None = None,
+        cwd: Path | str | None = None,
+        stderr_callback=None,
+    ) -> dict[str, Any]:
+        config = tool_config or self._resolved_tool_config()
+        run_dir = Path(cwd or self.agent_cwd or os.getcwd())
+        kwargs: dict[str, Any] = {
+            "allowed_tools": config["allowed_tools"],
+            "tools": config.get("tools"),
+            "setting_sources": ["project"],
+            "permission_mode": self._resolved_permission_mode(),
+        }
+        if stderr_callback is not None:
+            kwargs["stderr"] = stderr_callback
+        if self.model:
+            kwargs["model"] = self.model
+        if self._claude_options_accepts("cwd"):
+            kwargs["cwd"] = run_dir
+
+        if self._should_attach_mcp_config(run_dir, config):
+            kwargs["mcp_servers"] = run_dir / ".mcp.json"
+            if self._claude_options_accepts("strict_mcp_config"):
+                kwargs["strict_mcp_config"] = True
+            else:
+                kwargs.setdefault("extra_args", {})["strict-mcp-config"] = None
+        return kwargs
+
+    def _log_mcp_runtime_diagnostics(self, cwd: Path, tool_config: dict[str, Any]) -> None:
+        mcp_tools = self._requested_mcp_tools(tool_config)
+        if not mcp_tools:
+            return
+        if not any("browser" in tool or "playwright" in tool for tool in mcp_tools):
+            return
+
+        mcp_path = cwd / ".mcp.json"
+        server_names: list[str] = []
+        if mcp_path.exists():
+            try:
+                mcp_config = json.loads(mcp_path.read_text())
+                server_names = list((mcp_config.get("mcpServers") or {}).keys())
+            except Exception as exc:
+                logger.error(f"[SDK DEBUG]   MCP config read error: {exc}")
+
+        runtime_status: dict[str, Any] = {}
+        try:
+            from utils.playwright_mcp import browser_runtime_status, resolve_playwright_chromium_executable
+
+            executable = resolve_playwright_chromium_executable()
+            runtime_status = browser_runtime_status()
+        except Exception as exc:
+            executable = None
+            runtime_status = {"browser_runtime": "diagnostic_error", "runtime_message": str(exc)}
+
+        logger.info(f"[SDK DEBUG]   MCP config path: {mcp_path}")
+        logger.info(f"[SDK DEBUG]   MCP config exists: {mcp_path.exists()}")
+        logger.info(f"[SDK DEBUG]   MCP servers: {server_names}")
+        logger.info(
+            f"[SDK DEBUG]   MCP servers attached to SDK options: {self._should_attach_mcp_config(cwd, tool_config)}"
+        )
+        logger.info(f"[SDK DEBUG]   Resolved Chromium executable: {executable}")
+        logger.info(f"[SDK DEBUG]   Browser runtime status: {runtime_status}")
+
     async def _query_agent_direct(self, prompt: str, system_prompt: str = None, timeout_seconds: int = None) -> Any:
         """Query the agent using subprocess.run in a thread pool executor.
 
@@ -551,6 +693,7 @@ class BaseAgent:
         tool_config = self._resolved_tool_config()
         allowed_tools = tool_config["allowed_tools"]
         tools = tool_config.get("tools")
+        self._validate_mcp_config_for_allowed_tools(cwd, tool_config)
 
         # Build the base CLI command
         cli_args = [
@@ -1009,6 +1152,10 @@ echo "done" > {done_file}
             except Exception as exc:
                 logger.warning("[SDK DEBUG] Failed to persist SDK telemetry artifacts: %s", exc)
 
+        initial_tool_config = self._resolved_tool_config()
+        initial_cwd = self.agent_cwd or os.getcwd()
+        self._validate_mcp_config_for_allowed_tools(initial_cwd, initial_tool_config)
+
         async def _do_query():
             try:
                 _, selection = self._refresh_runtime_settings()
@@ -1032,27 +1179,20 @@ echo "done" > {done_file}
                 logger.info(f"[SDK DEBUG]   MCP config path: {mcp_path}")
                 logger.info(f"[SDK DEBUG]   MCP config exists: {mcp_path.exists()}")
 
-                if mcp_path.exists():
-                    try:
-                        with open(mcp_path) as f:
-                            mcp_config = json.load(f)
-                        logger.info(f"[SDK DEBUG]   MCP servers: {list(mcp_config.get('mcpServers', {}).keys())}")
-                    except Exception as e:
-                        logger.error(f"[SDK DEBUG]   MCP config read error: {e}")
-
                 # Callback to capture stderr from the Claude CLI subprocess
                 def stderr_callback(line: str):
                     logger.info(f"[SDK STDERR] {line}")
 
                 tool_config = self._resolved_tool_config()
-                options = ClaudeAgentOptions(
-                    allowed_tools=tool_config["allowed_tools"],
-                    tools=tool_config.get("tools"),
-                    setting_sources=["project"],
-                    permission_mode=self._resolved_permission_mode(),
-                    model=selection.model,
-                    stderr=stderr_callback,  # Capture CLI stderr
+                self._log_mcp_runtime_diagnostics(Path(cwd), tool_config)
+                options_kwargs = self._claude_options_kwargs(
+                    tool_config=tool_config,
+                    cwd=cwd,
+                    stderr_callback=stderr_callback,
                 )
+                if selection.model:
+                    options_kwargs["model"] = selection.model
+                options = ClaudeAgentOptions(**options_kwargs)
 
                 # Note: SDK currently doesn't support separate system_prompt in options easily
                 # without constructing messages manually, so we prepend it to prompt if needed.
