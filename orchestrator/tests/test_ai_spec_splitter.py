@@ -77,18 +77,35 @@ class FakeFailedAgentResult:
         self.cancelled = cancelled
 
 
-def test_claude_code_mode_extracts_test_cases_via_agent_runner(monkeypatch):
+def _agent_payload(result):
+    return {
+        "success": bool(getattr(result, "success", False)),
+        "output": getattr(result, "output", "") or "",
+        "error": getattr(result, "error", None),
+        "error_type": getattr(result, "error_type", None),
+        "timed_out": bool(getattr(result, "timed_out", False)),
+        "cancelled": bool(getattr(result, "cancelled", False)),
+    }
+
+
+def _patch_claude_code_subprocess(monkeypatch, result):
     captured = {}
 
-    class FakeRunner:
-        def __init__(self, **kwargs):
-            captured["kwargs"] = kwargs
+    def fake_subprocess(_cls, prompt, runtime_env_vars):
+        captured["prompt"] = prompt
+        captured["runtime_env_vars"] = runtime_env_vars
+        return _agent_payload(result)
 
-        async def run(self, prompt):
-            captured["prompt"] = prompt
-            return FakeAgentResult()
+    monkeypatch.setattr(
+        AISpecSplitter,
+        "_run_claude_code_subprocess",
+        classmethod(fake_subprocess),
+    )
+    return captured
 
-    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+
+def test_claude_code_mode_extracts_test_cases_via_subprocess(monkeypatch):
+    captured = _patch_claude_code_subprocess(monkeypatch, FakeAgentResult())
     monkeypatch.setattr(
         AISpecSplitter,
         "_call_text_model",
@@ -105,11 +122,8 @@ def test_claude_code_mode_extracts_test_cases_via_agent_runner(monkeypatch):
         runtime_env_vars=_claude_code_env(),
     )
 
-    assert captured["kwargs"]["allowed_tools"] == []
-    assert captured["kwargs"]["log_tools"] is False
-    assert captured["kwargs"]["model_tier"] == "standard"
     assert (
-        captured["kwargs"]["env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"]
+        captured["runtime_env_vars"]["CLAUDE_CODE_OAUTH_TOKEN"]
         == "oauth-token-1234567890"
     )
     assert "Return ONLY the JSON" in captured["prompt"]
@@ -117,15 +131,8 @@ def test_claude_code_mode_extracts_test_cases_via_agent_runner(monkeypatch):
     assert cases[0]["_url"] == "https://example.test/checkout"
 
 
-def test_claude_code_mode_extracts_smart_groups_via_agent_runner(monkeypatch):
-    class FakeRunner:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def run(self, _prompt):
-            return FakeAgentResult()
-
-    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+def test_claude_code_mode_extracts_smart_groups_via_subprocess(monkeypatch):
+    _patch_claude_code_subprocess(monkeypatch, FakeAgentResult())
 
     cases, groups = AISpecSplitter.extract_and_group(
         SPEC_CONTENT,
@@ -146,16 +153,12 @@ def test_claude_code_mode_extracts_smart_groups_via_agent_runner(monkeypatch):
 def test_claude_code_failed_result_with_test_case_json_error_extracts_cases(
     monkeypatch,
 ):
-    class FakeRunner:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def run(self, _prompt):
-            return FakeFailedAgentResult(
-                f"CLI returned error:\n```json\n{FakeAgentResult.output}\n```"
-            )
-
-    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+    _patch_claude_code_subprocess(
+        monkeypatch,
+        FakeFailedAgentResult(
+            f"CLI returned error:\n```json\n{FakeAgentResult.output}\n```"
+        ),
+    )
 
     cases = AISpecSplitter.extract_test_cases(
         SPEC_CONTENT,
@@ -171,16 +174,12 @@ def test_claude_code_failed_result_with_test_case_json_error_extracts_cases(
 def test_claude_code_failed_result_with_test_case_json_error_extracts_groups(
     monkeypatch,
 ):
-    class FakeRunner:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def run(self, _prompt):
-            return FakeFailedAgentResult(
-                f"CLI returned error:\n```json\n{FakeAgentResult.output}\n```"
-            )
-
-    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+    _patch_claude_code_subprocess(
+        monkeypatch,
+        FakeFailedAgentResult(
+            f"CLI returned error:\n```json\n{FakeAgentResult.output}\n```"
+        ),
+    )
 
     cases, groups = AISpecSplitter.extract_and_group(
         SPEC_CONTENT,
@@ -199,16 +198,10 @@ def test_claude_code_failed_result_with_test_case_json_error_extracts_groups(
 
 
 def test_claude_code_failed_result_without_test_case_json_still_raises(monkeypatch):
-    class FakeRunner:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def run(self, _prompt):
-            return FakeFailedAgentResult(
-                'CLI returned error: {"message": "quota exceeded"}'
-            )
-
-    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+    _patch_claude_code_subprocess(
+        monkeypatch,
+        FakeFailedAgentResult('CLI returned error: {"message": "quota exceeded"}'),
+    )
 
     with pytest.raises(RuntimeError) as exc_info:
         AISpecSplitter.extract_test_cases(
@@ -235,17 +228,13 @@ def test_claude_code_classified_failed_result_with_json_still_raises(
     kwargs,
     expected,
 ):
-    class FakeRunner:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def run(self, _prompt):
-            return FakeFailedAgentResult(
-                f"CLI {expected}:\n```json\n{FakeAgentResult.output}\n```",
-                **kwargs,
-            )
-
-    monkeypatch.setattr("orchestrator.utils.ai_spec_splitter.AgentRunner", FakeRunner)
+    _patch_claude_code_subprocess(
+        monkeypatch,
+        FakeFailedAgentResult(
+            f"CLI {expected}:\n```json\n{FakeAgentResult.output}\n```",
+            **kwargs,
+        ),
+    )
 
     with pytest.raises(RuntimeError) as exc_info:
         AISpecSplitter.extract_test_cases(
@@ -276,12 +265,14 @@ def test_missing_direct_key_and_claude_token_raises_actionable_message():
 def test_direct_api_key_path_still_uses_text_model(monkeypatch):
     captured = {}
 
-    def fake_call(api_key, base_url, model, prompt):
+    def fake_call(selection, prompt, configured_provider=""):
         captured.update(
             {
-                "api_key": api_key,
-                "base_url": base_url,
-                "model": model,
+                "api_key": selection.api_key,
+                "base_url": selection.base_url,
+                "model": selection.model,
+                "provider": selection.provider,
+                "configured_provider": configured_provider,
                 "prompt": prompt,
             }
         )
@@ -304,7 +295,100 @@ def test_direct_api_key_path_still_uses_text_model(monkeypatch):
     assert captured["api_key"] == "direct-key"
     assert captured["base_url"] == "https://api.example.test"
     assert captured["model"] == "direct-model"
+    assert captured["configured_provider"] == "anthropic"
     assert cases[0]["id"] == "TC-001"
+
+
+class FakeModelResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = "provider error"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}: {self.text}")
+
+    def json(self):
+        return self._payload
+
+
+def test_openai_compatible_split_uses_chat_completions(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeModelResponse({"choices": [{"message": {"content": FakeAgentResult.output}}]})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+
+    cases = AISpecSplitter.extract_test_cases(
+        SPEC_CONTENT,
+        "checkout.md",
+        runtime_env_vars={
+            "QUORVEX_LLM_PROVIDER": "openai",
+            "QUORVEX_LLM_BASE_URL": "https://llm.example.test/api",
+            "QUORVEX_LLM_API_KEY": "openai-key",
+            "QUORVEX_LLM_STANDARD_MODEL": "gpt-test",
+            "CLAUDE_CODE_OAUTH_TOKEN": "",
+        },
+    )
+
+    assert cases[0]["id"] == "TC-001"
+    assert calls[0]["url"] == "https://llm.example.test/api/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer openai-key"
+    assert "x-api-key" not in calls[0]["headers"]
+
+
+def test_openrouter_split_uses_chat_completions_for_custom_base_url(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeModelResponse({"choices": [{"message": {"content": FakeAgentResult.output}}]})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+
+    AISpecSplitter.extract_test_cases(
+        SPEC_CONTENT,
+        "checkout.md",
+        runtime_env_vars={
+            "QUORVEX_LLM_PROVIDER": "openrouter",
+            "QUORVEX_LLM_BASE_URL": "https://llm.company.test/openrouter",
+            "QUORVEX_LLM_API_KEY": "router-key",
+            "QUORVEX_LLM_STANDARD_MODEL": "anthropic/claude-test",
+            "CLAUDE_CODE_OAUTH_TOKEN": "",
+        },
+    )
+
+    assert calls[0]["url"] == "https://llm.company.test/openrouter/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer router-key"
+
+
+def test_zai_anthropic_compatible_split_uses_messages(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeModelResponse({"content": [{"type": "text", "text": FakeAgentResult.output}]})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+
+    AISpecSplitter.extract_test_cases(
+        SPEC_CONTENT,
+        "checkout.md",
+        runtime_env_vars={
+            "QUORVEX_LLM_PROVIDER": "zai",
+            "QUORVEX_LLM_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ZAI_API_KEY": "zai-key",
+            "QUORVEX_LLM_STANDARD_MODEL": "glm-test",
+            "CLAUDE_CODE_OAUTH_TOKEN": "",
+        },
+    )
+
+    assert calls[0]["url"] == "https://api.z.ai/api/anthropic/v1/messages"
+    assert calls[0]["headers"]["x-api-key"] == "zai-key"
+    assert "Authorization" not in calls[0]["headers"]
 
 
 def test_ai_split_child_spec_includes_explicit_target_url_line(tmp_path, monkeypatch):

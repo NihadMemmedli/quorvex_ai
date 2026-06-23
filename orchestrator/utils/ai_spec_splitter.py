@@ -8,6 +8,8 @@ API credentials are unavailable.
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -16,7 +18,7 @@ from typing import Any
 # Add orchestrator to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from load_env import setup_claude_env
-from orchestrator.services.ai_runtime_config import resolve_runtime_ai_selection
+from orchestrator.services.ai_runtime_config import RuntimeAISelection, infer_display_provider, resolve_runtime_ai_selection
 from orchestrator.utils.agent_runner import AgentRunner
 
 setup_claude_env()
@@ -106,6 +108,94 @@ class AISpecSplitter:
         return result.get("value")
 
     @classmethod
+    def _run_claude_code_subprocess(
+        cls,
+        prompt: str,
+        runtime_env_vars: dict[str, str] | None,
+    ) -> Any:
+        repo_root = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        if runtime_env_vars:
+            env.update({key: str(value) for key, value in runtime_env_vars.items()})
+        env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}".rstrip(":")
+
+        script = r'''
+import asyncio
+import json
+import os
+import sys
+
+from orchestrator.utils.agent_runner import AgentRunner
+
+MARKER = "__AISPLIT_RESULT__"
+
+async def _main():
+    prompt = sys.stdin.read()
+    runner = AgentRunner(
+        allowed_tools=[],
+        log_tools=False,
+        model_tier="standard",
+        env_vars=dict(os.environ),
+        force_direct_execution=True,
+    )
+    result = await runner.run(prompt)
+    return {
+        "success": bool(getattr(result, "success", False)),
+        "output": getattr(result, "output", "") or "",
+        "error": getattr(result, "error", None),
+        "error_type": getattr(result, "error_type", None),
+        "timed_out": bool(getattr(result, "timed_out", False)),
+        "cancelled": bool(getattr(result, "cancelled", False)),
+    }
+
+try:
+    payload = asyncio.run(_main())
+except BaseException as exc:
+    payload = {
+        "success": False,
+        "output": "",
+        "error": str(exc),
+        "error_type": exc.__class__.__name__,
+        "timed_out": False,
+        "cancelled": False,
+    }
+
+print(MARKER + json.dumps(payload, ensure_ascii=False))
+'''
+        timeout = int(env.get("AI_SPEC_SPLIT_CLAUDE_CODE_TIMEOUT_SECONDS", "540") or "540")
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                input=prompt,
+                text=True,
+                capture_output=True,
+                cwd=str(repo_root),
+                env=env,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Claude Code extraction timed out after {timeout}s") from exc
+
+        marker = "__AISPLIT_RESULT__"
+        payload_text = ""
+        for line in reversed((completed.stdout or "").splitlines()):
+            if line.startswith(marker):
+                payload_text = line[len(marker) :]
+                break
+        if not payload_text:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(
+                "Claude Code extraction failed before returning a result."
+                f" Details: {detail[-2000:] if detail else 'No output'}"
+            )
+
+        try:
+            return json.loads(payload_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Claude Code extraction returned invalid result JSON: {payload_text[:500]}") from exc
+
+    @classmethod
     def _call_claude_code_model(
         cls,
         prompt: str,
@@ -155,72 +245,103 @@ class AISpecSplitter:
 
             return None
 
-        runner = AgentRunner(
-            allowed_tools=[],
-            log_tools=False,
-            model_tier="standard",
-            env_vars=runtime_env_vars,
-        )
-        result = cls._run_agent_sync(runner.run(prompt))
-        if not result or not getattr(result, "success", False):
+        result = cls._run_claude_code_subprocess(prompt, runtime_env_vars)
+        if not result or not result.get("success"):
             recoverable_failed_result = result and not (
-                getattr(result, "timed_out", False)
-                or getattr(result, "cancelled", False)
-                or getattr(result, "error_type", None)
+                result.get("timed_out")
+                or result.get("cancelled")
+                or result.get("error_type")
             )
             if recoverable_failed_result:
                 for value in (
-                    getattr(result, "output", None),
-                    getattr(result, "error", None),
+                    result.get("output"),
+                    result.get("error"),
                 ):
                     payload = _extract_valid_test_case_json(value)
                     if payload:
                         return payload
 
             error = (
-                getattr(result, "error", None)
+                result.get("error")
                 or "Claude Code returned no successful result"
             )
             raise RuntimeError(
                 "Claude Code extraction failed. Check the Claude Code CLI, subscription login, "
                 f"and OAuth token configuration in Settings. Details: {error}"
             )
-        return getattr(result, "output", "") or ""
+        return result.get("output", "") or ""
 
     @staticmethod
-    def _call_text_model(api_key: str, base_url: str, model: str, prompt: str) -> str:
+    def _chat_completions_url(base_url: str) -> str:
+        base = base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    @classmethod
+    def _uses_chat_completions(cls, selection: RuntimeAISelection, configured_provider: str = "") -> bool:
+        display_provider = infer_display_provider(selection.base_url)
+        configured_provider = configured_provider.strip().lower()
+        return (
+            selection.provider == "openai_compatible"
+            or display_provider in {"openai", "openrouter"}
+            or configured_provider in {"openai", "openai_compatible", "openai-compatible", "openrouter"}
+        )
+
+    @classmethod
+    def _call_text_model(cls, selection: RuntimeAISelection, prompt: str, configured_provider: str = "") -> str:
         """Call the configured text model and return the response text."""
-        base_url = base_url.rstrip("/")
-        if "openrouter.ai" in base_url.lower():
-            from openai import OpenAI
-
-            client = OpenAI(api_key=api_key, base_url=base_url)
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-            )
-            if not response or not response.choices:
-                raise RuntimeError("AI returned empty choices - check API credentials and model availability")
-            return response.choices[0].message.content or ""
-
         import httpx
+
+        base_url = selection.base_url.rstrip("/")
+        if cls._uses_chat_completions(selection, configured_provider):
+            response = httpx.post(
+                cls._chat_completions_url(base_url),
+                headers={
+                    "Authorization": f"Bearer {selection.api_key}",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": selection.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": selection.max_tokens or 4096,
+                    "temperature": 0.0,
+                },
+                timeout=60.0,
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(f"Provider returned HTTP {response.status_code}: {response.text[:500]}")
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("AI returned empty choices - check API credentials and model availability")
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if not isinstance(message, dict):
+                return ""
+            content = message.get("content", "")
+            if isinstance(content, list):
+                parts = [part.get("text", "") for part in content if isinstance(part, dict)]
+                return "\n".join(part for part in parts if part)
+            return str(content or "")
 
         response = httpx.post(
             f"{base_url}/v1/messages",
             headers={
-                "x-api-key": api_key,
+                "x-api-key": selection.api_key,
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
             json={
-                "model": model,
-                "max_tokens": 4096,
+                "model": selection.model,
+                "max_tokens": selection.max_tokens or 4096,
                 "temperature": 0.0,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=60.0,
         )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Provider returned HTTP {response.status_code}: {response.text[:500]}")
         response.raise_for_status()
         data: dict[str, Any] = response.json()
         content = data.get("content") or []
@@ -253,8 +374,8 @@ class AISpecSplitter:
         selection = resolve_runtime_ai_selection("standard", env_vars=runtime_env_vars)
         api_key = selection.api_key
         base_url = selection.base_url
-        model = selection.model
         direct_api_key = api_key if cls._has_explicit_direct_api_key(runtime_env_vars, api_key) else ""
+        configured_provider = cls._env_value(runtime_env_vars, "QUORVEX_LLM_PROVIDER")
 
         use_claude_code = cls._is_claude_code_subscription_mode(runtime_env_vars, direct_api_key=direct_api_key)
         if use_claude_code and not cls._env_value(runtime_env_vars, "CLAUDE_CODE_OAUTH_TOKEN").strip():
@@ -274,7 +395,7 @@ class AISpecSplitter:
             if use_claude_code:
                 result_text = cls._call_claude_code_model(prompt, runtime_env_vars)
             else:
-                result_text = cls._call_text_model(api_key, base_url, model, prompt)
+                result_text = cls._call_text_model(selection, prompt, configured_provider)
         except RuntimeError:
             raise  # Re-raise our own errors
         except Exception as e:
@@ -317,8 +438,8 @@ class AISpecSplitter:
         selection = resolve_runtime_ai_selection("standard", env_vars=runtime_env_vars)
         api_key = selection.api_key
         base_url = selection.base_url
-        model = selection.model
         direct_api_key = api_key if cls._has_explicit_direct_api_key(runtime_env_vars, api_key) else ""
+        configured_provider = cls._env_value(runtime_env_vars, "QUORVEX_LLM_PROVIDER")
 
         use_claude_code = cls._is_claude_code_subscription_mode(runtime_env_vars, direct_api_key=direct_api_key)
         if use_claude_code and not cls._env_value(runtime_env_vars, "CLAUDE_CODE_OAUTH_TOKEN").strip():
@@ -338,7 +459,7 @@ class AISpecSplitter:
             if use_claude_code:
                 result_text = cls._call_claude_code_model(prompt, runtime_env_vars)
             else:
-                result_text = cls._call_text_model(api_key, base_url, model, prompt)
+                result_text = cls._call_text_model(selection, prompt, configured_provider)
         except RuntimeError:
             raise
         except Exception as e:

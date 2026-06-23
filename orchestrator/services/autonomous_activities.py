@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -2037,7 +2038,7 @@ def _validate_materialized_proposal(proposal: AutonomousTestProposal) -> dict[st
     server_process: subprocess.Popen[str] | None = None
     server_info: dict[str, Any] = {"base_url": base_url}
     if path.suffix == ".py":
-        command = ["python", "-m", "pytest", relative_path, "-q"]
+        command = [sys.executable, "-m", "pytest", relative_path, "-q"]
     elif relative_path.endswith((".spec.ts", ".test.ts")):
         package_json = REPOSITORY_ROOT / "package.json"
         web_package_json = REPOSITORY_ROOT / "web" / "package.json"

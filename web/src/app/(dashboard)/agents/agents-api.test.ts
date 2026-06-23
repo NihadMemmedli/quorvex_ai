@@ -12,6 +12,7 @@ import {
     projectQuery,
     queueCleanupSummary,
     specFileToSplitName,
+    splitSpecFile,
 } from './agents-api';
 import type { AgentRun } from './agents-model';
 
@@ -111,6 +112,39 @@ describe('agents API helpers', () => {
 
         const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit?];
         expect(String(firstCall[0])).toContain('/api/agents/runs/run 1/events?limit=20&after_sequence=4&project_id=project+1');
+    });
+
+    it('resolves splitSpecFile only after the async split job completes', async () => {
+        vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback: any) => {
+            if (typeof callback === 'function') callback();
+            return 0 as never;
+        });
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                json: () => Promise.resolve({ job_id: 'job-1', status: 'queued' }),
+            } as Response)
+            .mockResolvedValueOnce({
+                ok: true,
+                json: () => Promise.resolve({ job_id: 'job-1', status: 'running' }),
+            } as Response)
+            .mockResolvedValueOnce({
+                ok: true,
+                json: () => Promise.resolve({
+                    job_id: 'job-1',
+                    status: 'completed',
+                    result: { count: 1, files: ['account/login.md'], output_dir: 'account' },
+                }),
+            } as Response);
+        vi.stubGlobal('fetch', fetchMock);
+
+        await expect(splitSpecFile('/tmp/work/specs/account/login.md')).resolves.toEqual({
+            count: 1,
+            files: ['account/login.md'],
+            output_dir: 'account',
+        });
+        expect(String(fetchMock.mock.calls[0][0])).toContain('/specs/split-jobs');
+        expect(String(fetchMock.mock.calls[1][0])).toContain('/specs/split-jobs/job-1');
     });
 
     it('resolves timestamp test run ids through linked agent runs', async () => {

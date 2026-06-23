@@ -481,7 +481,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: () => '/specs/split',
+    getPath: () => '/specs/split-jobs',
     getBody: (args, pid) => ({
       spec_name: args.specName,
       output_dir: args.outputDir || undefined,

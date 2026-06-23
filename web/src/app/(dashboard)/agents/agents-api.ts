@@ -1,4 +1,5 @@
 import { API_BASE } from '@/lib/api';
+import { splitSpecWithJob } from '@/lib/spec-split-jobs';
 import type {
     AgentDefinition,
     AgentHistoryCounts,
@@ -417,12 +418,7 @@ export function specFileToSplitName(specFile: string) {
 }
 
 export async function splitSpecFile(specFile: string) {
-    const res = await fetch(`${API_BASE}/specs/split`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ spec_name: specFileToSplitName(specFile) }),
-    });
-    return readJsonResponse<{ count: number; files: string[]; output_dir: string }>(res, `HTTP ${res.status}`);
+    return splitSpecWithJob({ spec_name: specFileToSplitName(specFile) });
 }
 
 export async function controlAgentRun(runId: string, action: 'pause' | 'resume' | 'cancel', projectId?: string | null) {

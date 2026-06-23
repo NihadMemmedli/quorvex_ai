@@ -42,6 +42,11 @@ async def execute_domain_job(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("specs_paths"),
             bool(payload.get("use_ai_matching", True)),
         )
+    elif job_type == "spec_split":
+        from orchestrator.api.specs import _run_spec_split_job
+
+        split_payload = {key: value for key, value in payload.items() if key not in {"job_type", "job_id"}}
+        await _run_spec_split_job(job_id, split_payload)
     else:
         raise ValueError(f"Unsupported domain job type: {job_type}")
 

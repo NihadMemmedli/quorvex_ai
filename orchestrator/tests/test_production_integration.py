@@ -9,6 +9,7 @@ Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_production_integrat
 
 import os
 import sys
+import importlib
 from io import BytesIO
 from pathlib import Path
 
@@ -26,11 +27,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 class TestAPIStartup:
     """Test that the API starts correctly with new security requirements."""
 
-    def test_api_module_imports(self):
+    def test_api_module_imports(self, monkeypatch):
         """API modules should import without error when JWT_SECRET_KEY is set."""
+        monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key-for-integration-tests")
+
         # This will fail if there are syntax errors or import issues
         from orchestrator.api import main, security
 
+        security = importlib.reload(security)
         assert security.JWT_SECRET_KEY == "test-secret-key-for-integration-tests"
         assert main.app is not None
 

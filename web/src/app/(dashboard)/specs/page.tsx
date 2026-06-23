@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { splitSpecWithJob } from '@/lib/spec-split-jobs';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
     browserAuthSessionLabel,
@@ -705,23 +706,12 @@ function SpecsPageContent() {
         setSplitting(true);
 
         try {
-            const res = await fetch(`${API_BASE}/specs/split`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    spec_name: splitSpecName,
-                    project_id: currentProject?.id,
-                    mode: splitMode,
-                    extraction_method: splitExtractionMethod
-                })
+            const data = await splitSpecWithJob({
+                spec_name: splitSpecName,
+                project_id: currentProject?.id,
+                mode: splitMode,
+                extraction_method: splitExtractionMethod
             });
-            const data = await res.json();
-
-            if (!res.ok) {
-                // API returned an error
-                alert(`Failed to split spec: ${data.detail || 'Unknown error'}`);
-                return;
-            }
 
             if (data.count > 0) {
                 const modeText = splitMode === 'grouped'
@@ -748,7 +738,8 @@ function SpecsPageContent() {
             }
         } catch (e) {
             console.error('Failed to split spec:', e);
-            alert('Failed to split spec. See console for details.');
+            const message = e instanceof Error ? e.message : 'See console for details.';
+            alert(`Failed to split spec: ${message}`);
         } finally {
             setSplitting(false);
         }
