@@ -4,7 +4,7 @@
 # ============================================
 # Use a slim Node runtime and install only Chromium instead of carrying the
 # official all-browser Playwright image.
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 
 WORKDIR /app
 
