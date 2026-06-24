@@ -1,4 +1,4 @@
 mkdocs>=1.6.0
-mkdocs-material>=9.5.0
+mkdocs-material>=9.7.6
 mkdocs-minify-plugin>=0.8.0
 PyYAML>=6.0
