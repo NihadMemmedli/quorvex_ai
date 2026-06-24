@@ -52,7 +52,7 @@
     "webdriverio": "^9.27.1"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.177",
+    "@anthropic-ai/claude-code": "2.1.183",
     "@playwright/mcp": "0.0.76",
     "playwright": "1.61.0",
     "playwright-core": "1.61.0",
