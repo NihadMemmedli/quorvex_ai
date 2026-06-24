@@ -18,12 +18,14 @@ from sqlmodel import Session, select
 
 from orchestrator.api.models_db import (
     RegressionBatch,
+    SpecMetadata,
     get_spec_metadata,
 )
 from orchestrator.api.models_db import (
     TestRun as DBTestRun,
 )
 from orchestrator.api.spec_files import build_generated_test_index, resolve_generated_code_path
+from orchestrator.utils.test_counter import count_tests_in_file
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +184,30 @@ def select_regression_specs(config: BatchConfig, session: Session) -> list[str]:
         spec_names_to_run = list(config.spec_names)
     elif config.automated_only:
         generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
+        project_spec_names: set[str] | None = None
+        excluded_spec_names: set[str] = set()
+        if config.project_id and config.project_id != "default":
+            project_spec_names = set(
+                session.exec(
+                    select(SpecMetadata.spec_name).where(SpecMetadata.project_id == config.project_id)
+                ).all()
+            )
+        elif config.project_id == "default":
+            excluded_spec_names = set(
+                session.exec(
+                    select(SpecMetadata.spec_name).where(SpecMetadata.project_id != "default")
+                ).all()
+            )
         if SPECS_DIR.exists():
             for f in SPECS_DIR.glob("**/*.md"):
+                spec_name = str(f.relative_to(SPECS_DIR))
+                if project_spec_names is not None and spec_name not in project_spec_names:
+                    continue
+                if spec_name in excluded_spec_names:
+                    continue
                 code_path = resolve_generated_code_path(f, generated_test_index, BASE_DIR)
                 if code_path:
-                    spec_names_to_run.append(str(f.relative_to(SPECS_DIR)))
+                    spec_names_to_run.append(spec_name)
 
     # Apply tag filter (OR logic)
     if config.tags and len(config.tags) > 0:
@@ -214,6 +235,16 @@ def select_regression_specs(config: BatchConfig, session: Session) -> list[str]:
         raise ValueError("No specs match the specified filters (automated_only, tags)")
 
     return spec_names_to_run
+
+
+def _actual_test_count_for_spec(spec_name: str) -> int:
+    spec_path = SPECS_DIR / spec_name
+    if not spec_path.exists():
+        return 1
+    code_path = _get_try_code_path(spec_name, spec_path)
+    if not code_path:
+        return 1
+    return count_tests_in_file(code_path)
 
 
 def _test_data_refs_for_spec(config: BatchConfig, spec_name: str) -> list[str]:
@@ -244,6 +275,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
     batch_id = f"batch_{now.strftime('%Y-%m-%d_%H-%M-%S')}_{uuid.uuid4().hex[:8]}"
 
     batch_name = config.batch_name or f"Regression Run - {now.strftime('%Y-%m-%d %H:%M')}"
+    actual_total_tests = sum(_actual_test_count_for_spec(spec_name) for spec_name in spec_names_to_run)
 
     batch = RegressionBatch(
         id=batch_id,
@@ -256,6 +288,9 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
         project_id=config.project_id,
         total_tests=len(spec_names_to_run),
         queued=len(spec_names_to_run),
+        actual_total_tests=actual_total_tests,
+        actual_passed=0,
+        actual_failed=0,
         status="pending",
     )
     session.add(batch)

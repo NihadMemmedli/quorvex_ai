@@ -609,14 +609,14 @@ export default function BatchDetailPage() {
             {(batch.status === 'running' || batch.status === 'pending') && (
                 <div className="card" style={{ padding: '1.25rem', marginBottom: '2rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                        <span style={{ fontWeight: 600 }}>Progress</span>
-                        <span style={{ color: 'var(--text-secondary)' }}>{batch.passed + batch.failed + batch.stopped} / {batch.total_tests} completed{batch.running > 0 && ` (${batch.running} running)`}</span>
+                        <span style={{ fontWeight: 600 }}>Run Progress</span>
+                        <span style={{ color: 'var(--text-secondary)' }}>{batch.passed + batch.failed + batch.stopped} / {batch.total_tests} files completed{batch.running > 0 && ` (${batch.running} running)`}</span>
                     </div>
                     <div style={{ height: '12px', background: 'var(--surface-hover)', borderRadius: '6px', display: 'flex', overflow: 'hidden' }}>
-                        <div style={{ width: `${(batch.passed / batch.total_tests) * 100}%`, background: 'var(--success)', transition: 'width 0.3s' }} />
-                        <div style={{ width: `${(batch.failed / batch.total_tests) * 100}%`, background: 'var(--danger)', transition: 'width 0.3s' }} />
-                        <div style={{ width: `${(batch.stopped / batch.total_tests) * 100}%`, background: 'var(--warning)', transition: 'width 0.3s' }} />
-                        <div style={{ width: `${(batch.running / batch.total_tests) * 100}%`, background: 'var(--primary)', animation: 'pulse 1.5s ease-in-out infinite' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.passed / batch.total_tests) * 100 : 0}%`, background: 'var(--success)', transition: 'width 0.3s' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.failed / batch.total_tests) * 100 : 0}%`, background: 'var(--danger)', transition: 'width 0.3s' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.stopped / batch.total_tests) * 100 : 0}%`, background: 'var(--warning)', transition: 'width 0.3s' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.running / batch.total_tests) * 100 : 0}%`, background: 'var(--primary)', animation: 'pulse 1.5s ease-in-out infinite' }} />
                     </div>
                 </div>
             )}

@@ -32,6 +32,7 @@ from .models import (
 from .models_db import RegressionBatch
 from .models_db import TestRun as DBTestRun
 from .process_manager import get_process_manager
+from .spec_files import build_generated_test_index, resolve_generated_code_path
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ router = APIRouter(prefix="/regression", tags=["regression"])
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RUNS_DIR = BASE_DIR / "runs"
+SPECS_DIR = BASE_DIR / "specs"
 TESTS_DIR = BASE_DIR / "tests" / "generated"
 
 
@@ -90,6 +92,16 @@ def _get_test_code_path(spec_name: str) -> Path | None:
     - Nested: "folder/subfolder/my-test.md" -> "my-test.spec.ts"
     - With underscores: "folder_subfolder_my-test.md" -> "my-test.spec.ts"
     """
+    spec_path = SPECS_DIR / spec_name
+    if spec_path.exists():
+        indexed_path = resolve_generated_code_path(
+            spec_path,
+            build_generated_test_index(BASE_DIR, RUNS_DIR),
+            BASE_DIR,
+        )
+        if indexed_path:
+            return Path(indexed_path)
+
     # Normalize spec name - remove .md extension if present
     base_name = spec_name
     if base_name.endswith(".md"):
@@ -179,6 +191,34 @@ def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]
         # stopped/running/queued don't contribute to passed/failed counts
 
     return actual_total, actual_passed, actual_failed
+
+
+def _cache_actual_test_counts(
+    batch: RegressionBatch, actual_total: int, actual_passed: int, actual_failed: int, session: Session
+) -> None:
+    if (
+        batch.actual_total_tests == actual_total
+        and batch.actual_passed == actual_passed
+        and batch.actual_failed == actual_failed
+    ):
+        return
+    batch.actual_total_tests = actual_total
+    batch.actual_passed = actual_passed
+    batch.actual_failed = actual_failed
+    session.add(batch)
+    session.commit()
+    session.refresh(batch)
+
+
+def _has_fresh_actual_test_count_cache(batch: RegressionBatch) -> bool:
+    if batch.actual_total_tests is None or batch.actual_passed is None or batch.actual_failed is None:
+        return False
+
+    completed_result_files = batch.passed + batch.failed
+    if completed_result_files > 0 and batch.actual_passed + batch.actual_failed < completed_result_files:
+        return False
+
+    return True
 
 
 FAILURE_STATUSES = {"failed", "error", "stopped"}
@@ -609,15 +649,16 @@ def list_batches(
     for batch in batches:
         actual_total, actual_passed, actual_failed = None, None, None
 
-        # Use cached values from DB if available
-        if batch.actual_total_tests is not None:
+        # Use cached values from DB if available and no longer creation-time stale.
+        if _has_fresh_actual_test_count_cache(batch):
             actual_total = batch.actual_total_tests
             actual_passed = batch.actual_passed
             actual_failed = batch.actual_failed
-        elif include_actual_counts:
+        elif include_actual_counts or batch.actual_total_tests is not None:
             # Fallback: compute from disk (expensive)
             runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch.id)).all()
             actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+            _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
 
         summaries.append(
             _batch_to_summary(
@@ -652,6 +693,7 @@ def get_batch_detail(
 
     # Calculate actual test counts
     actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+    _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
 
     # Sort runs: failed first, then by status, then by name
     status_order = {"failed": 0, "stopped": 1, "cancelled": 1, "running": 2, "queued": 3, "passed": 4, "completed": 4}
@@ -708,11 +750,11 @@ def refresh_batch_stats(batch_id: str, session: Session = Depends(get_session)):
 
     # Cache actual test counts (D1 performance fix)
     actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+
+    session.add(batch)
     batch.actual_total_tests = actual_total
     batch.actual_passed = actual_passed
     batch.actual_failed = actual_failed
-
-    session.add(batch)
     session.commit()
     session.refresh(batch)
 
@@ -804,10 +846,11 @@ def generate_batch_html_report(batch: RegressionBatch, tests: list[dict]) -> str
     """Generate a standalone HTML report for the batch."""
 
     # Calculate stats
-    passed_count = sum(1 for t in tests if t["status"] in ("passed", "completed"))
-    failed_count = sum(1 for t in tests if t["status"] in ("failed", "error"))
+    total_actual_tests = sum(int(t.get("actual_test_count") or 1) for t in tests)
+    passed_count = sum(int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("passed", "completed"))
+    failed_count = sum(int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("failed", "error"))
     sum(1 for t in tests if t["status"] == "stopped")
-    success_rate = round((passed_count / len(tests) * 100), 1) if tests else 0
+    success_rate = round((passed_count / total_actual_tests * 100), 1) if total_actual_tests else 0
 
     # Format dates
     created_at = batch.created_at.strftime("%b %d, %Y %I:%M %p") if batch.created_at else "-"
@@ -1490,7 +1533,7 @@ def generate_batch_html_report(batch: RegressionBatch, tests: list[dict]) -> str
 
         <div class="summary-cards">
             <div class="card stat-card">
-                <div class="stat-value">{batch.total_tests}</div>
+                <div class="stat-value">{total_actual_tests}</div>
                 <div class="stat-label">Total Tests</div>
             </div>
             <div class="card stat-card success">
@@ -1572,6 +1615,7 @@ def export_batch(
         duration = None
         if run.started_at and run.completed_at:
             duration = int((run.completed_at - run.started_at).total_seconds())
+        actual_test_count = _count_tests_for_run(run)
 
         tests.append(
             {
@@ -1586,8 +1630,16 @@ def export_batch(
                 "error_message": run.error_message,
                 **_get_run_failure_details(run),
                 "duration_seconds": duration,
+                "actual_test_count": actual_test_count,
             }
         )
+
+    actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+    batch.actual_total_tests = actual_total
+    batch.actual_passed = actual_passed
+    batch.actual_failed = actual_failed
+    session.add(batch)
+    session.commit()
 
     if format == "csv":
         # Generate CSV
@@ -1647,12 +1699,16 @@ def export_batch(
             tags_used=batch.tags_used,
             hybrid_mode=batch.hybrid_mode,
             summary={
-                "total_tests": batch.total_tests,
-                "passed": batch.passed,
-                "failed": batch.failed,
+                "total_tests": actual_total,
+                "total_files": batch.total_tests,
+                "passed": actual_passed,
+                "failed": actual_failed,
                 "stopped": batch.stopped,
-                "success_rate": batch.success_rate,
+                "success_rate": round((actual_passed / actual_total * 100), 1) if actual_total else 0,
                 "duration_seconds": batch.duration_seconds,
+                "actual_total_tests": actual_total,
+                "actual_passed": actual_passed,
+                "actual_failed": actual_failed,
             },
             tests=tests,
         )

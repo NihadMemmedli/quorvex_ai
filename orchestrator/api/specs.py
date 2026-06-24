@@ -273,6 +273,7 @@ def get_spec_folders(project_id: str | None = None, session: Session = Depends(g
 def list_automated_specs(
     tags: str | None = None,
     folder: str | None = None,
+    search: str | None = None,
     project_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -285,6 +286,7 @@ def list_automated_specs(
     Query parameters:
     - tags: Comma-separated tag filter (OR logic)
     - folder: Filter by folder path prefix
+    - search: Case-insensitive spec name search
     - project_id: Filter by project ID
     - limit: Page size (default 50, max 100)
     - offset: Starting position for pagination
@@ -318,6 +320,7 @@ def list_automated_specs(
 
     all_specs = []
     tag_filter = tags.split(",") if tags else []
+    search_lower = search.lower().strip() if search else None
     generated_test_index = build_generated_test_index(BASE_DIR, RUNS_DIR)
 
     if SPECS_DIR.exists():
@@ -332,6 +335,9 @@ def list_automated_specs(
             if folder:
                 if not name.startswith(folder + "/"):
                     continue
+
+            if search_lower and search_lower not in name.lower():
+                continue
 
             # Get metadata from pre-fetched map (O(1) lookup instead of DB query)
             meta = meta_map.get(name)
@@ -387,6 +393,7 @@ def list_automated_specs(
         "offset": offset,
         "has_more": has_more,
         "filtered_folder": folder,
+        "filtered_search": search,
         "filtered_by_tags": tag_filter if tag_filter else None,
         "filtered_by_project": project_id,
     }

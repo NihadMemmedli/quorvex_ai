@@ -62,6 +62,9 @@ function jsonHeaders() {
 
 function friendlyCaptureError(detail: string, mode: 'capture' | 'refresh' = 'capture') {
     const lower = detail.toLowerCase();
+    if (lower.includes('direct playwright capture failed') || lower.includes('mcp fallback failed')) {
+        return detail;
+    }
     if (
         lower.includes('llm provider api key is not configured') ||
         lower.includes('llm runtime is not authenticated') ||

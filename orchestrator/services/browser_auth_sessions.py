@@ -43,7 +43,7 @@ AUTH_SESSIONS_DIR = Path(
         "BROWSER_AUTH_SESSIONS_DIR", str(BASE_DIR / "runs" / "auth_sessions")
     )
 )
-BROWSER_AUTH_CAPTURE_VERSION = "mcp-storage-v1"
+BROWSER_AUTH_CAPTURE_VERSION = "direct-playwright-v2"
 CLAUDE_CODE_AUTH_MODE = "claude_code_subscription"
 
 
@@ -550,6 +550,12 @@ def create_storage_state_via_playwright(
     helper_path.write_text(_login_helper_script(), encoding="utf-8")
 
     env = os.environ.copy()
+    node_modules_path = str(BASE_DIR / "node_modules")
+    env["NODE_PATH"] = (
+        node_modules_path
+        if not env.get("NODE_PATH")
+        else os.pathsep.join([node_modules_path, env["NODE_PATH"]])
+    )
     env.update(
         {
             "BROWSER_AUTH_LOGIN_URL": login_url,
@@ -778,6 +784,93 @@ def _normalize_capture_error(message: str | None) -> str:
     if "timeout" in lower or "timed out" in lower:
         return "MCP browser auth capture timed out before producing storage state."
     return raw[-1200:]
+
+
+def _normalize_direct_capture_error(message: str | None) -> str:
+    raw = (message or "").strip()
+    lower = raw.lower()
+    if not raw:
+        return "Direct Playwright browser auth capture failed."
+    if any(
+        token in lower
+        for token in [
+            "security challenge",
+            "cloudflare",
+            "anti-bot",
+            "captcha",
+            "turnstile",
+            "verify you are human",
+            "checking your browser",
+        ]
+    ):
+        return (
+            "Security challenge detected during direct Playwright browser auth capture. Automated capture "
+            "cannot bypass Cloudflare, CAPTCHA, or anti-bot checks; allowlist the capture browser or disable "
+            "the challenge for this environment."
+        )
+    if "success_url_pattern is not a valid regular expression" in lower:
+        return raw[-1200:]
+    if any(
+        token in lower
+        for token in [
+            "login form not found",
+            "could not find a visible editable username or password input",
+        ]
+    ):
+        return (
+            "Direct Playwright login form not found. Check the login URL or add selector hints."
+        )
+    if "password field not found" in lower:
+        return (
+            "Direct Playwright password field not found after submitting the username. Add a password "
+            "selector or username continue selector hint for this login flow."
+        )
+    if "did not reach expected success url" in lower:
+        return raw[-1200:]
+    if "storage state file was not produced" in lower:
+        return "Direct Playwright storage state file was not produced."
+    if "storage state file is not valid json" in lower:
+        return "Direct Playwright storage state file is not valid JSON."
+    if "could not start" in lower:
+        return raw[-1200:]
+    if "timed out" in lower or "timeout" in lower:
+        return raw[-1200:]
+    return raw[-1200:]
+
+
+def _direct_capture_failure_can_use_mcp(message: str | None) -> bool:
+    lower = (message or "").lower()
+    if any(
+        token in lower
+        for token in [
+            "security challenge",
+            "cloudflare",
+            "anti-bot",
+            "captcha",
+            "turnstile",
+            "verify you are human",
+            "checking your browser",
+            "success_url_pattern is not a valid regular expression",
+            "storage state file was not produced",
+            "storage state file is not valid json",
+            "could not start",
+            "timed out",
+            "timeout",
+        ]
+    ):
+        return False
+    return any(
+        token in lower
+        for token in [
+            "login form not found",
+            "could not find a visible editable username or password input",
+            "password field not found",
+            "did not reach expected success url",
+            "final url",
+            "page.goto",
+            "net::",
+        ]
+    )
 
 
 def _storage_state_candidates(
@@ -1070,26 +1163,28 @@ def refresh_browser_auth_session(
         "submit_selector": row.submit_selector,
         "success_url_pattern": row.success_url_pattern,
     }
-    capture_runtime_env = runtime_env_vars(session)
     try:
         try:
-            state = capture_storage_state_via_mcp_agent(
-                session_id=row.id,
-                runtime_env=capture_runtime_env,
+            state = create_storage_state_via_playwright(
                 **capture_kwargs,
+                run_dir=_capture_run_dir(f"{row.id}-playwright"),
             )
-        except BrowserAuthStorageStateMissingError as mcp_exc:
+        except BrowserAuthSessionError as direct_exc:
+            direct_message = _normalize_direct_capture_error(str(direct_exc))
+            if not _direct_capture_failure_can_use_mcp(str(direct_exc)):
+                raise BrowserAuthSessionError(direct_message) from direct_exc
             try:
-                state = create_storage_state_via_playwright(
+                state = capture_storage_state_via_mcp_agent(
+                    session_id=row.id,
+                    runtime_env=runtime_env_vars(session),
                     **capture_kwargs,
-                    run_dir=_capture_run_dir(f"{row.id}-playwright"),
                 )
-            except BrowserAuthSessionError as direct_exc:
+            except BrowserAuthSessionError as mcp_exc:
                 mcp_message = _normalize_capture_error(str(mcp_exc))
-                direct_message = _normalize_capture_error(str(direct_exc))
                 raise BrowserAuthSessionError(
-                    f"{mcp_message}; direct Playwright fallback failed: {direct_message}"
-                ) from direct_exc
+                    f"Direct Playwright capture failed: {direct_message}; "
+                    f"MCP fallback failed: {mcp_message}"
+                ) from mcp_exc
         row.storage_state_json_encrypted = encrypt_storage_state(state)
         row.status = "active"
         row.failure_reason = None

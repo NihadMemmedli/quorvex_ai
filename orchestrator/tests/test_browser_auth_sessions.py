@@ -1,9 +1,13 @@
 import asyncio
 import os
+import shutil
+import subprocess
 import sys
+import threading
 import types
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
@@ -928,11 +932,11 @@ def test_browser_auth_session_create_mcp_failure_returns_400_and_persists_invali
             project_id, "LOGIN_PASSWORD", "secret-password", session
         )
 
-    def fail_mcp_capture(**_kwargs):
+    def fail_direct_capture(**_kwargs):
         raise BrowserAuthSessionError("security challenge detected")
 
     monkeypatch.setattr(
-        service, "capture_storage_state_via_mcp_agent", fail_mcp_capture
+        service, "create_storage_state_via_playwright", fail_direct_capture
     )
 
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -998,7 +1002,7 @@ def test_browser_auth_session_create_reactivates_revoked_same_name_row(monkeypat
         session.refresh(row)
         existing_id = row.id
 
-    def fake_mcp_capture(**kwargs):
+    def fake_direct_capture(**kwargs):
         captured.update(kwargs)
         return {
             "cookies": [
@@ -1013,7 +1017,7 @@ def test_browser_auth_session_create_reactivates_revoked_same_name_row(monkeypat
         }
 
     monkeypatch.setattr(
-        service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+        service, "create_storage_state_via_playwright", fake_direct_capture
     )
 
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -1039,7 +1043,7 @@ def test_browser_auth_session_create_reactivates_revoked_same_name_row(monkeypat
     assert body["is_default"] is False
     assert body["failure_reason"] is None
     assert body["base_url"] == "https://pre.wetravel.to/"
-    assert captured["session_id"] == existing_id
+    assert captured["username"] == "user@example.com"
     sessions = list_response.json()["sessions"]
     assert len(sessions) == 1
     assert sessions[0]["id"] == existing_id
@@ -1079,12 +1083,12 @@ def test_browser_auth_session_create_updates_invalid_same_name_row(monkeypatch):
         session.refresh(row)
         existing_id = row.id
 
-    def fake_mcp_capture(**kwargs):
+    def fake_direct_capture(**kwargs):
         captured.update(kwargs)
         return {"cookies": [], "origins": []}
 
     monkeypatch.setattr(
-        service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+        service, "create_storage_state_via_playwright", fake_direct_capture
     )
 
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -1107,7 +1111,7 @@ def test_browser_auth_session_create_updates_invalid_same_name_row(monkeypatch):
     assert body["status"] == "active"
     assert body["failure_reason"] is None
     assert body["username_selector"] == "#email"
-    assert captured["session_id"] == existing_id
+    assert captured["username_selector"] == "#email"
     sessions = list_response.json()["sessions"]
     assert len([item for item in sessions if item["name"] == "Broken login"]) == 1
 
@@ -1148,7 +1152,7 @@ def test_create_browser_auth_session_integrity_error_is_normalized(monkeypatch):
             raise AssertionError("Expected BrowserAuthSessionError")
 
 
-def test_refresh_browser_auth_session_uses_mcp_capture_and_passes_advanced_selectors(
+def test_refresh_browser_auth_session_uses_direct_playwright_and_passes_advanced_selectors(
     monkeypatch,
 ):
     from orchestrator.services import browser_auth_sessions as service
@@ -1181,39 +1185,35 @@ def test_refresh_browser_auth_session_uses_mcp_capture_and_passes_advanced_selec
         session.commit()
         session.refresh(row)
 
-        def fake_mcp_capture(**kwargs):
+        def fake_direct_capture(**kwargs):
             captured.update(kwargs)
             return {"cookies": [], "origins": []}
 
         monkeypatch.setattr(
-            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+            service, "create_storage_state_via_playwright", fake_direct_capture
         )
 
-        def fake_runtime_env_vars(session_arg=None):
-            captured["runtime_session"] = session_arg
-            return {
-                "QUORVEX_LLM_PROVIDER": "zai",
-                "QUORVEX_LLM_BASE_URL": "https://api.z.ai/api/anthropic",
-                "QUORVEX_LLM_API_KEY": "settings-session-key",
-                "QUORVEX_LLM_TOOL_DEEP_MODEL": "glm-5.1",
-            }
+        def fail_mcp_capture(**_kwargs):
+            raise AssertionError(
+                "MCP fallback should not run when direct capture succeeds"
+            )
 
-        monkeypatch.setattr(service, "runtime_env_vars", fake_runtime_env_vars)
+        monkeypatch.setattr(
+            service, "capture_storage_state_via_mcp_agent", fail_mcp_capture
+        )
 
         refreshed = refresh_browser_auth_session(session, project_id, row.id)
 
     assert refreshed.status == "active"
-    assert captured["session_id"] == row.id
     assert captured["username_selector"] == "#email"
     assert captured["password_selector"] == "#password"
     assert captured["username_continue_selector"] == "button.next"
     assert captured["submit_selector"] == "button.sign-in"
     assert captured["success_url_pattern"] == "/dashboard$"
-    assert captured["runtime_session"] is session
-    assert captured["runtime_env"]["QUORVEX_LLM_API_KEY"] == "settings-session-key"
+    assert isinstance(captured["run_dir"], Path)
 
 
-def test_refresh_browser_auth_session_falls_back_to_direct_playwright_when_mcp_omits_storage(
+def test_refresh_browser_auth_session_falls_back_to_mcp_when_direct_cannot_find_login_controls(
     monkeypatch,
 ):
     from orchestrator.services import browser_auth_sessions as service
@@ -1243,14 +1243,15 @@ def test_refresh_browser_auth_session_falls_back_to_direct_playwright_when_mcp_o
         session.commit()
         session.refresh(row)
 
-        def fake_mcp_capture(**kwargs):
-            captured["mcp"] = kwargs
-            raise service.BrowserAuthStorageStateMissingError(
-                "Storage state file not produced by MCP browser auth capture."
-            )
-
         def fake_direct_capture(**kwargs):
             captured["direct"] = kwargs
+            raise BrowserAuthSessionError(
+                "Login form not found. Could not find a visible editable username "
+                "or password input on the login page."
+            )
+
+        def fake_mcp_capture(**kwargs):
+            captured["mcp"] = kwargs
             return {
                 "cookies": [
                     {
@@ -1263,12 +1264,22 @@ def test_refresh_browser_auth_session_falls_back_to_direct_playwright_when_mcp_o
                 "origins": [],
             }
 
-        monkeypatch.setattr(
-            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
-        )
+        def fake_runtime_env_vars(session_arg=None):
+            captured["runtime_session"] = session_arg
+            return {
+                "QUORVEX_LLM_PROVIDER": "zai",
+                "QUORVEX_LLM_BASE_URL": "https://api.z.ai/api/anthropic",
+                "QUORVEX_LLM_API_KEY": "settings-session-key",
+                "QUORVEX_LLM_TOOL_DEEP_MODEL": "glm-5.1",
+            }
+
         monkeypatch.setattr(
             service, "create_storage_state_via_playwright", fake_direct_capture
         )
+        monkeypatch.setattr(
+            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+        )
+        monkeypatch.setattr(service, "runtime_env_vars", fake_runtime_env_vars)
 
         refreshed = refresh_browser_auth_session(session, project_id, row.id)
 
@@ -1278,6 +1289,11 @@ def test_refresh_browser_auth_session_falls_back_to_direct_playwright_when_mcp_o
     assert captured["direct"]["username_selector"] == "#email"
     assert captured["direct"]["password_selector"] == "#password"
     assert isinstance(captured["direct"]["run_dir"], Path)
+    assert captured["runtime_session"] is session
+    assert (
+        captured["mcp"]["runtime_env"]["QUORVEX_LLM_API_KEY"]
+        == "settings-session-key"
+    )
     assert (
         decrypt_storage_state(refreshed.storage_state_json_encrypted)["cookies"][0][
             "value"
@@ -1286,7 +1302,7 @@ def test_refresh_browser_auth_session_falls_back_to_direct_playwright_when_mcp_o
     )
 
 
-def test_refresh_browser_auth_session_reports_direct_fallback_failure(monkeypatch):
+def test_refresh_browser_auth_session_reports_combined_direct_and_mcp_failure(monkeypatch):
     from orchestrator.services import browser_auth_sessions as service
 
     project_id = _create_project()
@@ -1312,23 +1328,23 @@ def test_refresh_browser_auth_session_reports_direct_fallback_failure(monkeypatc
         session.commit()
         session.refresh(row)
 
-        def fake_mcp_capture(**kwargs):
-            captured["mcp"] = kwargs
-            raise service.BrowserAuthStorageStateMissingError(
-                "Storage state file not produced by MCP browser auth capture."
-            )
-
         def fake_direct_capture(**kwargs):
             captured["direct"] = kwargs
             raise BrowserAuthSessionError(
-                "Direct Playwright storage state file was not produced."
+                "Password field not found after submitting the username."
+            )
+
+        def fake_mcp_capture(**kwargs):
+            captured["mcp"] = kwargs
+            raise BrowserAuthSessionError(
+                "Storage state file not produced by MCP browser auth capture."
             )
 
         monkeypatch.setattr(
-            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+            service, "create_storage_state_via_playwright", fake_direct_capture
         )
         monkeypatch.setattr(
-            service, "create_storage_state_via_playwright", fake_direct_capture
+            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
         )
 
         try:
@@ -1345,17 +1361,18 @@ def test_refresh_browser_auth_session_reports_direct_fallback_failure(monkeypatc
     assert row.status == "invalid"
     assert row.failure_reason == message
     assert "MCP browser auth capture" in message
-    assert "direct Playwright fallback failed" in message
-    assert "Direct Playwright storage state file was not produced" in message
+    assert "Direct Playwright capture failed" in message
+    assert "MCP fallback failed" in message
+    assert "Direct Playwright password field not found" in message
 
 
-def test_refresh_browser_auth_session_init_page_failure_does_not_fall_back(
+def test_refresh_browser_auth_session_direct_infrastructure_failure_does_not_fall_back(
     monkeypatch,
 ):
     from orchestrator.services import browser_auth_sessions as service
 
     project_id = _create_project()
-    direct_called = False
+    mcp_called = False
 
     with Session(engine) as session:
         assert set_project_credential(
@@ -1377,22 +1394,21 @@ def test_refresh_browser_auth_session_init_page_failure_does_not_fall_back(
         session.commit()
         session.refresh(row)
 
-        def fake_mcp_capture(**_kwargs):
+        def fake_direct_capture(**_kwargs):
             raise BrowserAuthSessionError(
-                "MCP failed loading --init-page browser-dialog-recovery.init.ts: "
-                "Unexpected token 'export'"
+                "Direct Playwright browser auth capture could not start: node was not found"
             )
 
-        def fake_direct_capture(**_kwargs):
-            nonlocal direct_called
-            direct_called = True
+        def fake_mcp_capture(**_kwargs):
+            nonlocal mcp_called
+            mcp_called = True
             return {"cookies": [], "origins": []}
 
         monkeypatch.setattr(
-            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+            service, "create_storage_state_via_playwright", fake_direct_capture
         )
         monkeypatch.setattr(
-            service, "create_storage_state_via_playwright", fake_direct_capture
+            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
         )
 
         try:
@@ -1404,8 +1420,8 @@ def test_refresh_browser_auth_session_init_page_failure_does_not_fall_back(
 
         session.refresh(row)
 
-    assert direct_called is False
-    assert "infrastructure failed before navigation" in message
+    assert mcp_called is False
+    assert "could not start" in message
     assert row.status == "invalid"
     assert row.failure_reason == message
 
@@ -1416,7 +1432,7 @@ def test_refresh_browser_auth_session_security_challenge_does_not_fall_back(
     from orchestrator.services import browser_auth_sessions as service
 
     project_id = _create_project()
-    direct_called = False
+    mcp_called = False
 
     with Session(engine) as session:
         assert set_project_credential(
@@ -1438,19 +1454,19 @@ def test_refresh_browser_auth_session_security_challenge_does_not_fall_back(
         session.commit()
         session.refresh(row)
 
-        def fake_mcp_capture(**_kwargs):
+        def fake_direct_capture(**_kwargs):
             raise BrowserAuthSessionError("security challenge detected")
 
-        def fake_direct_capture(**_kwargs):
-            nonlocal direct_called
-            direct_called = True
+        def fake_mcp_capture(**_kwargs):
+            nonlocal mcp_called
+            mcp_called = True
             return {"cookies": [], "origins": []}
 
         monkeypatch.setattr(
-            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
+            service, "create_storage_state_via_playwright", fake_direct_capture
         )
         monkeypatch.setattr(
-            service, "create_storage_state_via_playwright", fake_direct_capture
+            service, "capture_storage_state_via_mcp_agent", fake_mcp_capture
         )
 
         try:
@@ -1462,7 +1478,7 @@ def test_refresh_browser_auth_session_security_challenge_does_not_fall_back(
 
         session.refresh(row)
 
-    assert direct_called is False
+    assert mcp_called is False
     assert "Security challenge detected" in message
     assert row.status == "invalid"
     assert "Security challenge detected" in row.failure_reason
@@ -1511,6 +1527,104 @@ def test_create_storage_state_via_playwright_validates_missing_and_malformed_sto
         assert "not valid JSON" in str(exc)
     else:
         raise AssertionError("Expected BrowserAuthSessionError")
+
+
+def test_create_storage_state_via_playwright_captures_local_login_fixture(tmp_path):
+    from orchestrator.services import browser_auth_sessions as service
+
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required for the Playwright login helper")
+    probe_env = os.environ.copy()
+    probe_env["NODE_PATH"] = str(service.BASE_DIR / "node_modules")
+    playwright_probe = subprocess.run(
+        [
+            "node",
+            "-e",
+            "const { chromium } = require('playwright'); "
+            "const fs = require('fs'); "
+            "process.exit(fs.existsSync(chromium.executablePath()) ? 0 : 42);",
+        ],
+        cwd=service.BASE_DIR,
+        env=probe_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if playwright_probe.returncode != 0:
+        pytest.skip(
+            "Playwright Node package and Chromium browser are required for the login helper"
+        )
+
+    class LoginHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
+
+        def do_GET(self):
+            if self.path == "/login":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"""
+                    <!doctype html>
+                    <html>
+                      <body>
+                        <form method="post" action="/login">
+                          <input type="email" name="email" autocomplete="username" />
+                          <input type="password" name="password" autocomplete="current-password" />
+                          <button type="submit">Log in</button>
+                        </form>
+                      </body>
+                    </html>
+                    """
+                )
+                return
+            if self.path == "/account":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<h1>Account</h1>")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            if self.path == "/login":
+                content_length = int(self.headers.get("Content-Length", "0") or "0")
+                if content_length:
+                    self.rfile.read(content_length)
+                self.send_response(303)
+                self.send_header("Location", "/account")
+                self.send_header(
+                    "Set-Cookie", "auth_session=local-fixture; Path=/; SameSite=Lax"
+                )
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LoginHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        state = service.create_storage_state_via_playwright(
+            base_url=base_url,
+            login_url=f"{base_url}/login",
+            username="user@example.com",
+            password="secret-password",
+            success_url_pattern="/account$",
+            run_dir=tmp_path / "local-fixture",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert any(
+        cookie["name"] == "auth_session" and cookie["value"] == "local-fixture"
+        for cookie in state["cookies"]
+    )
 
 
 def test_capture_storage_state_via_mcp_agent_reads_and_validates_storage_state(
