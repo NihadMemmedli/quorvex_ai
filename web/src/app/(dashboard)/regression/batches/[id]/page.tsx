@@ -627,19 +627,26 @@ export default function BatchDetailPage() {
 
             {/* D5: Error Analysis + D6: Compare side-by-side */}
             {batch.status === 'completed' && (errorCategories.length > 0 || recentBatches.length > 0) && (
-                <div style={{ display: 'grid', gridTemplateColumns: errorCategories.length > 0 && recentBatches.length > 0 ? '1fr 1fr' : '1fr', gap: '1rem', marginBottom: '2rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: errorCategories.length > 0 && recentBatches.length > 0 ? 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))' : 'minmax(0, 1fr)', gap: '1rem', marginBottom: '2rem', minWidth: 0 }}>
                     {/* D5: Error Analysis */}
                     {errorCategories.length > 0 && (
-                        <div className="card animate-in" style={{ padding: '1.25rem' }}>
+                        <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
                             <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
                                 <BarChart3 size={16} /> Failure Analysis ({totalErrors} errors)
                             </h3>
-                            <div style={{ width: '100%', height: 180 }}>
-                                <ResponsiveContainer>
-                                    <BarChart data={errorBarData} layout="vertical">
+                            <div style={{ width: '100%', maxWidth: '100%', minWidth: 0, height: 180, overflow: 'hidden' }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={errorBarData} layout="vertical" margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
                                         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                                         <XAxis type="number" stroke="var(--text-secondary)" fontSize={12} />
-                                        <YAxis type="category" dataKey="name" stroke="var(--text-secondary)" fontSize={12} width={80} />
+                                        <YAxis
+                                            type="category"
+                                            dataKey="name"
+                                            stroke="var(--text-secondary)"
+                                            fontSize={12}
+                                            width={72}
+                                            tickFormatter={(value) => String(value).length > 10 ? `${String(value).slice(0, 10)}...` : String(value)}
+                                        />
                                         <Tooltip
                                             contentStyle={{
                                                 background: 'var(--surface)',
@@ -656,15 +663,15 @@ export default function BatchDetailPage() {
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem', minWidth: 0 }}>
                                 {errorCategories.map(category => (
-                                    <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem' }}>
-                                            <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name) }}>{category.name}</span>
-                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{category.count} ({category.percentage}%)</span>
+                                    <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', minWidth: 0 }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem', minWidth: 0 }}>
+                                            <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name), minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{category.name}</span>
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', flexShrink: 0 }}>{category.count} ({category.percentage}%)</span>
                                         </div>
                                         {(category.examples || []).map(example => (
-                                            <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                                            <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)', minWidth: 0 }}>
                                                 <div style={{ fontSize: '0.85rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.test_name || example.spec_name}</div>
                                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.summary || 'No detailed failure artifact was captured for this run.'}</div>
                                             </Link>
@@ -677,7 +684,7 @@ export default function BatchDetailPage() {
 
                     {/* D6: Compare */}
                     {recentBatches.length > 0 && (
-                        <div className="card animate-in" style={{ padding: '1.25rem' }}>
+                        <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
                             <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
                                 <GitCompare size={16} /> Compare with...
                             </h3>
