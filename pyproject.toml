@@ -21,7 +21,7 @@ dependencies = [
     "PyYAML==6.0.3",
     "python-dotenv==1.2.1",
     "black==25.12.0",
-    "pytest==9.0.2",
+    "pytest==9.1.1",
     "pytest-asyncio==1.3.0",
     "pytest-cov>=7.0.0",
     "fastapi==0.128.0",
