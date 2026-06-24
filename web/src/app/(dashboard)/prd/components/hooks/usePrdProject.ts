@@ -7,6 +7,16 @@ import type { Feature, ExistingProject, ProjectInfo } from '../types';
 
 const API = `${API_BASE}/api`;
 
+async function readResponseBody(res: Response): Promise<any> {
+    const text = await res.text();
+    if (!text) return {};
+    try {
+        return JSON.parse(text);
+    } catch {
+        return { detail: text.slice(0, 500) };
+    }
+}
+
 export function usePrdProject() {
     const { currentProject, isLoading: projectLoading } = useProject();
 
@@ -46,11 +56,10 @@ export function usePrdProject() {
             formData.append('file', file);
             const res = await fetch(url, { method: 'POST', body: formData, signal: controller.signal });
             clearTimeout(timeoutId);
+            const data = await readResponseBody(res);
             if (!res.ok) {
-                const d = await res.json();
-                throw new Error(d.detail || 'Upload failed');
+                throw new Error(data.detail || data.message || `Upload failed (HTTP ${res.status})`);
             }
-            const data = await res.json();
             const features = Array.isArray(data.features) ? data.features : [];
             if (features.length === 0) {
                 throw new Error(

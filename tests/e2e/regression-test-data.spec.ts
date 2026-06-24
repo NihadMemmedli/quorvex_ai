@@ -52,7 +52,16 @@ async function routeApi(page: Page, path: string, handler: (route: Route) => voi
   await Promise.all(API_PREFIXES.map(prefix => page.route(`${prefix}${normalizedPath}`, handler)));
 }
 
-async function mockRegressionBackend(page: Page, options?: { emptyTestData?: boolean; onBulkRun?: (payload: any) => void }) {
+async function mockRegressionBackend(
+  page: Page,
+  options?: {
+    emptyTestData?: boolean;
+    onBulkRun?: (payload: any) => void;
+    specs?: typeof automatedSpecs;
+    onAutomatedSpecsRequest?: (url: URL) => void;
+  },
+) {
+  const specsFixture = options?.specs || automatedSpecs;
   await routeApi(page, '/auth/refresh', route =>
     route.fulfill({ status: 200, json: { access_token: 'access-token', refresh_token: 'refresh-token' } }),
   );
@@ -73,24 +82,32 @@ async function mockRegressionBackend(page: Page, options?: { emptyTestData?: boo
   );
   await routeApi(page, '/projects', route => route.fulfill({ status: 200, json: { projects: [PROJECT] } }));
   await routeApi(page, '/specs/folders?*', route =>
-    route.fulfill({ status: 200, json: { folders: [], total_specs: automatedSpecs.length } }),
+    route.fulfill({ status: 200, json: { folders: [], total_specs: specsFixture.length } }),
   );
   await routeApi(page, '/regression/batches?*', route =>
     route.fulfill({ status: 200, json: { batches: [], total: 0 } }),
   );
   await routeApi(page, '/specs/automated?*', route => {
     const url = new URL(route.request().url());
+    options?.onAutomatedSpecsRequest?.(url);
     const search = (url.searchParams.get('search') || '').toLowerCase();
-    const specs = automatedSpecs.filter(spec => !search || spec.name.toLowerCase().includes(search));
+    const folder = url.searchParams.get('folder');
+    const limit = Number(url.searchParams.get('limit') || 50);
+    const offset = Number(url.searchParams.get('offset') || 0);
+    const specs = specsFixture.filter(spec => {
+      if (folder && !spec.name.startsWith(`${folder}/`)) return false;
+      return !search || spec.name.toLowerCase().includes(search);
+    });
+    const pageSpecs = specs.slice(offset, offset + limit);
     return route.fulfill({
       status: 200,
       json: {
-        specs,
+        specs: pageSpecs,
         total: specs.length,
-        limit: 50,
-        offset: 0,
-        has_more: false,
-        filtered_folder: null,
+        limit,
+        offset,
+        has_more: offset + limit < specs.length,
+        filtered_folder: folder,
         filtered_by_tags: null,
         filtered_by_project: 'default',
       },
@@ -125,16 +142,56 @@ async function mockRegressionBackend(page: Page, options?: { emptyTestData?: boo
   });
 }
 
-async function openRegression(page: Page) {
+async function openRegression(page: Page, path = '/regression') {
   await page.addInitScript(() => {
     window.localStorage.setItem('refresh_token', 'refresh-token');
     window.localStorage.setItem('we-test-current-project-id', 'default');
   });
-  await page.goto('/regression');
+  await page.goto(path);
   await expect(page.getByRole('heading', { name: 'Regression Testing' })).toBeVisible();
 }
 
 test.describe('Regression test-data setup', () => {
+  test('run all posts server-side automated selection instead of loaded spec names', async ({ page }) => {
+    let bulkPayload: any = null;
+    await mockRegressionBackend(page, { onBulkRun: payload => (bulkPayload = payload) });
+    await openRegression(page);
+
+    await page.getByRole('button', { name: 'Run All (2)' }).click();
+    await page.getByTestId('regression-run-setup').getByRole('button', { name: 'Start Run' }).click();
+
+    expect(bulkPayload).toMatchObject({
+      automated_only: true,
+      project_id: 'default',
+    });
+    expect(bulkPayload.spec_names).toBeUndefined();
+  });
+
+  test('folder-filtered run all fetches all matching specs before bulk run', async ({ page }) => {
+    let bulkPayload: any = null;
+    const automatedUrls: URL[] = [];
+    const folderSpecs = Array.from({ length: 125 }, (_, index) => ({
+      ...automatedSpecs[1],
+      name: `flows/case-${String(index).padStart(3, '0')}.md`,
+      path: `/specs/flows/case-${String(index).padStart(3, '0')}.md`,
+      code_path: `/tests/generated/flows-case-${String(index).padStart(3, '0')}.spec.ts`,
+    }));
+    await mockRegressionBackend(page, {
+      specs: folderSpecs,
+      onBulkRun: payload => (bulkPayload = payload),
+      onAutomatedSpecsRequest: url => automatedUrls.push(url),
+    });
+    await openRegression(page, '/regression?folder=flows');
+
+    await page.getByRole('button', { name: 'Run All (125)' }).click();
+    await page.getByTestId('regression-run-setup').getByRole('button', { name: 'Start Run' }).click();
+
+    expect(automatedUrls.some(url => url.searchParams.get('folder') === 'flows' && url.searchParams.get('limit') === '100')).toBeTruthy();
+    expect(bulkPayload.spec_names).toHaveLength(125);
+    expect(bulkPayload.spec_names[0]).toBe('flows/case-000.md');
+    expect(bulkPayload.automated_only).toBeUndefined();
+  });
+
   test('sends browser auth and selected test-data refs in bulk payload', async ({ page }) => {
     let bulkPayload: any = null;
     await mockRegressionBackend(page, { onBulkRun: payload => (bulkPayload = payload) });
@@ -145,7 +202,7 @@ test.describe('Regression test-data setup', () => {
 
     const drawer = page.getByTestId('regression-run-setup');
     await expect(drawer).toBeVisible();
-    await expect(drawer.getByText('auth-users.valid-admin')).toBeVisible();
+    await expect(drawer.getByRole('button', { name: 'auth-users.valid-admin' })).toBeVisible();
     await drawer.getByLabel('Regression browser login session').selectOption('session:auth-alt');
     await drawer.getByRole('button', { name: 'Start Run' }).click();
 

@@ -39,6 +39,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `ANTHROPIC_CHAT_MODEL` | `glm-5-turbo` | No | Legacy chat model alias |
 | `ANTHROPIC_ENABLE_CHAT_THINKING` | `false` | No | Enable provider-specific chat reasoning controls when supported |
 | `API_TIMEOUT_MS` | `3000000` | No | Claude Code API timeout used by the Z.ai GLM Coding Plan |
+| `BACKEND_PROXY_TIMEOUT_MS` | `API_TIMEOUT_MS` when set, otherwise `620000` | No | Next.js `/backend-proxy` request timeout, including Undici header and body timeouts |
 | `OPENAI_BASE_URL` | -- | No | Optional OpenAI-compatible endpoint for embedding/chat clients |
 | `OPENAI_CHAT_MODEL` | -- | No | Optional OpenAI chat model override for features that use OpenAI-compatible chat calls |
 

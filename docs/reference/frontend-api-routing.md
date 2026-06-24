@@ -31,7 +31,7 @@ Use `apiUrl(path)` or `API_BASE` from `web/src/lib/api.ts` in browser components
 | Query strings | Preserved |
 | Request body | Forwarded for non-`GET` and non-`HEAD` requests |
 | Hop-by-hop headers | Removed before forwarding |
-| Timeout | Long timeout for long-running dashboard requests |
+| Timeout | `BACKEND_PROXY_TIMEOUT_MS`, then `API_TIMEOUT_MS`, then `620000` ms; applies to the fetch abort, Undici header timeout, and Undici body timeout |
 
 The proxy exists so deployed dashboards do not send browser traffic to a localhost backend that only exists inside the server environment.
 

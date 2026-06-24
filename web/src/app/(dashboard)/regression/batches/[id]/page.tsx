@@ -483,6 +483,10 @@ export default function BatchDetailPage() {
     }
 
     const activeRunCount = batch.running + batch.queued;
+    const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
+    const displayedPassed = batch.actual_passed ?? batch.passed;
+    const displayedFailed = batch.actual_failed ?? batch.failed;
+    const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
 
     const filteredRuns = showFailuresOnly
         ? batch.runs.filter(r => r.status === 'failed' || r.status === 'stopped' || r.status === 'cancelled')
@@ -588,19 +592,19 @@ export default function BatchDetailPage() {
             {/* Summary Cards */}
             <div className="animate-in stagger-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center' }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{batch.actual_total_tests ?? batch.total_tests}</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{displayedTotal}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Total Tests</div>
                 </div>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: '3px solid var(--success)' }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--success)' }}>{batch.actual_passed ?? batch.passed}</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--success)' }}>{displayedPassed}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Passed</div>
                 </div>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: '3px solid var(--danger)' }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--danger)' }}>{batch.actual_failed ?? batch.failed}</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--danger)' }}>{displayedFailed}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Failed</div>
                 </div>
-                <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: `3px solid ${getSuccessRateColor(batch.success_rate)}` }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: getSuccessRateColor(batch.success_rate) }}>{batch.success_rate}%</div>
+                <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: `3px solid ${getSuccessRateColor(displayedSuccessRate)}` }}>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: getSuccessRateColor(displayedSuccessRate) }}>{displayedSuccessRate}%</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Success Rate</div>
                 </div>
             </div>
@@ -609,33 +613,40 @@ export default function BatchDetailPage() {
             {(batch.status === 'running' || batch.status === 'pending') && (
                 <div className="card" style={{ padding: '1.25rem', marginBottom: '2rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                        <span style={{ fontWeight: 600 }}>Progress</span>
-                        <span style={{ color: 'var(--text-secondary)' }}>{batch.passed + batch.failed + batch.stopped} / {batch.total_tests} completed{batch.running > 0 && ` (${batch.running} running)`}</span>
+                        <span style={{ fontWeight: 600 }}>Run Progress</span>
+                        <span style={{ color: 'var(--text-secondary)' }}>{batch.passed + batch.failed + batch.stopped} / {batch.total_tests} files completed{batch.running > 0 && ` (${batch.running} running)`}</span>
                     </div>
                     <div style={{ height: '12px', background: 'var(--surface-hover)', borderRadius: '6px', display: 'flex', overflow: 'hidden' }}>
-                        <div style={{ width: `${(batch.passed / batch.total_tests) * 100}%`, background: 'var(--success)', transition: 'width 0.3s' }} />
-                        <div style={{ width: `${(batch.failed / batch.total_tests) * 100}%`, background: 'var(--danger)', transition: 'width 0.3s' }} />
-                        <div style={{ width: `${(batch.stopped / batch.total_tests) * 100}%`, background: 'var(--warning)', transition: 'width 0.3s' }} />
-                        <div style={{ width: `${(batch.running / batch.total_tests) * 100}%`, background: 'var(--primary)', animation: 'pulse 1.5s ease-in-out infinite' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.passed / batch.total_tests) * 100 : 0}%`, background: 'var(--success)', transition: 'width 0.3s' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.failed / batch.total_tests) * 100 : 0}%`, background: 'var(--danger)', transition: 'width 0.3s' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.stopped / batch.total_tests) * 100 : 0}%`, background: 'var(--warning)', transition: 'width 0.3s' }} />
+                        <div style={{ width: `${batch.total_tests ? (batch.running / batch.total_tests) * 100 : 0}%`, background: 'var(--primary)', animation: 'pulse 1.5s ease-in-out infinite' }} />
                     </div>
                 </div>
             )}
 
             {/* D5: Error Analysis + D6: Compare side-by-side */}
             {batch.status === 'completed' && (errorCategories.length > 0 || recentBatches.length > 0) && (
-                <div style={{ display: 'grid', gridTemplateColumns: errorCategories.length > 0 && recentBatches.length > 0 ? '1fr 1fr' : '1fr', gap: '1rem', marginBottom: '2rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: errorCategories.length > 0 && recentBatches.length > 0 ? 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))' : 'minmax(0, 1fr)', gap: '1rem', marginBottom: '2rem', minWidth: 0 }}>
                     {/* D5: Error Analysis */}
                     {errorCategories.length > 0 && (
-                        <div className="card animate-in" style={{ padding: '1.25rem' }}>
+                        <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
                             <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
                                 <BarChart3 size={16} /> Failure Analysis ({totalErrors} errors)
                             </h3>
-                            <div style={{ width: '100%', height: 180 }}>
-                                <ResponsiveContainer>
-                                    <BarChart data={errorBarData} layout="vertical">
+                            <div style={{ width: '100%', maxWidth: '100%', minWidth: 0, height: 180, overflow: 'hidden' }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={errorBarData} layout="vertical" margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
                                         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                                         <XAxis type="number" stroke="var(--text-secondary)" fontSize={12} />
-                                        <YAxis type="category" dataKey="name" stroke="var(--text-secondary)" fontSize={12} width={80} />
+                                        <YAxis
+                                            type="category"
+                                            dataKey="name"
+                                            stroke="var(--text-secondary)"
+                                            fontSize={12}
+                                            width={72}
+                                            tickFormatter={(value) => String(value).length > 10 ? `${String(value).slice(0, 10)}...` : String(value)}
+                                        />
                                         <Tooltip
                                             contentStyle={{
                                                 background: 'var(--surface)',
@@ -652,15 +663,15 @@ export default function BatchDetailPage() {
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem', minWidth: 0 }}>
                                 {errorCategories.map(category => (
-                                    <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem' }}>
-                                            <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name) }}>{category.name}</span>
-                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{category.count} ({category.percentage}%)</span>
+                                    <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', minWidth: 0 }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem', minWidth: 0 }}>
+                                            <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name), minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{category.name}</span>
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', flexShrink: 0 }}>{category.count} ({category.percentage}%)</span>
                                         </div>
                                         {(category.examples || []).map(example => (
-                                            <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                                            <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)', minWidth: 0 }}>
                                                 <div style={{ fontSize: '0.85rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.test_name || example.spec_name}</div>
                                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.summary || 'No detailed failure artifact was captured for this run.'}</div>
                                             </Link>
@@ -673,7 +684,7 @@ export default function BatchDetailPage() {
 
                     {/* D6: Compare */}
                     {recentBatches.length > 0 && (
-                        <div className="card animate-in" style={{ padding: '1.25rem' }}>
+                        <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
                             <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
                                 <GitCompare size={16} /> Compare with...
                             </h3>

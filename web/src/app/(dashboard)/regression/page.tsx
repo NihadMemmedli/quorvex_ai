@@ -224,6 +224,9 @@ export default function RegressionPage() {
     const [recentBatches, setRecentBatches] = useState<RecentBatch[]>([]);
     const [runSetupOpen, setRunSetupOpen] = useState(false);
     const [pendingRunSpecs, setPendingRunSpecs] = useState<string[]>([]);
+    const [pendingRunAutomatedOnly, setPendingRunAutomatedOnly] = useState(false);
+    const [pendingRunTags, setPendingRunTags] = useState<string[]>([]);
+    const [pendingRunCount, setPendingRunCount] = useState(0);
     const [pendingRunLabel, setPendingRunLabel] = useState('');
     const [browserAuthSessions, setBrowserAuthSessions] = useState<BrowserAuthSession[]>([]);
     const [browserAuthMode, setBrowserAuthMode] = useState<BrowserAuthMode>('none');
@@ -353,7 +356,7 @@ export default function RegressionPage() {
             url.searchParams.delete('folder');
         }
         window.history.replaceState({}, '', url.toString());
-    }, [selectedFolder, selectedTags, projectId, projectLoading]);
+    }, [selectedFolder, selectedTags, searchTerm, projectId, projectLoading]);
 
     // Intersection Observer for infinite scroll
     useEffect(() => {
@@ -403,6 +406,9 @@ export default function RegressionPage() {
             }
             if (selectedTags.length > 0) {
                 params.set('tags', selectedTags.join(','));
+            }
+            if (searchTerm.trim()) {
+                params.set('search', searchTerm.trim());
             }
             if (!projectId) return;
             params.set('project_id', projectId);
@@ -465,9 +471,7 @@ export default function RegressionPage() {
     }, [specs, allTags]);
 
     // Filter specs based on search (client-side for loaded specs)
-    const filteredSpecs = useMemo(() => {
-        return specs.filter(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()));
-    }, [specs, searchTerm]);
+    const filteredSpecs = specs;
 
     const specsByName = useMemo(() => {
         const map = new Map<string, AutomatedSpec>();
@@ -560,13 +564,51 @@ export default function RegressionPage() {
         setSelectedTestDataRefs(next);
     };
 
-    const openRunSetup = (specsToRun: string[], label: string) => {
-        if (specsToRun.length === 0) {
+    const fetchAllMatchingSpecNames = async () => {
+        if (!projectId) return [];
+        const allSpecs: AutomatedSpec[] = [];
+        let nextOffset = 0;
+        const pageSize = 100;
+        for (;;) {
+            const params = new URLSearchParams();
+            params.set('limit', pageSize.toString());
+            params.set('offset', nextOffset.toString());
+            params.set('project_id', projectId);
+            if (selectedFolder) {
+                params.set('folder', selectedFolder);
+            }
+            if (selectedTags.length > 0) {
+                params.set('tags', selectedTags.join(','));
+            }
+            if (searchTerm.trim()) {
+                params.set('search', searchTerm.trim());
+            }
+            const res = await fetch(`${API_BASE}/specs/automated?${params}`);
+            if (!res.ok) {
+                throw new Error('Failed to fetch matching tests');
+            }
+            const data = await res.json();
+            allSpecs.push(...(data.specs || []));
+            if (!data.has_more) break;
+            nextOffset += pageSize;
+        }
+        return Array.from(new Set(allSpecs.map(spec => spec.name)));
+    };
+
+    const openRunSetup = (
+        specsToRun: string[],
+        label: string,
+        options?: { automatedOnly?: boolean; tags?: string[]; displayCount?: number }
+    ) => {
+        if (specsToRun.length === 0 && !options?.automatedOnly) {
             alert('No tests to run');
             return;
         }
         const selectedNames = Array.from(new Set(specsToRun));
         setPendingRunSpecs(selectedNames);
+        setPendingRunAutomatedOnly(Boolean(options?.automatedOnly));
+        setPendingRunTags(options?.tags || []);
+        setPendingRunCount(options?.displayCount ?? selectedNames.length);
         setPendingRunLabel(label);
         setSelectedTestDataRefs(prev => {
             const next = new Set(prev);
@@ -602,7 +644,9 @@ export default function RegressionPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(withProjectBody({
-                    spec_names: pendingRunSpecs,
+                    ...(pendingRunSpecs.length > 0
+                        ? { spec_names: pendingRunSpecs }
+                        : { automated_only: pendingRunAutomatedOnly, tags: pendingRunTags }),
                     browser: selectedBrowser,
                     hybrid: hybridHealing,
                     test_data_refs: selectedRefsArray,
@@ -631,7 +675,32 @@ export default function RegressionPage() {
         }
     };
 
-    const runFiltered = () => openRunSetup(filteredSpecs.map(s => s.name), `Run All (${filteredSpecs.length})`);
+    const canSubmitRunSetup = pendingRunAutomatedOnly || pendingRunSpecs.length > 0;
+
+    const runFiltered = async () => {
+        if (totalFiltered === 0) {
+            alert('No tests to run');
+            return;
+        }
+        if (selectedFolder || searchTerm.trim()) {
+            setRunning(true);
+            try {
+                const names = await fetchAllMatchingSpecNames();
+                openRunSetup(names, `Run All (${names.length})`);
+            } catch (err) {
+                console.error('Failed to fetch matching tests:', err);
+                alert('Failed to fetch matching tests');
+            } finally {
+                setRunning(false);
+            }
+            return;
+        }
+        openRunSetup([], `Run All (${totalFiltered})`, {
+            automatedOnly: true,
+            tags: selectedTags,
+            displayCount: totalFiltered
+        });
+    };
     const runSelected = () => openRunSetup(Array.from(selectedSpecs), `Run Selected (${selectedSpecs.size})`);
 
     const getStatusIcon = (status: string | null) => {
@@ -852,11 +921,11 @@ export default function RegressionPage() {
                         <button
                             className="btn btn-primary"
                             onClick={runFiltered}
-                            disabled={running || filteredSpecs.length === 0}
+                            disabled={running || totalFiltered === 0}
                             style={{ whiteSpace: 'nowrap' }}
                         >
                             <Play size={16} fill="currentColor" />
-                            Run All ({filteredSpecs.length})
+                            Run All ({totalFiltered})
                         </button>
                     </div>
                 </header>
@@ -1176,7 +1245,7 @@ export default function RegressionPage() {
                             <div>
                                 <h2 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.25rem' }}>{pendingRunLabel || 'Run Tests'}</h2>
                                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                    {pendingRunSpecs.length} tests • {selectedBrowser} • {hybridHealing ? 'extended healing' : 'standard healing'}
+                                    {pendingRunCount} tests • {selectedBrowser} • {hybridHealing ? 'extended healing' : 'standard healing'}
                                 </p>
                             </div>
                             <button className="btn btn-secondary" onClick={() => setRunSetupOpen(false)} disabled={running} aria-label="Close run setup">
@@ -1279,7 +1348,7 @@ export default function RegressionPage() {
                             <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                                 {selectedRefsArray.length} test-data refs selected
                             </span>
-                            <button className="btn btn-primary" onClick={submitRunSetup} disabled={running || pendingRunSpecs.length === 0}>
+                            <button className="btn btn-primary" onClick={submitRunSetup} disabled={running || !canSubmitRunSetup}>
                                 <Play size={16} fill="currentColor" />
                                 {running ? 'Starting...' : 'Start Run'}
                             </button>
