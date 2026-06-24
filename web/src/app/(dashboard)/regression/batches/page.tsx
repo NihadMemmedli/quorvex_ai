@@ -331,10 +331,14 @@ export default function BatchListPage() {
                 <div className="animate-in stagger-2" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                     {batches.map(batch => {
                         const status = getStatusConfig(batch.status);
-                        const total_t = batch.total_tests || 1;
-                        const passedPct = (batch.passed / total_t) * 100;
-                        const failedPct = (batch.failed / total_t) * 100;
-                        const stoppedPct = (batch.stopped / total_t) * 100;
+                        const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
+                        const displayedPassed = batch.actual_passed ?? batch.passed;
+                        const displayedFailed = batch.actual_failed ?? batch.failed;
+                        const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
+                        const total_t = displayedTotal || 1;
+                        const passedPct = (displayedPassed / total_t) * 100;
+                        const failedPct = (displayedFailed / total_t) * 100;
+                        const stoppedPct = (batch.stopped / (batch.total_tests || 1)) * 100;
 
                         return (
                             <div
@@ -452,11 +456,11 @@ export default function BatchListPage() {
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.9rem' }}>
                                         <span style={{ color: 'var(--success)', fontWeight: 600 }}>
-                                            {batch.actual_passed ?? batch.passed} passed
+                                            {displayedPassed} passed
                                         </span>
-                                        {(batch.actual_failed ?? batch.failed) > 0 && (
+                                        {displayedFailed > 0 && (
                                             <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
-                                                {batch.actual_failed ?? batch.failed} failed
+                                                {displayedFailed} failed
                                             </span>
                                         )}
                                         {batch.running > 0 && (
@@ -465,7 +469,7 @@ export default function BatchListPage() {
                                             </span>
                                         )}
                                         <span style={{ color: 'var(--text-secondary)' }}>
-                                            / {batch.actual_total_tests ?? batch.total_tests}
+                                            / {displayedTotal}
                                         </span>
                                     </div>
 
@@ -476,13 +480,13 @@ export default function BatchListPage() {
                                             gap: '0.5rem',
                                             padding: '0.35rem 0.75rem',
                                             borderRadius: '999px',
-                                            background: `${getSuccessRateColor(batch.success_rate)}15`,
-                                            color: getSuccessRateColor(batch.success_rate),
+                                            background: `${getSuccessRateColor(displayedSuccessRate)}15`,
+                                            color: getSuccessRateColor(displayedSuccessRate),
                                             fontWeight: 600,
                                             fontSize: '0.9rem'
                                         }}>
                                             <Percent size={14} />
-                                            {batch.success_rate}%
+                                            {displayedSuccessRate}%
                                         </div>
                                     )}
 

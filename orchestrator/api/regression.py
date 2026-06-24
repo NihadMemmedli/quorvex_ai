@@ -159,9 +159,43 @@ def _count_tests_for_run(run: DBTestRun) -> int:
     return 1
 
 
+def _run_playwright_result_counts(run: DBTestRun) -> tuple[int, int, int] | None:
+    """Return per-test counts from Playwright JSON reporter artifacts when present."""
+    run_dir = RUNS_DIR / run.id
+    for results_path in (run_dir / "test-results.json", run_dir / "test-results" / "test-results.json"):
+        parsed = parse_test_results(str(results_path))
+        if not parsed:
+            continue
+        summary = parsed.get("summary") or {}
+        total = int(summary.get("total") or len(parsed.get("tests") or []))
+        passed = int(summary.get("passed") or 0)
+        failed = int(summary.get("failed") or 0)
+        return total, passed, failed
+    return None
+
+
+def _run_actual_test_counts(run: DBTestRun, fallback_test_count: int) -> tuple[int, int, int]:
+    """
+    Return (total, passed, failed) for one run.
+
+    Playwright JSON reporter output is authoritative because it captures mixed
+    outcomes inside a single spec file. The file-count fallback is only used
+    when no structured result artifact exists.
+    """
+    parsed_counts = _run_playwright_result_counts(run)
+    if parsed_counts is not None:
+        return parsed_counts
+
+    if run.status in ("passed", "completed"):
+        return fallback_test_count, fallback_test_count, 0
+    if run.status in ("failed", "error"):
+        return fallback_test_count, 0, fallback_test_count
+    return fallback_test_count, 0, 0
+
+
 def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]:
     """
-    Calculate actual test counts by parsing test files.
+    Calculate actual test counts from Playwright results when available.
     Batches filesystem lookups by unique spec name to avoid redundant I/O.
 
     Returns:
@@ -179,16 +213,10 @@ def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]
             spec_test_counts[run.spec_name] = count_tests_in_file(str(test_path)) if test_path else 1
 
     for run in runs:
-        test_count = spec_test_counts[run.spec_name]
-        actual_total += test_count
-
-        # For now, if the run passed, all tests passed; if failed, all failed
-        # In the future, we can parse Playwright JSON reports for individual test results
-        if run.status in ("passed", "completed"):
-            actual_passed += test_count
-        elif run.status in ("failed", "error"):
-            actual_failed += test_count
-        # stopped/running/queued don't contribute to passed/failed counts
+        total, passed, failed = _run_actual_test_counts(run, spec_test_counts[run.spec_name])
+        actual_total += total
+        actual_passed += passed
+        actual_failed += failed
 
     return actual_total, actual_passed, actual_failed
 
@@ -212,6 +240,11 @@ def _cache_actual_test_counts(
 
 def _has_fresh_actual_test_count_cache(batch: RegressionBatch) -> bool:
     if batch.actual_total_tests is None or batch.actual_passed is None or batch.actual_failed is None:
+        return False
+
+    # Failed batches may have old fallback counts where one failed test made
+    # every test in the file look failed. Re-read artifacts for these pages.
+    if batch.failed > 0:
         return False
 
     completed_result_files = batch.passed + batch.failed
@@ -524,6 +557,9 @@ def _batch_to_summary(
     actual_failed: int | None = None,
 ) -> RegressionBatchSummary:
     """Convert database batch to summary response."""
+    success_rate = batch.success_rate
+    if actual_total is not None and actual_passed is not None:
+        success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0
     return RegressionBatchSummary(
         id=batch.id,
         name=batch.name,
@@ -539,7 +575,7 @@ def _batch_to_summary(
         stopped=batch.stopped,
         running=batch.running,
         queued=batch.queued,
-        success_rate=batch.success_rate,
+        success_rate=success_rate,
         duration_seconds=batch.duration_seconds,
         actual_total_tests=actual_total,
         actual_passed=actual_passed,
@@ -694,6 +730,7 @@ def get_batch_detail(
     # Calculate actual test counts
     actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
     _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
+    actual_success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0
 
     # Sort runs: failed first, then by status, then by name
     status_order = {"failed": 0, "stopped": 1, "cancelled": 1, "running": 2, "queued": 3, "passed": 4, "completed": 4}
@@ -722,7 +759,7 @@ def get_batch_detail(
         stopped=batch.stopped,
         running=batch.running,
         queued=batch.queued,
-        success_rate=batch.success_rate,
+        success_rate=actual_success_rate,
         duration_seconds=batch.duration_seconds,
         actual_total_tests=actual_total,
         actual_passed=actual_passed,
@@ -842,13 +879,22 @@ def cancel_batch_runs(
     }
 
 
-def generate_batch_html_report(batch: RegressionBatch, tests: list[dict]) -> str:
+def generate_batch_html_report(
+    batch: RegressionBatch,
+    tests: list[dict],
+    actual_counts: tuple[int, int, int] | None = None,
+) -> str:
     """Generate a standalone HTML report for the batch."""
 
     # Calculate stats
-    total_actual_tests = sum(int(t.get("actual_test_count") or 1) for t in tests)
-    passed_count = sum(int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("passed", "completed"))
-    failed_count = sum(int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("failed", "error"))
+    if actual_counts is not None:
+        total_actual_tests, passed_count, failed_count = actual_counts
+    else:
+        total_actual_tests = sum(int(t.get("actual_test_count") or 1) for t in tests)
+        passed_count = sum(
+            int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("passed", "completed")
+        )
+        failed_count = sum(int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("failed", "error"))
     sum(1 for t in tests if t["status"] == "stopped")
     success_rate = round((passed_count / total_actual_tests * 100), 1) if total_actual_tests else 0
 
@@ -1681,7 +1727,7 @@ def export_batch(
                     pass  # Skip if run.json is invalid or unreadable
 
         # Generate HTML report with run details
-        html_content = generate_batch_html_report(batch, tests)
+        html_content = generate_batch_html_report(batch, tests, (actual_total, actual_passed, actual_failed))
         return Response(
             content=html_content,
             media_type="text/html",
@@ -1973,15 +2019,27 @@ def batch_trend(
 
     trend = []
     for b in reversed(batches):  # oldest first for chart
+        actual_total, actual_passed, actual_failed = None, None, None
+        if _has_fresh_actual_test_count_cache(b):
+            actual_total = b.actual_total_tests
+            actual_passed = b.actual_passed
+            actual_failed = b.actual_failed
+        elif b.actual_total_tests is not None or b.failed > 0:
+            runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == b.id)).all()
+            actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+            _cache_actual_test_counts(b, actual_total, actual_passed, actual_failed, session)
+        success_rate = b.success_rate
+        if actual_total is not None and actual_passed is not None:
+            success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0
         trend.append(
             {
                 "batch_id": b.id,
                 "name": b.name,
                 "created_at": b.created_at.isoformat() if b.created_at else None,
-                "success_rate": b.success_rate,
-                "passed": b.passed,
-                "failed": b.failed,
-                "total": b.total_tests,
+                "success_rate": success_rate,
+                "passed": actual_passed if actual_passed is not None else b.passed,
+                "failed": actual_failed if actual_failed is not None else b.failed,
+                "total": actual_total if actual_total is not None else b.total_tests,
             }
         )
     return trend

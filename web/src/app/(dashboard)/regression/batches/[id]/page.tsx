@@ -483,6 +483,10 @@ export default function BatchDetailPage() {
     }
 
     const activeRunCount = batch.running + batch.queued;
+    const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
+    const displayedPassed = batch.actual_passed ?? batch.passed;
+    const displayedFailed = batch.actual_failed ?? batch.failed;
+    const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
 
     const filteredRuns = showFailuresOnly
         ? batch.runs.filter(r => r.status === 'failed' || r.status === 'stopped' || r.status === 'cancelled')
@@ -588,19 +592,19 @@ export default function BatchDetailPage() {
             {/* Summary Cards */}
             <div className="animate-in stagger-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center' }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{batch.actual_total_tests ?? batch.total_tests}</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{displayedTotal}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Total Tests</div>
                 </div>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: '3px solid var(--success)' }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--success)' }}>{batch.actual_passed ?? batch.passed}</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--success)' }}>{displayedPassed}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Passed</div>
                 </div>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: '3px solid var(--danger)' }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--danger)' }}>{batch.actual_failed ?? batch.failed}</div>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--danger)' }}>{displayedFailed}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Failed</div>
                 </div>
-                <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: `3px solid ${getSuccessRateColor(batch.success_rate)}` }}>
-                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: getSuccessRateColor(batch.success_rate) }}>{batch.success_rate}%</div>
+                <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: `3px solid ${getSuccessRateColor(displayedSuccessRate)}` }}>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: getSuccessRateColor(displayedSuccessRate) }}>{displayedSuccessRate}%</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Success Rate</div>
                 </div>
             </div>
