@@ -270,9 +270,14 @@ class InMemoryBrowserPool(AbstractBrowserPool):
             True if slot acquired, False if timeout/cancelled
         """
         if timeout is None:
-            from orchestrator.config import settings as app_settings
+            try:
+                from orchestrator.services.execution_timeouts import get_persisted_ai_pipeline_timeout_seconds
 
-            timeout = float(app_settings.browser_slot_timeout)
+                timeout = float(get_persisted_ai_pipeline_timeout_seconds())
+            except Exception:
+                from orchestrator.config import settings as app_settings
+
+                timeout = float(app_settings.browser_slot_timeout)
 
         slot = BrowserSlot(
             request_id=request_id,
@@ -696,9 +701,14 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         max_operation_duration: int | None = None,
     ) -> bool:
         if timeout is None:
-            from orchestrator.config import settings as app_settings
+            try:
+                from orchestrator.services.execution_timeouts import get_persisted_ai_pipeline_timeout_seconds
 
-            timeout = float(app_settings.browser_slot_timeout)
+                timeout = float(get_persisted_ai_pipeline_timeout_seconds())
+            except Exception:
+                from orchestrator.config import settings as app_settings
+
+                timeout = float(app_settings.browser_slot_timeout)
 
         r = await self._ensure_connected()
 

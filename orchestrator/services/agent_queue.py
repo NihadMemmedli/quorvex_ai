@@ -414,6 +414,12 @@ class AgentQueue:
             Task ID for tracking
         """
         redis = await self._ensure_connected()
+        try:
+            from orchestrator.services.execution_timeouts import merge_ai_pipeline_timeout_env_vars
+
+            env_vars = merge_ai_pipeline_timeout_env_vars(env_vars)
+        except Exception as exc:
+            logger.debug("Unable to inject AI pipeline timeout env vars for queued task: %s", exc)
 
         task = AgentTask(
             id=f"agent-{uuid.uuid4().hex[:12]}",

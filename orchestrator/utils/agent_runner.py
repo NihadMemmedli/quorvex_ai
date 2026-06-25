@@ -3869,5 +3869,5 @@ async def run_agent_with_logging(
 
 
 def get_default_timeout() -> int:
-    """Get the default agent timeout from environment or use 1800 seconds (30 min)."""
-    return int(os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))
+    """Get the default agent timeout from environment or use 7200 seconds (2 hours)."""
+    return int(os.environ.get("AGENT_TIMEOUT_SECONDS", "7200"))

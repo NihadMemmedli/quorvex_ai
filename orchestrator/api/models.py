@@ -124,6 +124,7 @@ class ExecutionSettingsResponse(BaseModel):
     parallel_mode_enabled: bool
     headless_in_parallel: bool
     memory_enabled: bool
+    ai_pipeline_timeout_seconds: int
     database_type: str  # "sqlite" or "postgresql"
     parallel_mode_available: bool  # False if SQLite
 
@@ -135,6 +136,7 @@ class UpdateExecutionSettingsRequest(BaseModel):
     parallel_mode_enabled: bool | None = None
     headless_in_parallel: bool | None = None
     memory_enabled: bool | None = None
+    ai_pipeline_timeout_seconds: int | None = Field(default=None, ge=900, le=14400)
 
 
 class AgentWorkerHealth(BaseModel):

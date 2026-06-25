@@ -98,6 +98,7 @@ class ExecutionSettings(SQLModel, table=True):
     parallel_mode_enabled: bool = Field(default=False)
     headless_in_parallel: bool = Field(default=True)  # Force headless when parallelism > 1
     memory_enabled: bool = Field(default=True)  # Disable memory in parallel mode
+    ai_pipeline_timeout_seconds: int = Field(default=7200, ge=900, le=14400)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

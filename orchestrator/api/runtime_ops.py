@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from logging_config import get_logger
 from services.browser_pool import get_browser_pool
+from services.execution_timeouts import apply_ai_pipeline_timeout_to_process, clamp_ai_pipeline_timeout_seconds
 from services.resource_manager import get_resource_manager
 
 from . import autopilot, exploration, spec_files
@@ -198,6 +199,7 @@ def get_execution_settings(session: Session = Depends(get_session)):
         parallel_mode_enabled=settings.parallel_mode_enabled,
         headless_in_parallel=settings.headless_in_parallel,
         memory_enabled=settings.memory_enabled,
+        ai_pipeline_timeout_seconds=clamp_ai_pipeline_timeout_seconds(settings.ai_pipeline_timeout_seconds),
         database_type=runtime.get_database_type(),
         parallel_mode_available=runtime.is_parallel_mode_available(),
     )
@@ -212,7 +214,7 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
         settings = DBExecutionSettings(id=1)
 
     new_parallelism = request.parallelism if request.parallelism is not None else settings.parallelism
-    if new_parallelism > 1 and not runtime.is_parallel_mode_available():
+    if request.parallelism is not None and new_parallelism > 1 and not runtime.is_parallel_mode_available():
         raise HTTPException(
             status_code=400,
             detail="Parallelism > 1 requires PostgreSQL database. SQLite has write locking issues that prevent concurrent test execution.",
@@ -234,6 +236,9 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
 
     if request.memory_enabled is not None:
         settings.memory_enabled = request.memory_enabled
+
+    if request.ai_pipeline_timeout_seconds is not None:
+        settings.ai_pipeline_timeout_seconds = clamp_ai_pipeline_timeout_seconds(request.ai_pipeline_timeout_seconds)
 
     settings.updated_at = datetime.utcnow()
 
@@ -259,11 +264,14 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
             resolved_parallelism["parallelism_clamp_reason"],
         )
 
+    apply_ai_pipeline_timeout_to_process(settings.ai_pipeline_timeout_seconds)
+
     return ExecutionSettingsResponse(
         parallelism=settings.parallelism,
         parallel_mode_enabled=settings.parallel_mode_enabled,
         headless_in_parallel=settings.headless_in_parallel,
         memory_enabled=settings.memory_enabled,
+        ai_pipeline_timeout_seconds=clamp_ai_pipeline_timeout_seconds(settings.ai_pipeline_timeout_seconds),
         database_type=runtime.get_database_type(),
         parallel_mode_available=runtime.is_parallel_mode_available(),
     )

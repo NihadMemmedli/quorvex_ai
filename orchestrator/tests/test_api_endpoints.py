@@ -3336,6 +3336,7 @@ class TestExecutionSettings:
         assert response.status_code == 200
         data = response.json()
         assert "parallelism" in data
+        assert data["ai_pipeline_timeout_seconds"] == 7200
 
     def test_update_execution_settings_invalid_parallelism(self, client):
         """PUT /execution-settings with invalid parallelism should be handled."""
@@ -3397,6 +3398,36 @@ class TestExecutionSettings:
         assert pool.effective_max_browsers == 1
         assert pool.browser_runtime_mode == "headed_vnc"
         assert pool.parallelism_clamp_reason == "shared_vnc_display"
+
+    def test_update_execution_settings_ai_pipeline_timeout(self, client, monkeypatch):
+        """PUT /execution-settings should persist and apply the AI pipeline timeout."""
+        timeout_keys = [
+            "AGENT_TIMEOUT_SECONDS",
+            "EXPLORATION_TIMEOUT_SECONDS",
+            "PLANNER_TIMEOUT_SECONDS",
+            "GENERATOR_TIMEOUT_SECONDS",
+            "BROWSER_SLOT_TIMEOUT",
+            "AGENT_BROWSER_SLOT_TIMEOUT_SECONDS",
+        ]
+        for key in timeout_keys:
+            monkeypatch.delenv(key, raising=False)
+
+        response = client.put("/execution-settings", json={"ai_pipeline_timeout_seconds": 9000})
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["ai_pipeline_timeout_seconds"] == 9000
+        for key in timeout_keys:
+            assert os.environ[key] == "9000"
+
+        get_response = client.get("/execution-settings")
+        assert get_response.status_code == 200
+        assert get_response.json()["ai_pipeline_timeout_seconds"] == 9000
+
+    def test_update_execution_settings_rejects_invalid_ai_pipeline_timeout(self, client):
+        """PUT /execution-settings should validate AI pipeline timeout bounds."""
+        response = client.put("/execution-settings", json={"ai_pipeline_timeout_seconds": 899})
+        assert response.status_code == 422
 
 
 class TestAISettings:

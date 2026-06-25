@@ -537,15 +537,33 @@ def runtime_env_vars(session: Session | None = None) -> dict[str, str]:
     """Return Settings-backed runtime values as env-style keys, falling back to env bootstrap."""
     if session is not None:
         runtime_settings = _db_runtime_settings(session)
-        return _settings_to_env_vars(runtime_settings or {})
+        env_vars = _settings_to_env_vars(runtime_settings or {})
+        try:
+            from orchestrator.services.execution_timeouts import merge_ai_pipeline_timeout_env_vars
+
+            return merge_ai_pipeline_timeout_env_vars(env_vars)
+        except Exception:
+            return env_vars
     try:
         from orchestrator.api.db import engine
 
         with Session(engine) as db_session:
             runtime_settings = _db_runtime_settings(db_session)
-            return _settings_to_env_vars(runtime_settings or {})
+            env_vars = _settings_to_env_vars(runtime_settings or {})
+            try:
+                from orchestrator.services.execution_timeouts import merge_ai_pipeline_timeout_env_vars
+
+                return merge_ai_pipeline_timeout_env_vars(env_vars)
+            except Exception:
+                return env_vars
     except Exception:
-        return _read_env_file()
+        env_vars = _read_env_file()
+        try:
+            from orchestrator.services.execution_timeouts import merge_ai_pipeline_timeout_env_vars
+
+            return merge_ai_pipeline_timeout_env_vars(env_vars)
+        except Exception:
+            return env_vars
 
 
 def _coerce_session(session: Any) -> tuple[Session, bool]:
