@@ -23,7 +23,7 @@ Additionally, **passive mode** lets functional Playwright tests proxy through ZA
 ## Prerequisites
 
 - Quorvex AI installed and running (`make dev`)
-- For Nuclei scans: `nuclei` binary installed ([installation guide](https://docs.projectdiscovery.io/tools/nuclei/install))
+- For Nuclei scans: `nuclei` binary installed ([installation guide](https://docs.projectdiscovery.io/tools/nuclei/install)). Docker images skip Nuclei by default; rebuild with `INSTALL_NUCLEI=true make dev` or `INSTALL_NUCLEI=true make prod-build` to bake it into the backend image.
 - For ZAP scans: ZAP daemon running via Docker
 - A target application to scan
 
@@ -236,7 +236,7 @@ The quick scanner performs these Python-native checks:
 | Problem | Solution |
 |---------|----------|
 | ZAP not reachable | Start with: `docker compose --profile security up -d zap` |
-| Nuclei not found | Install: `go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
+| Nuclei not found | Install it on the host with `go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest`, or rebuild Docker images with `INSTALL_NUCLEI=true` |
 | Scan timeout | Increase `SECURITY_SCAN_TIMEOUT` in `.env` |
 | Duplicate findings across scanners | The `finding_deduplicator.py` handles this automatically |
 | Passive mode not detecting issues | Verify `ZAP_PROXY_ENABLED=true` and ZAP daemon is running |

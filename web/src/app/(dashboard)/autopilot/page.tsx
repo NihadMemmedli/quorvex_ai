@@ -1048,6 +1048,8 @@ export default function AutoPilotPage() {
     const [customAnswer, setCustomAnswer] = useState('');
     const [answeringQuestionId, setAnsweringQuestionId] = useState<number | null>(null);
     const [submittedQuestionIds, setSubmittedQuestionIds] = useState<Set<number>>(() => new Set());
+    const [sessionActionPending, setSessionActionPending] = useState<'pause' | 'resume' | 'cancel' | null>(null);
+    const [stoppingTaskId, setStoppingTaskId] = useState<number | null>(null);
     const submittedQuestionIdsRef = useRef<Set<number>>(new Set());
     const urlStateReady = useRef(false);
 
@@ -1453,7 +1455,7 @@ export default function AutoPilotPage() {
             return next;
         });
         try {
-            const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/answer`, {
+            const res = await fetch(`${API_BASE}/autopilot/${encodeURIComponent(activeSessionId)}/answer`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ question_id: questionId, answer_text: answer }),
@@ -1485,66 +1487,87 @@ export default function AutoPilotPage() {
     };
 
     const pauseSession = async () => {
-        if (!activeSessionId) return;
+        if (!activeSessionId || sessionActionPending) return;
+        const sessionId = activeSessionId;
+        setSessionActionPending('pause');
         try {
-            const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/pause`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/autopilot/${encodeURIComponent(sessionId)}/pause`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 toast.error(data.detail || 'Failed to pause');
                 return;
             }
             toast.success('Auto Pilot paused');
-            fetchSessionDetail(activeSessionId);
+            await Promise.all([fetchSessionDetail(sessionId), fetchSessions()]);
         } catch (e) {
             console.error('Failed to pause:', e);
             toast.error('Failed to pause');
+        } finally {
+            setSessionActionPending(null);
         }
     };
 
     const resumeSession = async () => {
-        if (!activeSessionId) return;
+        if (!activeSessionId || sessionActionPending) return;
+        const sessionId = activeSessionId;
+        setSessionActionPending('resume');
         try {
-            const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/resume`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/autopilot/${encodeURIComponent(sessionId)}/resume`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 toast.error(data.detail || 'Failed to resume');
                 return;
             }
             toast.success('Auto Pilot resumed');
-            fetchSessionDetail(activeSessionId);
+            await Promise.all([fetchSessionDetail(sessionId), fetchSessions()]);
         } catch (e) {
             console.error('Failed to resume:', e);
             toast.error('Failed to resume');
+        } finally {
+            setSessionActionPending(null);
         }
     };
 
     const cancelSession = async () => {
-        if (!activeSessionId) return;
+        if (!activeSessionId || sessionActionPending) return;
+        const sessionId = activeSessionId;
+        setSessionActionPending('cancel');
         try {
-            await fetch(`${API_BASE}/autopilot/${activeSessionId}/cancel`, { method: 'POST' });
-            fetchSessionDetail(activeSessionId);
-            fetchSessions();
+            const res = await fetch(`${API_BASE}/autopilot/${encodeURIComponent(sessionId)}/cancel`, { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                toast.error(data.detail || 'Failed to cancel');
+                return;
+            }
+            await Promise.all([fetchSessionDetail(sessionId), fetchSessions()]);
         } catch (e) {
             console.error('Failed to cancel:', e);
+            toast.error('Failed to cancel');
+        } finally {
+            setSessionActionPending(null);
         }
     };
 
     const stopTestTask = async (taskId: number) => {
-        if (!activeSessionId) return;
+        if (!activeSessionId || stoppingTaskId !== null) return;
+        const sessionId = activeSessionId;
+        setStoppingTaskId(taskId);
         try {
             const res = await fetch(
-                `${API_BASE}/autopilot/${activeSessionId}/test-tasks/${taskId}/stop`,
+                `${API_BASE}/autopilot/${encodeURIComponent(sessionId)}/test-tasks/${encodeURIComponent(String(taskId))}/stop`,
                 { method: 'POST', headers: { 'Content-Type': 'application/json' } }
             );
             if (res.ok) {
                 toast.success(`Test task ${taskId} stopped`);
-                fetchSessionDetail(activeSessionId);
+                await Promise.all([fetchSessionDetail(sessionId), fetchSessions()]);
             } else {
                 const data = await res.json().catch(() => ({}));
                 toast.error(data.detail || 'Failed to stop task');
             }
         } catch (err) {
             toast.error('Error stopping task');
+        } finally {
+            setStoppingTaskId(null);
         }
     };
 
@@ -3114,15 +3137,20 @@ export default function AutoPilotPage() {
                                             {(task.status === 'running' || task.status === 'pending') && (
                                                 <button
                                                 onClick={() => stopTestTask(task.id)}
+                                                disabled={stoppingTaskId !== null}
                                                 style={{
                                                     padding: '0.2rem 0.5rem',
                                                     borderRadius: '4px',
                                                     border: `1px solid ${dark.dangerBorder}`,
                                                     background: dark.dangerSoft,
                                                     color: dark.danger,
-                                                    cursor: 'pointer',
+                                                    cursor: stoppingTaskId !== null ? 'not-allowed' : 'pointer',
                                                     fontSize: '0.7rem',
                                                     fontWeight: 600,
+                                                    opacity: stoppingTaskId !== null ? 0.6 : 1,
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '0.25rem',
                                                 }}
                                                 onMouseEnter={(e) => {
                                                     e.currentTarget.style.background = dark.dangerHover;
@@ -3131,7 +3159,8 @@ export default function AutoPilotPage() {
                                                     e.currentTarget.style.background = dark.dangerSoft;
                                                 }}
                                             >
-                                                Stop
+                                                {stoppingTaskId === task.id && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+                                                {stoppingTaskId === task.id ? 'Stopping...' : 'Stop'}
                                             </button>
                                         )}
                                         </div>
@@ -3724,6 +3753,10 @@ export default function AutoPilotPage() {
         const isAwaitingInput = session.status === 'awaiting_input';
         const canResume = session.can_resume && !isRunning;
         const isActive = isRunning || isPaused || isAwaitingInput;
+        const isPausePending = sessionActionPending === 'pause';
+        const isResumePending = sessionActionPending === 'resume';
+        const isCancelPending = sessionActionPending === 'cancel';
+        const anySessionActionPending = sessionActionPending !== null;
 
         return (
             <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
@@ -3737,29 +3770,44 @@ export default function AutoPilotPage() {
                             {isRunning && (
                                 <button
                                     onClick={pauseSession}
-                                    style={secondaryButtonStyle}
+                                    disabled={anySessionActionPending}
+                                    style={{
+                                        ...secondaryButtonStyle,
+                                        opacity: anySessionActionPending ? 0.6 : 1,
+                                        cursor: anySessionActionPending ? 'not-allowed' : 'pointer',
+                                    }}
                                 >
-                                    <Pause size={16} />
-                                    Pause
+                                    {isPausePending ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Pause size={16} />}
+                                    {isPausePending ? 'Pausing...' : 'Pause'}
                                 </button>
                             )}
                             {canResume && (
                                 <button
                                     onClick={resumeSession}
-                                    style={primaryButtonStyle}
+                                    disabled={anySessionActionPending}
+                                    style={{
+                                        ...primaryButtonStyle,
+                                        opacity: anySessionActionPending ? 0.6 : 1,
+                                        cursor: anySessionActionPending ? 'not-allowed' : 'pointer',
+                                    }}
                                     title={session.resume_reason || 'Resume Auto Pilot'}
                                 >
-                                    <Play size={16} />
-                                    {session.status === 'failed' ? 'Retry Phase' : 'Resume'}
+                                    {isResumePending ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
+                                    {isResumePending ? 'Resuming...' : session.status === 'failed' ? 'Retry Phase' : 'Resume'}
                                 </button>
                             )}
                             {isActive && (
                                 <button
                                     onClick={cancelSession}
-                                    style={dangerButtonStyle}
+                                    disabled={anySessionActionPending}
+                                    style={{
+                                        ...dangerButtonStyle,
+                                        opacity: anySessionActionPending ? 0.6 : 1,
+                                        cursor: anySessionActionPending ? 'not-allowed' : 'pointer',
+                                    }}
                                 >
-                                    <Square size={14} />
-                                    Cancel
+                                    {isCancelPending ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Square size={14} />}
+                                    {isCancelPending ? 'Cancelling...' : 'Cancel'}
                                 </button>
                             )}
                             <button
@@ -3800,7 +3848,7 @@ export default function AutoPilotPage() {
                         ))}
                     </div>
 
-                    {session.error_message && (
+                    {(session.error_message || (session.can_resume && session.resume_reason)) && (
                         <div className="animate-in stagger-1" style={{
                             ...cardStyle,
                             marginBottom: '1rem',
@@ -3810,7 +3858,7 @@ export default function AutoPilotPage() {
                             fontSize: '0.85rem',
                             fontWeight: 600,
                         }}>
-                            {session.error_message}
+                            {session.error_message || 'Auto Pilot can retry from the failed phase.'}
                             {session.can_resume && session.resume_reason && (
                                 <div style={{ marginTop: '0.4rem', color: dark.textSecondary, fontWeight: 500 }}>
                                     {session.resume_reason}
@@ -3847,19 +3895,27 @@ export default function AutoPilotPage() {
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                                 <button
                                     onClick={resumeSession}
-                                    disabled={!session.can_resume}
+                                    disabled={!session.can_resume || anySessionActionPending}
                                     style={{
                                         ...primaryButtonStyle,
-                                        opacity: session.can_resume ? 1 : 0.55,
-                                        cursor: session.can_resume ? 'pointer' : 'not-allowed',
+                                        opacity: session.can_resume && !anySessionActionPending ? 1 : 0.55,
+                                        cursor: session.can_resume && !anySessionActionPending ? 'pointer' : 'not-allowed',
                                     }}
                                 >
-                                    <Play size={16} />
-                                    Resume
+                                    {isResumePending ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
+                                    {isResumePending ? 'Resuming...' : 'Resume'}
                                 </button>
-                                <button onClick={cancelSession} style={dangerButtonStyle}>
-                                    <Square size={14} />
-                                    Cancel
+                                <button
+                                    onClick={cancelSession}
+                                    disabled={anySessionActionPending}
+                                    style={{
+                                        ...dangerButtonStyle,
+                                        opacity: anySessionActionPending ? 0.6 : 1,
+                                        cursor: anySessionActionPending ? 'not-allowed' : 'pointer',
+                                    }}
+                                >
+                                    {isCancelPending ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Square size={14} />}
+                                    {isCancelPending ? 'Cancelling...' : 'Cancel'}
                                 </button>
                             </div>
                         </div>

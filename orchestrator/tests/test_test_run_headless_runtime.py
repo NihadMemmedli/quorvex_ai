@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from orchestrator.api import test_run_runtime_support
 from orchestrator.api.test_run_runtime_support import execute_run_task, resolve_run_headless_mode
 
 
@@ -104,12 +105,14 @@ def _fake_runtime(tmp_path, captured_env):
     )
 
 
-def test_execute_run_task_keeps_subprocess_headless_when_direct_headed_request_has_no_display(
+def test_execute_run_task_sets_headless_subprocess_env_defaults(
     tmp_path,
     monkeypatch,
 ):
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("TEST_RUN_PLAYWRIGHT_WORKERS", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_WORKERS", raising=False)
     monkeypatch.setenv("HEADLESS", "false")
     monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "false")
     captured_env = {}
@@ -126,4 +129,77 @@ def test_execute_run_task_keeps_subprocess_headless_when_direct_headed_request_h
     assert captured_env["HEADLESS"] == "true"
     assert captured_env["PLAYWRIGHT_HEADLESS"] == "true"
     assert "CI" not in captured_env
-    assert "PLAYWRIGHT_WORKERS" not in captured_env
+    assert captured_env["PLAYWRIGHT_WORKERS"] == "1"
+
+
+def test_execute_run_task_honors_test_run_playwright_workers_for_headless_subprocess(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("TEST_RUN_PLAYWRIGHT_WORKERS", "4")
+    monkeypatch.setenv("PLAYWRIGHT_WORKERS", "9")
+    captured_env = {}
+    runtime = _fake_runtime(tmp_path, captured_env)
+
+    execute_run_task(
+        runtime,
+        spec_path=str(tmp_path / "spec.md"),
+        run_dir=str(tmp_path / "run"),
+        run_id="run-headless-custom-workers",
+        headless=True,
+    )
+
+    assert captured_env["HEADLESS"] == "true"
+    assert captured_env["PLAYWRIGHT_HEADLESS"] == "true"
+    assert captured_env["PLAYWRIGHT_WORKERS"] == "4"
+
+
+def test_execute_run_task_sets_headed_subprocess_env_for_vnc_runs(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("VNC_ENABLED", "true")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("TEST_RUN_PLAYWRIGHT_WORKERS", "6")
+    monkeypatch.setenv("PLAYWRIGHT_WORKERS", "6")
+    captured_env = {}
+    runtime = _fake_runtime(tmp_path, captured_env)
+
+    execute_run_task(
+        runtime,
+        spec_path=str(tmp_path / "spec.md"),
+        run_dir=str(tmp_path / "run"),
+        run_id="run-headed-vnc",
+        headless=False,
+    )
+
+    assert captured_env["HEADLESS"] == "false"
+    assert captured_env["PLAYWRIGHT_HEADLESS"] == "false"
+    assert captured_env["PLAYWRIGHT_WORKERS"] == "1"
+    assert captured_env["CI"] == ""
+
+
+def test_resolve_effective_browser_parallelism_clamps_only_headed_vnc_runs():
+    effective_parallelism = getattr(
+        test_run_runtime_support,
+        "resolve_effective_browser_parallelism",
+    )
+
+    headed_vnc = effective_parallelism(
+        requested_parallelism=5,
+        env={"VNC_ENABLED": "true", "DISPLAY": ":99", "HEADLESS": "false"},
+    )
+    headless = effective_parallelism(
+        requested_parallelism=5,
+        env={"VNC_ENABLED": "true", "DISPLAY": ":99", "HEADLESS": "true"},
+    )
+
+    assert headed_vnc["headless"] is False
+    assert headed_vnc["effective_parallelism"] == 1
+    assert headed_vnc["parallelism_clamp_reason"] == "shared_vnc_display"
+    assert headless["headless"] is True
+    assert headless["effective_parallelism"] == 5
+    assert headless["parallelism_clamp_reason"] is None

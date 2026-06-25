@@ -320,11 +320,12 @@ async def start_test_run_workflow(
 async def start_autopilot_workflow(
     session_id: str,
     *,
+    attempt: int | None = None,
     task_queue: str | None = None,
 ) -> TemporalWorkflowStart:
     """Start a durable Temporal workflow for an AutoPilot session."""
     client = await _connect_client()
-    workflow_id = f"autopilot-{session_id}"
+    workflow_id = f"autopilot-{session_id}" if attempt is None else f"autopilot-{session_id}-retry-{attempt}"
     selected_task_queue = task_queue or settings.temporal_browser_workflow_task_queue
     handle = await client.start_workflow(
         "AutoPilotWorkflow",

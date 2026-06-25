@@ -845,6 +845,68 @@ async def _start_autopilot_temporal_or_fail(ap_session: AutoPilotSession, db: Se
     db.commit()
 
 
+def _workflow_status_is_running(status: str | None) -> bool:
+    return str(status or "").upper() in {"RUNNING", "PENDING"}
+
+
+def _next_autopilot_retry_attempt(ap_session: AutoPilotSession) -> int:
+    prefix = f"autopilot-{ap_session.id}-retry-"
+    workflow_id = ap_session.temporal_workflow_id or ""
+    if workflow_id.startswith(prefix):
+        try:
+            return int(workflow_id.removeprefix(prefix)) + 1
+        except ValueError:
+            return 1
+    return 1
+
+
+async def _describe_autopilot_temporal_status(ap_session: AutoPilotSession) -> str | None:
+    if not ap_session.temporal_workflow_id:
+        return None
+    from orchestrator.services.temporal_client import describe_autopilot_workflow
+
+    payload = await describe_autopilot_workflow(ap_session.temporal_workflow_id)
+    return str(payload.get("workflow_status") or "") or None
+
+
+async def _relaunch_autopilot_temporal_or_fail(
+    db: Session,
+    ap_session: AutoPilotSession,
+    failed_phase: str | None,
+) -> None:
+    """Reset resumable state and start a fresh Temporal workflow attempt."""
+    from orchestrator.config import settings as app_settings
+    from orchestrator.services.temporal_client import TemporalUnavailableError, start_autopilot_workflow
+
+    _reset_resumable_state(db, ap_session, failed_phase)
+    attempt = _next_autopilot_retry_attempt(ap_session)
+    try:
+        temporal = await start_autopilot_workflow(
+            ap_session.id,
+            attempt=attempt,
+            task_queue=app_settings.temporal_browser_workflow_task_queue,
+        )
+    except TemporalUnavailableError as exc:
+        ap_session.status = "failed"
+        ap_session.error_message = f"Failed to restart Temporal workflow: {exc}"
+        ap_session.completed_at = datetime.utcnow()
+        db.add(ap_session)
+        db.commit()
+        raise HTTPException(status_code=503, detail=f"Failed to restart Auto Pilot: {exc}") from exc
+    except Exception as exc:
+        ap_session.status = "failed"
+        ap_session.error_message = f"Failed to restart Temporal workflow: {exc}"
+        ap_session.completed_at = datetime.utcnow()
+        db.add(ap_session)
+        db.commit()
+        raise HTTPException(status_code=503, detail=f"Failed to restart Auto Pilot: {exc}") from exc
+
+    ap_session.temporal_workflow_id = temporal.workflow_id
+    ap_session.temporal_run_id = temporal.run_id
+    db.add(ap_session)
+    db.commit()
+
+
 async def _signal_autopilot_temporal(ap_session: AutoPilotSession, signal_name: str, *args) -> bool:
     """Best-effort signal for Temporal-backed AutoPilot sessions."""
     if not ap_session.temporal_workflow_id:
@@ -1929,6 +1991,7 @@ def _reset_resumable_state(db: Session, ap_session: AutoPilotSession, failed_pha
         if phase:
             phase.status = "pending"
             phase.error_message = None
+            phase.started_at = None
             phase.completed_at = None
             phase.current_step = f"Waiting to resume {resume_phase.replace('_', ' ')}"
             phase.progress = 0.0
@@ -1945,8 +2008,6 @@ def _reset_resumable_state(db: Session, ap_session: AutoPilotSession, failed_pha
             task.error_message = None
             task.completed_at = None
             db.add(task)
-        ap_session.total_specs_generated = 0
-        db.add(ap_session)
 
     if resume_phase == "test_generation":
         stmt = (
@@ -1980,8 +2041,10 @@ def _reset_resumable_state(db: Session, ap_session: AutoPilotSession, failed_pha
                 if run:
                     run.status = "pending"
                     run.current_stage = "pending"
+                    run.stage_started_at = None
                     run.stage_message = "Waiting to resume Auto Pilot test generation"
                     run.error_message = None
+                    run.started_at = None
                     run.completed_at = None
                     db.add(run)
 
@@ -1991,7 +2054,7 @@ def _reset_resumable_state(db: Session, ap_session: AutoPilotSession, failed_pha
         .where(AutoPilotQuestion.status == "pending")
     )
     for question in db.exec(stmt).all():
-        if original_status != "awaiting_input":
+        if original_status == "failed" and resume_phase:
             question.status = "skipped"
             db.add(question)
 
@@ -2810,9 +2873,39 @@ async def resume_session(
 
     entry = _running_pipelines.get(session_id)
     if ap_session.temporal_workflow_id:
-        _reset_resumable_state(session, ap_session, failed_phase)
-        await _signal_autopilot_temporal(ap_session, "resume")
-        logger.info("Signalled Temporal AutoPilot resume for %s", session_id)
+        workflow_status: str | None = None
+        workflow_reachable = False
+        try:
+            workflow_status = await _describe_autopilot_temporal_status(ap_session)
+            workflow_reachable = True
+        except Exception as exc:
+            logger.info(
+                "AutoPilot Temporal workflow %s is not reachable during resume; relaunching when safe: %s",
+                ap_session.temporal_workflow_id,
+                exc,
+            )
+
+        should_signal_running_workflow = (
+            workflow_reachable
+            and _workflow_status_is_running(workflow_status)
+            and ap_session.status in {"paused", "awaiting_input", "pending", "running"}
+        )
+        if should_signal_running_workflow:
+            signalled = await _signal_autopilot_temporal(ap_session, "resume")
+            if not signalled:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Failed to signal running Auto Pilot Temporal workflow",
+                )
+            _reset_resumable_state(session, ap_session, failed_phase)
+            logger.info("Signalled Temporal AutoPilot resume for %s", session_id)
+        else:
+            await _relaunch_autopilot_temporal_or_fail(session, ap_session, failed_phase)
+            logger.info(
+                "Relaunched Temporal AutoPilot resume for %s as %s",
+                session_id,
+                ap_session.temporal_workflow_id,
+            )
     elif ap_session.status == "paused":
         if entry and not entry[0].done():
             entry[0].cancel()

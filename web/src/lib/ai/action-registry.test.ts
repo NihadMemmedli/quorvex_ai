@@ -55,4 +55,12 @@ describe('assistant action registry', () => {
       project_id: 'project-a',
     });
   });
+
+  it('keeps resumeAutoPilot mapped to confirmed resume endpoint', () => {
+    const config = getAssistantActionConfig('resumeAutoPilot');
+
+    expect(config?.method).toBe('POST');
+    expect(config?.confirmationRequired).toBe(true);
+    expect(config?.getPath({ sessionId: 'session/with space' })).toBe('/autopilot/session%2Fwith%20space/resume');
+  });
 });

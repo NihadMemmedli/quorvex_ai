@@ -296,6 +296,8 @@ services:
       - VNC_ENABLED=true
       - DISPLAY=:99
       - HEADLESS=false
+      - PLAYWRIGHT_HEADLESS=false
+      - TEST_RUN_PLAYWRIGHT_WORKERS=${TEST_RUN_PLAYWRIGHT_WORKERS:-1}
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       - REQUIRE_AUTH=${REQUIRE_AUTH:-true}

@@ -310,7 +310,7 @@ test.describe('OpenAPI import plan and tests', () => {
     ]);
     await importPage.open();
 
-    await expect(page.getByText('Failed')).toBeVisible();
+    await expect(page.locator('div').filter({ hasText: /^Failed$/ }).first()).toBeVisible();
     await expect(page.getByText('Import status expired before completion; re-import to retry.')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Import Jobs' })).toHaveCount(0);
   });

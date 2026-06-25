@@ -203,6 +203,70 @@ def resolve_run_headless_mode(
     return True
 
 
+def _positive_int(value: Any, *, default: int, maximum: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    parsed = max(1, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def resolve_test_run_playwright_workers(
+    *,
+    env: dict[str, str] | None = None,
+    headless: bool,
+) -> int:
+    """Resolve per-run Playwright workers for generated test subprocesses."""
+    if not headless:
+        return 1
+    source = env or {}
+    return _positive_int(source.get("TEST_RUN_PLAYWRIGHT_WORKERS"), default=1, maximum=10)
+
+
+def resolve_effective_browser_parallelism(
+    *,
+    requested_parallelism: int,
+    env: dict[str, str] | None = None,
+    execution_settings: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve browser pool capacity with shared VNC display safety applied."""
+    requested = _positive_int(requested_parallelism, default=1)
+    headless = resolve_run_headless_mode(env=env, execution_settings=execution_settings)
+    shared_vnc_display = display_capable_vnc_enabled(env) and not headless
+    effective = 1 if shared_vnc_display else requested
+    return {
+        "requested_parallelism": requested,
+        "effective_parallelism": effective,
+        "headless": headless,
+        "browser_runtime_mode": "headless" if headless else "headed_vnc" if shared_vnc_display else "headed",
+        "parallelism_clamp_reason": "shared_vnc_display" if effective < requested else None,
+    }
+
+
+async def apply_browser_pool_parallelism(
+    pool: Any,
+    *,
+    requested_parallelism: int,
+    env: dict[str, str] | None = None,
+    execution_settings: Any | None = None,
+) -> dict[str, Any]:
+    """Apply effective browser pool capacity and attach diagnostics to the pool."""
+    resolved = resolve_effective_browser_parallelism(
+        requested_parallelism=requested_parallelism,
+        env=env,
+        execution_settings=execution_settings,
+    )
+    setattr(pool, "requested_max_browsers", resolved["requested_parallelism"])
+    setattr(pool, "effective_max_browsers", resolved["effective_parallelism"])
+    setattr(pool, "browser_runtime_mode", resolved["browser_runtime_mode"])
+    setattr(pool, "parallelism_clamp_reason", resolved["parallelism_clamp_reason"])
+    await pool.update_max_browsers(resolved["effective_parallelism"])
+    return resolved
+
+
 def execute_run_task(
     runtime: Any,
     spec_path: str,
@@ -314,9 +378,9 @@ def execute_run_task(
     env = runtime.os.environ.copy()
     env["HEADLESS"] = "true" if headless else "false"
     env["PLAYWRIGHT_HEADLESS"] = "true" if headless else "false"
+    env["PLAYWRIGHT_WORKERS"] = str(resolve_test_run_playwright_workers(env=env, headless=headless))
     if not headless:
         env["CI"] = ""
-        env["PLAYWRIGHT_WORKERS"] = "1"
     env["MEMORY_ENABLED"] = "true" if memory_enabled else "false"
     env["QUORVEX_RUN_MODEL_TIER"] = model_tier or "tool_deep"
     env["BROWSER_SLOT_PARENT_OWNER_TYPE"] = "test_run"
