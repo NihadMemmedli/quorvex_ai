@@ -1,7 +1,7 @@
 # ============================================
 # Stage 1: Base image with Python + Node + Playwright runtime deps
 # ============================================
-FROM python:3.10-slim-bookworm AS base
+FROM python:3.14-slim-bookworm AS base
 
 # Set working directory
 WORKDIR /app
