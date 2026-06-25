@@ -4,7 +4,7 @@
 # Reduces image from ~1.5GB to ~200MB
 # Memory: 4G instead of 24G
 # ============================================
-FROM python:3.10-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
