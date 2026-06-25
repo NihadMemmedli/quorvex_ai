@@ -259,10 +259,10 @@ async def apply_browser_pool_parallelism(
         env=env,
         execution_settings=execution_settings,
     )
-    setattr(pool, "requested_max_browsers", resolved["requested_parallelism"])
-    setattr(pool, "effective_max_browsers", resolved["effective_parallelism"])
-    setattr(pool, "browser_runtime_mode", resolved["browser_runtime_mode"])
-    setattr(pool, "parallelism_clamp_reason", resolved["parallelism_clamp_reason"])
+    pool.requested_max_browsers = resolved["requested_parallelism"]
+    pool.effective_max_browsers = resolved["effective_parallelism"]
+    pool.browser_runtime_mode = resolved["browser_runtime_mode"]
+    pool.parallelism_clamp_reason = resolved["parallelism_clamp_reason"]
     await pool.update_max_browsers(resolved["effective_parallelism"])
     return resolved
 

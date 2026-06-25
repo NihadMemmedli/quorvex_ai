@@ -53,13 +53,15 @@ from orchestrator.api.models_db import (
     AutoPilotSpecTask,
     AutoPilotTestTask,
     Project,
-    TestRun as DBTestRun,
 )
 from orchestrator.api.models_db import (
     TestDataItem as DBTestDataItem,
 )
 from orchestrator.api.models_db import (
     TestDataSet as DBTestDataSet,
+)
+from orchestrator.api.models_db import (
+    TestRun as DBTestRun,
 )
 from orchestrator.services import temporal_client
 from orchestrator.services.autopilot_activities import (

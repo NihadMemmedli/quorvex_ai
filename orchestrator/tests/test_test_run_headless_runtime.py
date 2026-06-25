@@ -183,10 +183,7 @@ def test_execute_run_task_sets_headed_subprocess_env_for_vnc_runs(
 
 
 def test_resolve_effective_browser_parallelism_clamps_only_headed_vnc_runs():
-    effective_parallelism = getattr(
-        test_run_runtime_support,
-        "resolve_effective_browser_parallelism",
-    )
+    effective_parallelism = test_run_runtime_support.resolve_effective_browser_parallelism
 
     headed_vnc = effective_parallelism(
         requested_parallelism=5,
