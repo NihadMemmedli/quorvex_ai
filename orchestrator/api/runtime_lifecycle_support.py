@@ -47,11 +47,15 @@ async def startup(runtime: Any) -> None:
             terminal_run_processes_cleaned,
         )
 
+    from orchestrator.api.test_run_runtime_support import apply_browser_pool_parallelism
+
     # Read parallelism from database settings (or use env default)
     db_max_browsers = int(runtime.os.environ.get("MAX_BROWSER_INSTANCES", "5"))
+    execution_settings = None
     with runtime.Session(runtime.engine) as session:
         settings = session.get(runtime.DBExecutionSettings, 1)
         if settings:
+            execution_settings = settings
             db_max_browsers = settings.parallelism
             runtime.logger.info(f"Using parallelism from database settings: {db_max_browsers}")
         else:
@@ -59,7 +63,19 @@ async def startup(runtime: Any) -> None:
 
     # Initialize unified BrowserResourcePool with parallelism from DB
     runtime.BROWSER_POOL = await runtime.get_browser_pool(max_browsers=db_max_browsers)
-    runtime.logger.info(f"BrowserResourcePool initialized: max_browsers={runtime.BROWSER_POOL.max_browsers}")
+    resolved_parallelism = await apply_browser_pool_parallelism(
+        runtime.BROWSER_POOL,
+        requested_parallelism=db_max_browsers,
+        env=runtime.os.environ,
+        execution_settings=execution_settings,
+    )
+    runtime.logger.info(
+        "BrowserResourcePool initialized: requested=%s effective=%s mode=%s clamp=%s",
+        resolved_parallelism["requested_parallelism"],
+        resolved_parallelism["effective_parallelism"],
+        resolved_parallelism["browser_runtime_mode"],
+        resolved_parallelism["parallelism_clamp_reason"],
+    )
 
     # Clean up any stale browser slots from previous server instance
     stale_cleaned = await runtime.BROWSER_POOL.cleanup_stale(max_age_minutes=60)

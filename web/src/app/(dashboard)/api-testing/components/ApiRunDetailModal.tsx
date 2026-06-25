@@ -16,6 +16,7 @@ interface ApiRunDetailModalProps {
     projectId: string;
     onClose: () => void;
     onRetry?: (jobId: string) => void;
+    canEdit: boolean;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -45,7 +46,7 @@ function getCategoryColor(category: string): string {
     return ERROR_CATEGORY_COLORS[category] || 'var(--text-tertiary)';
 }
 
-export default function ApiRunDetailModal({ runId, projectId, onClose, onRetry }: ApiRunDetailModalProps) {
+export default function ApiRunDetailModal({ runId, projectId, onClose, onRetry, canEdit }: ApiRunDetailModalProps) {
     const [data, setData] = useState<ApiRunDetail | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -79,6 +80,7 @@ export default function ApiRunDetailModal({ runId, projectId, onClose, onRetry }
     }, [projectId, runId]);
 
     const handleRetry = async () => {
+        if (!canEdit) return;
         setRetrying(true);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/runs/${runId}/retry`, projectId)}`, { method: 'POST' });
@@ -559,7 +561,7 @@ export default function ApiRunDetailModal({ runId, projectId, onClose, onRetry }
                             )}
 
                             {/* Retry Button */}
-                            {data.status === 'failed' && onRetry && (
+                            {canEdit && data.status === 'failed' && onRetry && (
                                 <div style={{
                                     display: 'flex', justifyContent: 'center',
                                     paddingTop: '0.5rem', borderTop: '1px solid var(--border)',

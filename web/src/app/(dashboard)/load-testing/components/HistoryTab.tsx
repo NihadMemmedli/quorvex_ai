@@ -28,6 +28,7 @@ interface HistoryTabProps {
     onSetComparisonData: (data: ComparisonData | null) => void;
     onAnalyzeRun?: (runId: string) => void;
     analyzingRunId?: string | null;
+    canEdit: boolean;
     /** Lazy-loaded ResultsView component */
     ResultsView: React.ComponentType<{ run: LoadTestRun; projectId: string; onAnalyze?: () => void; analyzing?: boolean }>;
     /** Lazy-loaded ComparisonView component */
@@ -55,9 +56,14 @@ export default function HistoryTab({
     onSetComparisonData,
     onAnalyzeRun,
     analyzingRunId,
+    canEdit,
     ResultsView,
     ComparisonView,
 }: HistoryTabProps) {
+    const gridColumns = canEdit
+        ? '32px 24px 90px 1fr 100px 90px 90px 80px 90px 140px'
+        : '24px 90px 1fr 100px 90px 90px 80px 90px 140px';
+
     if (comparisonData) {
         return comparisonLoading ? (
             <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-secondary)' }}>
@@ -92,7 +98,7 @@ export default function HistoryTab({
             </div>
 
             {/* Comparison Action Bar */}
-            {compareIds.size > 0 && (
+            {canEdit && compareIds.size > 0 && (
                 <div style={{
                     display: 'flex', alignItems: 'center', gap: '0.75rem',
                     padding: '0.6rem 1rem', marginBottom: '0.75rem',
@@ -154,12 +160,12 @@ export default function HistoryTab({
                     {/* Table header */}
                     <div style={{
                         display: 'grid',
-                        gridTemplateColumns: '32px 24px 90px 1fr 100px 90px 90px 80px 90px 140px',
+                        gridTemplateColumns: gridColumns,
                         padding: '0.6rem 1rem', borderBottom: '1px solid var(--border)',
                         fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-tertiary)',
                         textTransform: 'uppercase', letterSpacing: '0.05em',
                     }}>
-                        <span></span>
+                        {canEdit && <span></span>}
                         <span></span>
                         <span>Status</span>
                         <span>Spec / Script</span>
@@ -190,7 +196,7 @@ export default function HistoryTab({
                                 <div
                                     style={{
                                         display: 'grid',
-                                        gridTemplateColumns: '32px 24px 90px 1fr 100px 90px 90px 80px 90px 140px',
+                                        gridTemplateColumns: gridColumns,
                                         padding: '0.6rem 1rem',
                                         borderBottom: '1px solid var(--border)',
                                         cursor: 'pointer',
@@ -209,19 +215,21 @@ export default function HistoryTab({
                                         }
                                     }}
                                 >
-                                    <span onClick={e => e.stopPropagation()}>
-                                        <input
-                                            type="checkbox"
-                                            checked={isChecked}
-                                            disabled={isDisabled}
-                                            onChange={() => onToggleCompareId(run.id)}
-                                            style={{
-                                                cursor: isDisabled ? 'not-allowed' : 'pointer',
-                                                accentColor: 'var(--primary)',
-                                                width: '14px', height: '14px',
-                                            }}
-                                        />
-                                    </span>
+                                    {canEdit && (
+                                        <span onClick={e => e.stopPropagation()}>
+                                            <input
+                                                type="checkbox"
+                                                checked={isChecked}
+                                                disabled={isDisabled}
+                                                onChange={() => onToggleCompareId(run.id)}
+                                                style={{
+                                                    cursor: isDisabled ? 'not-allowed' : 'pointer',
+                                                    accentColor: 'var(--primary)',
+                                                    width: '14px', height: '14px',
+                                                }}
+                                            />
+                                        </span>
+                                    )}
                                     <span>{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
                                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                                         <span style={{
@@ -270,7 +278,7 @@ export default function HistoryTab({
                                             <ResultsView
                                                 run={expandedRunData}
                                                 projectId={projectId}
-                                                onAnalyze={onAnalyzeRun ? () => onAnalyzeRun(expandedRunData.id) : undefined}
+                                                onAnalyze={canEdit && onAnalyzeRun ? () => onAnalyzeRun(expandedRunData.id) : undefined}
                                                 analyzing={analyzingRunId === expandedRunData.id}
                                             />
                                         ) : (

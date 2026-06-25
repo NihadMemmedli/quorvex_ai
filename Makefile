@@ -707,6 +707,7 @@ check-env:
 	else \
 		echo "  - nuclei not installed (optional, for template-based scanning)"; \
 		echo "    Install: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"; \
+		echo "    Docker images skip Nuclei by default; rebuild with INSTALL_NUCLEI=true to include it."; \
 	fi
 	@echo "  Quick scan: Always available (uses httpx, no external deps)"
 	@echo "  ZAP DAST:   make zap-up (Docker required)"

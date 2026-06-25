@@ -14,6 +14,7 @@ interface DbViewerTabProps {
     selectedTableName?: string;
     onSelectConnection: (connectionId: string) => void;
     onSelectTable: (tableName: string) => void;
+    canEdit: boolean;
 }
 
 function quoteIdent(value: string) {
@@ -28,6 +29,7 @@ export default function DbViewerTab({
     selectedTableName,
     onSelectConnection,
     onSelectTable,
+    canEdit,
 }: DbViewerTabProps) {
     const [schemaData, setSchemaData] = useState<DbSchema | null>(null);
     const [loadingSchema, setLoadingSchema] = useState(false);
@@ -79,6 +81,7 @@ export default function DbViewerTab({
     }, [schemaData, selectedTable]);
 
     const runQuery = async () => {
+        if (!canEdit) return;
         if (!connectionId || !sql.trim()) return;
         setRunningQuery(true);
         setQueryError('');
@@ -190,13 +193,16 @@ export default function DbViewerTab({
                             <input type="number" min={1} max={500} value={queryLimit}
                                 onChange={e => setQueryLimit(Math.max(1, Math.min(500, Number(e.target.value) || 100)))}
                                 style={{ ...inputStyle, width: '90px', padding: '0.45rem 0.5rem' }} />
-                            <button onClick={runQuery} disabled={runningQuery || !connectionId || !sql.trim()} style={btnPrimary}>
-                                {runningQuery ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={14} />}
-                                Run
-                            </button>
+                            {canEdit && (
+                                <button onClick={runQuery} disabled={runningQuery || !connectionId || !sql.trim()} style={btnPrimary}>
+                                    {runningQuery ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={14} />}
+                                    Run
+                                </button>
+                            )}
                         </div>
                     </div>
                     <textarea value={sql} onChange={e => setSql(e.target.value)} rows={5}
+                        readOnly={!canEdit}
                         style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical', marginBottom: '0.75rem' }} />
                     {queryError && <div style={{ color: 'var(--danger)', fontSize: '0.85rem', marginBottom: '0.75rem' }}>{queryError}</div>}
                     {queryMeta && (

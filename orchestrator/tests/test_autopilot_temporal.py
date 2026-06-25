@@ -60,6 +60,9 @@ from orchestrator.api.models_db import (
 from orchestrator.api.models_db import (
     TestDataSet as DBTestDataSet,
 )
+from orchestrator.api.models_db import (
+    TestRun as DBTestRun,
+)
 from orchestrator.services import temporal_client
 from orchestrator.services.autopilot_activities import (
     _build_config_from_session,
@@ -782,6 +785,267 @@ async def test_start_autopilot_temporal_helper_marks_session_failed_on_temporal_
         assert ap_session.config["live_browser"]["status"] == "failed"
 
     _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_temporal_resume_relaunches_terminal_workflow(monkeypatch):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="failed")
+    starts: list[tuple[str, int | None]] = []
+
+    async def fake_describe(workflow_id: str) -> dict:
+        assert workflow_id == f"autopilot-{session_id}"
+        return {"workflow_status": "COMPLETED"}
+
+    async def fake_start(session_id_arg: str, *, attempt: int | None = None, task_queue: str | None = None):
+        starts.append((session_id_arg, attempt))
+        return TemporalWorkflowStart(
+            workflow_id=f"autopilot-{session_id_arg}-retry-{attempt}",
+            run_id=f"retry-run-{attempt}",
+        )
+
+    monkeypatch.setattr("orchestrator.services.temporal_client.describe_autopilot_workflow", fake_describe)
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_autopilot_workflow", fake_start)
+
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.current_phase = "spec_generation"
+            ap_session.temporal_workflow_id = f"autopilot-{session_id}"
+            ap_session.temporal_run_id = "old-run"
+            ap_session.phases_completed = ["exploration", "requirements", "spec_generation"]
+            session.add(
+                AutoPilotPhase(
+                    session_id=session_id,
+                    phase_name="spec_generation",
+                    phase_order=3,
+                    status="failed",
+                    progress=85.0,
+                    error_message="agent failed",
+                    completed_at=datetime.utcnow(),
+                )
+            )
+            session.add(ap_session)
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(autopilot_api.router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(f"/autopilot/{session_id}/resume")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "running"
+        assert starts == [(session_id, 1)]
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            assert ap_session.status == "running"
+            assert ap_session.temporal_workflow_id == f"autopilot-{session_id}-retry-1"
+            assert ap_session.temporal_run_id == "retry-run-1"
+            assert ap_session.phases_completed == ["exploration", "requirements"]
+            phase = session.exec(
+                select(AutoPilotPhase)
+                .where(AutoPilotPhase.session_id == session_id)
+                .where(AutoPilotPhase.phase_name == "spec_generation")
+            ).one()
+            assert phase.status == "pending"
+            assert phase.error_message is None
+            assert phase.completed_at is None
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_temporal_resume_errors_when_running_signal_fails(monkeypatch):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="paused")
+    starts: list[str] = []
+
+    async def fake_describe(workflow_id: str) -> dict:
+        return {"workflow_status": "RUNNING"}
+
+    async def fake_signal(workflow_id: str, signal_name: str, *args):
+        raise TemporalUnavailableError("signal failed")
+
+    async def fake_start(session_id_arg: str, *, attempt: int | None = None, task_queue: str | None = None):
+        starts.append(session_id_arg)
+        return TemporalWorkflowStart(workflow_id="unexpected", run_id="unexpected")
+
+    monkeypatch.setattr("orchestrator.services.temporal_client.describe_autopilot_workflow", fake_describe)
+    monkeypatch.setattr("orchestrator.services.temporal_client.signal_autopilot_workflow", fake_signal)
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_autopilot_workflow", fake_start)
+
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.current_phase = "test_generation"
+            ap_session.temporal_workflow_id = f"autopilot-{session_id}"
+            session.add(ap_session)
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(autopilot_api.router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(f"/autopilot/{session_id}/resume")
+
+        assert response.status_code == 503
+        assert starts == []
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            assert ap_session.status == "paused"
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_failed_spec_generation_resume_resets_only_retryable_spec_tasks():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="failed")
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.current_phase = "spec_generation"
+            ap_session.phases_completed = ["exploration", "requirements", "spec_generation", "test_generation"]
+            ap_session.total_specs_generated = 2
+            session.add(
+                AutoPilotPhase(
+                    session_id=session_id,
+                    phase_name="spec_generation",
+                    phase_order=3,
+                    status="failed",
+                    error_message="failed",
+                    completed_at=datetime.utcnow(),
+                )
+            )
+            session.add(AutoPilotSpecTask(session_id=session_id, requirement_title="done", status="completed", spec_name="done.md", completed_at=datetime.utcnow()))
+            session.add(AutoPilotSpecTask(session_id=session_id, requirement_title="skip", status="skipped", spec_name="skip.md"))
+            session.add(AutoPilotSpecTask(session_id=session_id, requirement_title="gen", status="generating", error_message="stuck"))
+            session.add(AutoPilotSpecTask(session_id=session_id, requirement_title="fail", status="failed", error_message="bad", completed_at=datetime.utcnow()))
+            session.add(ap_session)
+            session.commit()
+
+            autopilot_api._reset_resumable_state(session, ap_session, "spec_generation")
+
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            assert ap_session.phases_completed == ["exploration", "requirements", "test_generation"]
+            assert ap_session.total_specs_generated == 2
+            tasks = {task.requirement_title: task for task in session.exec(select(AutoPilotSpecTask).where(AutoPilotSpecTask.session_id == session_id)).all()}
+            assert tasks["done"].status == "completed"
+            assert tasks["skip"].status == "skipped"
+            assert tasks["gen"].status == "pending"
+            assert tasks["gen"].error_message is None
+            assert tasks["fail"].status == "pending"
+            assert tasks["fail"].completed_at is None
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_failed_test_generation_resume_resets_retryable_tasks_and_runs():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="failed")
+    passed_run_id = f"run-{uuid4().hex}"
+    failed_run_id = f"run-{uuid4().hex}"
+    runtime_run_id = f"run-{uuid4().hex}"
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.current_phase = "test_generation"
+            session.add(
+                AutoPilotPhase(
+                    session_id=session_id,
+                    phase_name="test_generation",
+                    phase_order=4,
+                    status="failed",
+                    error_message="failed",
+                    completed_at=datetime.utcnow(),
+                )
+            )
+            session.add(DBTestRun(id=passed_run_id, spec_name="passed.md", status="passed", completed_at=datetime.utcnow()))
+            session.add(DBTestRun(id=failed_run_id, spec_name="failed.md", status="failed", error_message="bad", started_at=datetime.utcnow(), completed_at=datetime.utcnow()))
+            session.add(DBTestRun(id=runtime_run_id, spec_name="runtime.md", status="runtime_failed", error_message="bad", completed_at=datetime.utcnow()))
+            session.add(AutoPilotTestTask(session_id=session_id, spec_name="passed.md", status="passed", run_id=passed_run_id, passed=True, completed_at=datetime.utcnow()))
+            session.add(AutoPilotTestTask(session_id=session_id, spec_name="failed.md", status="failed", run_id=failed_run_id, passed=False, error_summary="bad", completed_at=datetime.utcnow()))
+            session.add(AutoPilotTestTask(session_id=session_id, spec_name="runtime.md", status="runtime_failed", run_id=runtime_run_id, passed=False, error_summary="bad"))
+            session.add(ap_session)
+            session.commit()
+
+            autopilot_api._reset_resumable_state(session, ap_session, "test_generation")
+
+        with Session(engine) as session:
+            tasks = {task.spec_name: task for task in session.exec(select(AutoPilotTestTask).where(AutoPilotTestTask.session_id == session_id)).all()}
+            assert tasks["passed.md"].status == "passed"
+            assert tasks["passed.md"].passed is True
+            assert tasks["failed.md"].status == "pending"
+            assert tasks["failed.md"].passed is None
+            assert tasks["failed.md"].error_summary is None
+            assert tasks["runtime.md"].status == "pending"
+            passed_run = session.get(DBTestRun, passed_run_id)
+            failed_run = session.get(DBTestRun, failed_run_id)
+            runtime_run = session.get(DBTestRun, runtime_run_id)
+            assert passed_run is not None and passed_run.status == "passed"
+            assert failed_run is not None and failed_run.status == "pending"
+            assert failed_run.error_message is None
+            assert failed_run.stage_message == "Waiting to resume Auto Pilot test generation"
+            assert runtime_run is not None and runtime_run.status == "pending"
+    finally:
+        with Session(engine) as session:
+            for run_id in (passed_run_id, failed_run_id, runtime_run_id):
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+            session.commit()
+        _cleanup_session(session_id)
+
+
+def test_failed_retry_skips_checkpoint_questions_but_awaiting_input_preserves_them():
+    failed_session_id = f"autopilot-test-{uuid4().hex}"
+    awaiting_session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(failed_session_id, status="failed")
+    _create_autopilot_session(awaiting_session_id, status="awaiting_input")
+    try:
+        with Session(engine) as session:
+            failed = session.get(AutoPilotSession, failed_session_id)
+            awaiting = session.get(AutoPilotSession, awaiting_session_id)
+            assert failed is not None and awaiting is not None
+            failed.current_phase = "spec_generation"
+            awaiting.current_phase = "requirements"
+            session.add(AutoPilotQuestion(session_id=failed_session_id, phase_name="requirements", question_type="review", question_text="Proceed?"))
+            session.add(AutoPilotQuestion(session_id=awaiting_session_id, phase_name="requirements", question_type="review", question_text="Proceed?"))
+            session.add(failed)
+            session.add(awaiting)
+            session.commit()
+
+            autopilot_api._reset_resumable_state(session, failed, "spec_generation")
+            autopilot_api._reset_resumable_state(session, awaiting, None)
+
+        with Session(engine) as session:
+            failed_question = session.exec(select(AutoPilotQuestion).where(AutoPilotQuestion.session_id == failed_session_id)).one()
+            awaiting_question = session.exec(select(AutoPilotQuestion).where(AutoPilotQuestion.session_id == awaiting_session_id)).one()
+            assert failed_question.status == "skipped"
+            assert awaiting_question.status == "pending"
+    finally:
+        _cleanup_session(failed_session_id)
+        _cleanup_session(awaiting_session_id)
+
+
+def test_failed_session_without_failed_phase_or_current_phase_returns_409():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="failed")
+    try:
+        app = FastAPI()
+        app.include_router(autopilot_api.router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(f"/autopilot/{session_id}/resume")
+
+        assert response.status_code == 409
+    finally:
+        _cleanup_session(session_id)
 
 
 def test_autopilot_live_runtime_prefers_temporal_vnc_state():

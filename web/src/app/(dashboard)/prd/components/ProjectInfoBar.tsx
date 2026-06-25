@@ -10,6 +10,7 @@ interface ImportRequirementsResult {
 }
 
 interface ProjectInfoBarProps {
+    canEdit: boolean;
     projectName: string;
     currentProjectId: string | null;
     onReset: () => void;
@@ -20,6 +21,7 @@ interface ProjectInfoBarProps {
 }
 
 export function ProjectInfoBar({
+    canEdit,
     projectName,
     currentProjectId,
     onReset,
@@ -28,7 +30,7 @@ export function ProjectInfoBar({
     importRequirementsResult,
     hasRequirements,
 }: ProjectInfoBarProps) {
-    const importDisabled = isImportingRequirements || !hasRequirements;
+    const importDisabled = !canEdit || isImportingRequirements || !hasRequirements;
     const requirementsHref = currentProjectId
         ? `/requirements?project_id=${encodeURIComponent(currentProjectId)}`
         : '/requirements';
@@ -138,44 +140,46 @@ export function ProjectInfoBar({
                     </>
                 )}
 
-                <button
-                    type="button"
-                    onClick={onImportRequirements}
-                    disabled={importDisabled}
-                    title={!hasRequirements ? 'No extracted requirements to import' : undefined}
-                    className="prd-project-import"
-                    style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.375rem',
-                        padding: '0.35rem 0.75rem',
-                        background: importDisabled ? 'rgba(255,255,255,0.04)' : 'rgba(37,99,235,0.16)',
-                        border: '1px solid rgba(59,130,246,0.26)',
-                        borderRadius: 'var(--radius-sm)',
-                        color: importDisabled ? 'var(--text-tertiary)' : '#bfdbfe',
-                        fontSize: '0.7rem',
-                        fontWeight: 600,
-                        cursor: importDisabled ? 'not-allowed' : 'pointer',
-                        opacity: importDisabled ? 0.62 : 1,
-                        transition: 'all 0.2s var(--ease-smooth)',
-                        whiteSpace: 'nowrap',
-                    }}
-                    onMouseEnter={(e) => {
-                        if (importDisabled) return;
-                        e.currentTarget.style.background = 'rgba(37,99,235,0.24)';
-                        e.currentTarget.style.borderColor = 'rgba(59,130,246,0.45)';
-                        e.currentTarget.style.color = '#dbeafe';
-                    }}
-                    onMouseLeave={(e) => {
-                        if (importDisabled) return;
-                        e.currentTarget.style.background = 'rgba(37,99,235,0.16)';
-                        e.currentTarget.style.borderColor = 'rgba(59,130,246,0.26)';
-                        e.currentTarget.style.color = '#bfdbfe';
-                    }}
-                >
-                    {isImportingRequirements ? <Loader2 size={12} className="animate-spin" /> : <Database size={12} />}
-                    Import to Requirements
-                </button>
+                {canEdit && (
+                    <button
+                        type="button"
+                        onClick={onImportRequirements}
+                        disabled={importDisabled}
+                        title={!hasRequirements ? 'No extracted requirements to import' : undefined}
+                        className="prd-project-import"
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.375rem',
+                            padding: '0.35rem 0.75rem',
+                            background: importDisabled ? 'rgba(255,255,255,0.04)' : 'rgba(37,99,235,0.16)',
+                            border: '1px solid rgba(59,130,246,0.26)',
+                            borderRadius: 'var(--radius-sm)',
+                            color: importDisabled ? 'var(--text-tertiary)' : '#bfdbfe',
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            cursor: importDisabled ? 'not-allowed' : 'pointer',
+                            opacity: importDisabled ? 0.62 : 1,
+                            transition: 'all 0.2s var(--ease-smooth)',
+                            whiteSpace: 'nowrap',
+                        }}
+                        onMouseEnter={(e) => {
+                            if (importDisabled) return;
+                            e.currentTarget.style.background = 'rgba(37,99,235,0.24)';
+                            e.currentTarget.style.borderColor = 'rgba(59,130,246,0.45)';
+                            e.currentTarget.style.color = '#dbeafe';
+                        }}
+                        onMouseLeave={(e) => {
+                            if (importDisabled) return;
+                            e.currentTarget.style.background = 'rgba(37,99,235,0.16)';
+                            e.currentTarget.style.borderColor = 'rgba(59,130,246,0.26)';
+                            e.currentTarget.style.color = '#bfdbfe';
+                        }}
+                    >
+                        {isImportingRequirements ? <Loader2 size={12} className="animate-spin" /> : <Database size={12} />}
+                        Import to Requirements
+                    </button>
+                )}
 
                 <button
                     type="button"

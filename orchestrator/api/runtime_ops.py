@@ -22,6 +22,7 @@ from .models import (
 )
 from .models_db import ExecutionSettings as DBExecutionSettings
 from .models_db import TestRun as DBTestRun
+from .test_run_runtime_support import apply_browser_pool_parallelism
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -243,9 +244,20 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
     if runtime.QUEUE_MANAGER:
         await runtime.QUEUE_MANAGER.reload_settings()
 
-    if runtime.BROWSER_POOL and request.parallelism is not None:
-        await runtime.BROWSER_POOL.update_max_browsers(settings.parallelism)
-        logger.info(f"Browser pool updated to max_browsers={settings.parallelism}")
+    if runtime.BROWSER_POOL and (request.parallelism is not None or request.headless_in_parallel is not None):
+        resolved_parallelism = await apply_browser_pool_parallelism(
+            runtime.BROWSER_POOL,
+            requested_parallelism=settings.parallelism,
+            env=runtime.os.environ,
+            execution_settings=settings,
+        )
+        logger.info(
+            "Browser pool updated: requested=%s effective=%s mode=%s clamp=%s",
+            resolved_parallelism["requested_parallelism"],
+            resolved_parallelism["effective_parallelism"],
+            resolved_parallelism["browser_runtime_mode"],
+            resolved_parallelism["parallelism_clamp_reason"],
+        )
 
     return ExecutionSettingsResponse(
         parallelism=settings.parallelism,

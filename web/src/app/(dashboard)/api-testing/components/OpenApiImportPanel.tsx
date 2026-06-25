@@ -42,6 +42,7 @@ interface OpenApiImportPanelProps {
     setActiveJobs: React.Dispatch<React.SetStateAction<Record<string, JobStatus>>>;
     setMessage: (msg: { type: 'success' | 'error'; text: string } | null) => void;
     pollJob: (jobId: string, onComplete?: () => void) => void;
+    canEdit: boolean;
 }
 
 interface ImportFormProps {
@@ -59,6 +60,7 @@ interface ImportFormProps {
     onFeatureFilterChange: (value: string) => void;
     onImportModeChange: (value: 'url' | 'file') => void;
     onSubmit: () => void;
+    canEdit: boolean;
 }
 
 function timeAgo(dateStr: string): string {
@@ -189,10 +191,11 @@ function ImportForm({
     onFeatureFilterChange,
     onImportModeChange,
     onSubmit,
+    canEdit,
 }: ImportFormProps) {
     const sourceMissing = submitAttempted && (importMode === 'url' ? !importUrl.trim() : !importFile);
     const serverMissing = submitAttempted && !serverUrl.trim();
-    const disabled = isImporting || !serverUrl.trim() || (importMode === 'url' ? !importUrl.trim() : !importFile);
+    const disabled = !canEdit || isImporting || !serverUrl.trim() || (importMode === 'url' ? !importUrl.trim() : !importFile);
     const sourceOptions: Array<{ value: 'url' | 'file'; label: string; icon: React.ReactNode }> = [
         { value: 'url', label: 'From URL', icon: <Globe size={14} aria-hidden="true" /> },
         { value: 'file', label: 'Upload File', icon: <FileText size={14} aria-hidden="true" /> },
@@ -225,7 +228,7 @@ function ImportForm({
                             type="button"
                             aria-pressed={selected}
                             onClick={() => onImportModeChange(option.value)}
-                            disabled={isImporting}
+                            disabled={!canEdit || isImporting}
                             onMouseEnter={event => {
                                 if (!selected) event.currentTarget.style.background = 'var(--surface-hover)';
                             }}
@@ -277,7 +280,7 @@ function ImportForm({
                         placeholder="https://api.example.com/openapi.json"
                         value={importUrl}
                         onChange={e => onImportUrlChange(e.target.value)}
-                        disabled={isImporting}
+                        disabled={!canEdit || isImporting}
                         aria-invalid={sourceMissing}
                         aria-describedby={sourceMissing ? 'openapi-spec-url-error' : undefined}
                         style={{ marginTop: '0.4rem' }}
@@ -292,7 +295,7 @@ function ImportForm({
                         type="file"
                         accept=".json,.yaml,.yml"
                         onChange={e => onFileChange(e.target.files?.[0] || null)}
-                        disabled={isImporting}
+                        disabled={!canEdit || isImporting}
                         aria-invalid={sourceMissing}
                         aria-describedby={sourceMissing ? 'openapi-spec-file-error' : undefined}
                         style={{ marginTop: '0.4rem' }}
@@ -310,7 +313,7 @@ function ImportForm({
                     placeholder="http://localhost:8001"
                     value={serverUrl}
                     onChange={e => onServerUrlChange(e.target.value)}
-                    disabled={isImporting}
+                    disabled={!canEdit || isImporting}
                     aria-invalid={serverMissing}
                     aria-describedby="openapi-server-url-help"
                     style={{ marginTop: '0.4rem' }}
@@ -328,7 +331,7 @@ function ImportForm({
                     placeholder="e.g., users, auth, orders"
                     value={featureFilter}
                     onChange={e => onFeatureFilterChange(e.target.value)}
-                    disabled={isImporting}
+                    disabled={!canEdit || isImporting}
                     style={{ marginTop: '0.4rem' }}
                 />
                 <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.35rem' }}>
@@ -460,6 +463,7 @@ function ImportHistoryTable({
     onUseSettings,
     onReimport,
     onGenerateSpec,
+    canEdit,
 }: {
     history: ImportHistoryRecord[];
     historyTotal: number;
@@ -474,6 +478,7 @@ function ImportHistoryTable({
     onUseSettings: (record: ImportHistoryRecord) => void;
     onReimport: (record: ImportHistoryRecord) => void;
     onGenerateSpec: (specPath: string) => void;
+    canEdit: boolean;
 }) {
     if (history.length === 0 && !historyLoading) {
         return (
@@ -573,7 +578,7 @@ function ImportHistoryTable({
                                                         Details {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                                                     </Button>
                                                 )}
-                                                {record.source_type === 'url' && record.source_url && (
+                                                {canEdit && record.source_type === 'url' && record.source_url && (
                                                     useSettings ? (
                                                         <Button type="button" variant="outline" size="sm" onClick={() => onUseSettings(record)}>
                                                             <Settings size={13} /> Use settings
@@ -593,7 +598,7 @@ function ImportHistoryTable({
                                                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
                                                     <ArtifactGroup title="Plan" paths={plan} generatingSpecs={generatingSpecs} />
                                                     <ArtifactGroup title="Evidence" paths={evidence} generatingSpecs={generatingSpecs} />
-                                                    <ArtifactGroup title="Specs" paths={specs} generatingSpecs={generatingSpecs} onGenerateSpec={onGenerateSpec} />
+                                                    <ArtifactGroup title="Specs" paths={specs} generatingSpecs={generatingSpecs} onGenerateSpec={canEdit ? onGenerateSpec : undefined} />
                                                     <ArtifactGroup title="Tests" paths={tests} generatingSpecs={generatingSpecs} />
                                                     <DetailBlock title="Run summary">
                                                         Matched {record.matched_operations ?? 0} operation(s)
@@ -659,6 +664,7 @@ export default function OpenApiImportPanel({
     setActiveJobs,
     setMessage,
     pollJob,
+    canEdit,
 }: OpenApiImportPanelProps) {
     const [importUrl, setImportUrl] = useState('');
     const [serverUrl, setServerUrl] = useState('');
@@ -773,7 +779,7 @@ export default function OpenApiImportPanel({
     };
 
     const handleImport = async () => {
-        if (isImporting) return;
+        if (!canEdit || isImporting) return;
         setSubmitAttempted(true);
         setMessage(null);
         if (!serverUrl.trim() || (importMode === 'url' ? !importUrl.trim() : !importFile)) return;
@@ -836,6 +842,7 @@ export default function OpenApiImportPanel({
     };
 
     const handleUseSettings = (record: ImportHistoryRecord) => {
+        if (!canEdit) return;
         if (record.source_type === 'url' && record.source_url) {
             setImportUrl(record.source_url);
             setServerUrl(record.base_url || inferServerUrlFromSpecUrl(record.source_url));
@@ -849,6 +856,7 @@ export default function OpenApiImportPanel({
     };
 
     const handleReimport = async (record: ImportHistoryRecord) => {
+        if (!canEdit) return;
         if (record.source_type !== 'url' || !record.source_url) return;
         if (!hasValidUrl(record.base_url)) {
             handleUseSettings(record);
@@ -888,6 +896,7 @@ export default function OpenApiImportPanel({
     };
 
     const handleGenerateSpec = async (specPath: string) => {
+        if (!canEdit) return;
         const specName = fileName(specPath);
         if (!specName || generatingSpecs.has(specPath)) return;
 
@@ -923,25 +932,28 @@ export default function OpenApiImportPanel({
 
     return (
         <div style={{ width: '100%' }}>
-            <ImportForm
-                importUrl={importUrl}
-                serverUrl={serverUrl}
-                importFile={importFile}
-                featureFilter={featureFilter}
-                importMode={importMode}
-                isImporting={isImporting}
-                submitAttempted={submitAttempted}
-                serverInputRef={serverInputRef}
-                onImportUrlChange={setImportUrl}
-                onServerUrlChange={value => {
-                    setServerUrlTouched(true);
-                    setServerUrl(value);
-                }}
-                onFileChange={setImportFile}
-                onFeatureFilterChange={setFeatureFilter}
-                onImportModeChange={setImportMode}
-                onSubmit={handleImport}
-            />
+            {canEdit && (
+                <ImportForm
+                    importUrl={importUrl}
+                    serverUrl={serverUrl}
+                    importFile={importFile}
+                    featureFilter={featureFilter}
+                    importMode={importMode}
+                    isImporting={isImporting}
+                    submitAttempted={submitAttempted}
+                    serverInputRef={serverInputRef}
+                    onImportUrlChange={setImportUrl}
+                    onServerUrlChange={value => {
+                        setServerUrlTouched(true);
+                        setServerUrl(value);
+                    }}
+                    onFileChange={setImportFile}
+                    onFeatureFilterChange={setFeatureFilter}
+                    onImportModeChange={setImportMode}
+                    onSubmit={handleImport}
+                    canEdit={canEdit}
+                />
+            )}
             <ImportJobsList jobs={importJobs} onDismiss={dismissJob} />
             <ImportHistoryTable
                 history={history}
@@ -957,6 +969,7 @@ export default function OpenApiImportPanel({
                 onUseSettings={handleUseSettings}
                 onReimport={handleReimport}
                 onGenerateSpec={handleGenerateSpec}
+                canEdit={canEdit}
             />
         </div>
     );

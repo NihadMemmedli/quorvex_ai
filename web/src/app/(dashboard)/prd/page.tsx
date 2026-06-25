@@ -4,10 +4,11 @@ import { useState, useCallback } from 'react';
 import { UploadCloud, AlertCircle } from 'lucide-react';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { getProjectDefaultUrl } from '@/lib/project-url';
 
-import { computeStats } from './components/types';
+import { computeStats, type Feature, type PrdSettings } from './components/types';
 import { usePrdSettings } from './components/hooks/usePrdSettings';
 import { usePrdProject } from './components/hooks/usePrdProject';
 import { usePrdGeneration } from './components/hooks/usePrdGeneration';
@@ -34,6 +35,8 @@ async function readResponseJson(response: Response): Promise<any> {
 
 export default function PrdPage() {
     const project = usePrdProject();
+    const { canEdit: canEditProject } = useProjectRole(project.currentProjectId);
+    const canEdit = !project.currentProjectId || canEditProject;
     const { settings, updateSetting, resetSettings } = usePrdSettings(
         project.projectData?.project,
         getProjectDefaultUrl(project.currentProject)
@@ -61,9 +64,15 @@ export default function PrdPage() {
 
     // --- Handlers ---
     const handleUpload = useCallback(async (selectedFile: File) => {
+        if (!canEdit) return;
         const result = await project.upload(selectedFile, settings.targetFeatures);
         if (result) setFile(null);
-    }, [project, settings.targetFeatures]);
+    }, [canEdit, project, settings.targetFeatures]);
+
+    const handleUpdateSetting = useCallback(<K extends keyof PrdSettings>(key: K, value: PrdSettings[K]) => {
+        if (!canEdit) return;
+        updateSetting(key, value);
+    }, [canEdit, updateSetting]);
 
     const handleReset = useCallback(() => {
         setFile(null);
@@ -74,11 +83,12 @@ export default function PrdPage() {
     }, [project, generation, testRunner, resetSettings]);
 
     const handleGenerateTests = useCallback(() => {
+        if (!canEdit) return;
         testRunner.runTests(generation.generatedSpecs);
-    }, [testRunner, generation.generatedSpecs]);
+    }, [canEdit, testRunner, generation.generatedSpecs]);
 
     const handleImportRequirements = useCallback(async () => {
-        if (!project.projectData) return;
+        if (!canEdit || !project.projectData) return;
 
         setIsImportingRequirements(true);
         setImportRequirementsResult(null);
@@ -111,10 +121,11 @@ export default function PrdPage() {
         } finally {
             setIsImportingRequirements(false);
         }
-    }, [project]);
+    }, [canEdit, project]);
 
     // --- Requirements CRUD ---
     const handleAddRequirement = useCallback(async (featureSlug: string, text: string) => {
+        if (!canEdit) return;
         const res = await fetch(
             `${API_BASE}/api/prd/${project.projectData!.project}/features/${encodeURIComponent(featureSlug)}/requirements`,
             { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }
@@ -122,9 +133,10 @@ export default function PrdPage() {
         if (!res.ok) throw new Error('Failed to add requirement');
         const data = await res.json();
         project.updateFeatureRequirements(featureSlug, data.requirements);
-    }, [project]);
+    }, [canEdit, project]);
 
     const handleEditRequirement = useCallback(async (featureSlug: string, index: number, text: string) => {
+        if (!canEdit) return;
         const res = await fetch(
             `${API_BASE}/api/prd/${project.projectData!.project}/features/${encodeURIComponent(featureSlug)}/requirements/${index}`,
             { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }
@@ -132,9 +144,10 @@ export default function PrdPage() {
         if (!res.ok) throw new Error('Failed to edit requirement');
         const data = await res.json();
         project.updateFeatureRequirements(featureSlug, data.requirements);
-    }, [project]);
+    }, [canEdit, project]);
 
     const handleDeleteRequirement = useCallback(async (featureSlug: string, index: number) => {
+        if (!canEdit) return;
         const res = await fetch(
             `${API_BASE}/api/prd/${project.projectData!.project}/features/${encodeURIComponent(featureSlug)}/requirements/${index}`,
             { method: 'DELETE' }
@@ -142,7 +155,27 @@ export default function PrdPage() {
         if (!res.ok) throw new Error('Failed to delete requirement');
         const data = await res.json();
         project.updateFeatureRequirements(featureSlug, data.requirements);
-    }, [project]);
+    }, [canEdit, project]);
+
+    const handleDeleteProject = useCallback((projectId: string) => {
+        if (!canEdit) return;
+        project.deleteProject(projectId);
+    }, [canEdit, project]);
+
+    const handleGenerate = useCallback(async (name: string) => {
+        if (!canEdit) return false;
+        return generation.generate(name);
+    }, [canEdit, generation]);
+
+    const handleBatchGenerate = useCallback((features: Feature[]) => {
+        if (!canEdit) return;
+        generation.batchGenerate(features);
+    }, [canEdit, generation]);
+
+    const handleStop = useCallback(async (id: number) => {
+        if (!canEdit) return;
+        await generation.stop(id);
+    }, [canEdit, generation]);
 
     // Combined error from any source
     const error = project.error;
@@ -174,16 +207,18 @@ export default function PrdPage() {
 
             {!hasProject ? (
                 <UploadPhase
+                    canEdit={canEdit}
                     onUpload={handleUpload}
                     onLoadProject={project.loadProject}
-                    onDeleteProject={project.deleteProject}
+                    onDeleteProject={handleDeleteProject}
                     existingProjects={project.existingProjects}
                     isUploading={project.isUploading}
                     targetFeatures={settings.targetFeatures}
-                    onTargetFeaturesChange={(n) => updateSetting('targetFeatures', n)}
+                    onTargetFeaturesChange={(n) => handleUpdateSetting('targetFeatures', n)}
                 />
             ) : (
                 <WorkingPhase
+                    canEdit={canEdit}
                     projectName={project.projectData!.project}
                     currentProjectId={project.currentProjectId}
                     features={project.projectData!.features}
@@ -193,10 +228,10 @@ export default function PrdPage() {
                     generatedSpecs={generation.generatedSpecs}
                     testResults={testRunner.testResults}
                     settings={settings}
-                    onUpdateSetting={updateSetting}
-                    onGenerate={generation.generate}
-                    onBatchGenerate={(features) => generation.batchGenerate(features)}
-                    onStop={generation.stop}
+                    onUpdateSetting={handleUpdateSetting}
+                    onGenerate={handleGenerate}
+                    onBatchGenerate={handleBatchGenerate}
+                    onStop={handleStop}
                     onGenerateTests={handleGenerateTests}
                     testPipelineStatus={testRunner.pipelineStatus}
                     onReset={handleReset}

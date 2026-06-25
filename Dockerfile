@@ -44,10 +44,13 @@ RUN K6_VERSION="v0.54.0" && \
     chmod +x /usr/local/bin/k6 && \
     rm -rf /tmp/k6*
 
-# Install ProjectDiscovery Nuclei for template-based security scans.
-# The latest release is resolved at build time so multi-arch Docker builds work
-# without requiring Go in the runtime image.
-RUN python - <<'PY'
+# Optionally install ProjectDiscovery Nuclei for template-based security scans.
+# Disabled by default so normal dev/prod image builds are not blocked by GitHub
+# rate limits. Enable with: INSTALL_NUCLEI=true docker compose build ...
+ARG INSTALL_NUCLEI=false
+RUN <<'SH'
+if [ "${INSTALL_NUCLEI}" = "true" ]; then
+python - <<'PY'
 import json
 import os
 import platform
@@ -118,6 +121,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
     os.replace(os.path.join(tmpdir, "nuclei"), target)
     os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 PY
+else
+    echo "Skipping optional Nuclei install. Set INSTALL_NUCLEI=true to include it in the image."
+fi
+SH
 
 # Copy requirements first to leverage caching
 # Use requirements.lock for pinned versions (reproducible builds)

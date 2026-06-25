@@ -216,6 +216,7 @@ interface ApiSpecsTableProps {
     fetchApiSpecs: () => void;
     fetchGeneratedTests: () => void;
     fetchLatestRuns: () => void;
+    canEdit: boolean;
 }
 
 // ========== Main Component ==========
@@ -237,6 +238,7 @@ export default React.memo(function ApiSpecsTable({
     fetchApiSpecs,
     fetchGeneratedTests,
     fetchLatestRuns,
+    canEdit,
 }: ApiSpecsTableProps) {
     const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
     const [specContents, setSpecContents] = useState<Record<string, string>>({});
@@ -270,22 +272,25 @@ export default React.memo(function ApiSpecsTable({
 
     // Selection helpers
     const toggleSelect = useCallback((path: string) => {
+        if (!canEdit) return;
         const next = new Set(selectedSpecs);
         if (next.has(path)) next.delete(path);
         else next.add(path);
         onSelectionChange(next);
-    }, [selectedSpecs, onSelectionChange]);
+    }, [selectedSpecs, onSelectionChange, canEdit]);
 
     const toggleSelectAll = useCallback(() => {
+        if (!canEdit) return;
         if (selectedSpecs.size === specs.length) {
             onSelectionChange(new Set());
         } else {
             onSelectionChange(new Set(specs.map(s => s.path)));
         }
-    }, [specs, selectedSpecs.size, onSelectionChange]);
+    }, [specs, selectedSpecs.size, onSelectionChange, canEdit]);
 
     // Actions
     const handleGenerateTest = useCallback(async (specName: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/generate', projectId)}`, {
                 method: 'POST',
@@ -300,9 +305,10 @@ export default React.memo(function ApiSpecsTable({
         } catch {
             setMessage({ type: 'error', text: 'Failed to start test generation' });
         }
-    }, [projectId, setActiveJobs, pollJob, fetchApiSpecs, fetchGeneratedTests, setMessage]);
+    }, [projectId, setActiveJobs, pollJob, fetchApiSpecs, fetchGeneratedTests, setMessage, canEdit]);
 
     const handleRunTest = useCallback(async (specPath: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/run', projectId)}`, {
                 method: 'POST',
@@ -328,9 +334,10 @@ export default React.memo(function ApiSpecsTable({
         } catch {
             setMessage({ type: 'error', text: 'Failed to start API test run' });
         }
-    }, [projectId, setActiveJobs, setSpecJobMap, pollJob, fetchApiSpecs, fetchLatestRuns, fetchGeneratedTests, setMessage]);
+    }, [projectId, setActiveJobs, setSpecJobMap, pollJob, fetchApiSpecs, fetchLatestRuns, fetchGeneratedTests, setMessage, canEdit]);
 
     const handleEdgeCases = useCallback(async (specPath: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/edge-cases', projectId)}`, {
                 method: 'POST',
@@ -345,7 +352,7 @@ export default React.memo(function ApiSpecsTable({
         } catch {
             setMessage({ type: 'error', text: 'Failed to start edge case generation' });
         }
-    }, [projectId, setActiveJobs, pollJob, fetchApiSpecs, fetchGeneratedTests, setMessage]);
+    }, [projectId, setActiveJobs, pollJob, fetchApiSpecs, fetchGeneratedTests, setMessage, canEdit]);
 
     const handleRunDirect = useCallback(async (
         specName: string,
@@ -353,6 +360,7 @@ export default React.memo(function ApiSpecsTable({
         specPath: string,
         healOnFailure = false,
     ) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/run-direct', projectId)}`, {
                 method: 'POST',
@@ -378,9 +386,10 @@ export default React.memo(function ApiSpecsTable({
         } catch {
             setMessage({ type: 'error', text: 'Failed to start direct test run' });
         }
-    }, [projectId, setActiveJobs, setSpecJobMap, pollJob, fetchApiSpecs, fetchLatestRuns, fetchGeneratedTests, setMessage]);
+    }, [projectId, setActiveJobs, setSpecJobMap, pollJob, fetchApiSpecs, fetchLatestRuns, fetchGeneratedTests, setMessage, canEdit]);
 
     const handleUpdateSpec = useCallback(async (name: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/specs/${name}`, projectId)}`, {
                 method: 'PUT',
@@ -395,9 +404,10 @@ export default React.memo(function ApiSpecsTable({
         } catch {
             setMessage({ type: 'error', text: 'Failed to update spec' });
         }
-    }, [projectId, editContent, setMessage]);
+    }, [projectId, editContent, setMessage, canEdit]);
 
     const handleDeleteSpec = useCallback(async (name: string, path: string) => {
+        if (!canEdit) return;
         if (!confirm(`Delete spec "${name}"? This cannot be undone.`)) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/specs/${name}`, projectId)}`, { method: 'DELETE' });
@@ -415,7 +425,7 @@ export default React.memo(function ApiSpecsTable({
         } catch {
             setMessage({ type: 'error', text: 'Failed to delete spec' });
         }
-    }, [projectId, selectedSpecs, onSelectionChange, fetchApiSpecs, setMessage]);
+    }, [projectId, selectedSpecs, onSelectionChange, fetchApiSpecs, setMessage, canEdit]);
 
     const handleCopyPath = useCallback((spec: ApiSpec) => {
         navigator.clipboard.writeText(spec.path);
@@ -478,12 +488,14 @@ export default React.memo(function ApiSpecsTable({
                 letterSpacing: '0.03em',
             }}>
                 <div>
-                    <input
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={toggleSelectAll}
-                        style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
-                    />
+                    {canEdit && (
+                        <input
+                            type="checkbox"
+                            checked={allSelected}
+                            onChange={toggleSelectAll}
+                            style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
+                        />
+                    )}
                 </div>
                 <div></div>
                 <div>Name</div>
@@ -529,12 +541,14 @@ export default React.memo(function ApiSpecsTable({
                         >
                             {/* Checkbox */}
                             <div onClick={e => e.stopPropagation()}>
-                                <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    onChange={() => toggleSelect(spec.path)}
-                                    style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
-                                />
+                                {canEdit && (
+                                    <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={() => toggleSelect(spec.path)}
+                                        style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
+                                    />
+                                )}
                             </div>
 
                             {/* Status dot */}
@@ -622,68 +636,72 @@ export default React.memo(function ApiSpecsTable({
                                             border: '1px solid var(--border)', borderRadius: 'var(--radius)',
                                             boxShadow: '0 4px 12px rgba(0,0,0,0.3)', overflow: 'hidden',
                                         }}>
-                                            {spec.has_generated_test && spec.generated_test_path && (
-                                                <button
-                                                    onClick={() => { setMenuOpen(null); handleRunDirect(spec.name, spec.generated_test_path!, spec.path); }}
-                                                    style={menuItemStyle}
-                                                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Zap size={13} style={{ color: 'var(--success)' }} /> Run
-                                            </button>
+                                            {canEdit && (
+                                                <>
+                                                    {spec.has_generated_test && spec.generated_test_path && (
+                                                        <button
+                                                            onClick={() => { setMenuOpen(null); handleRunDirect(spec.name, spec.generated_test_path!, spec.path); }}
+                                                            style={menuItemStyle}
+                                                            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                        >
+                                                            <Zap size={13} style={{ color: 'var(--success)' }} /> Run
+                                                        </button>
+                                                    )}
+                                                    {spec.has_generated_test && spec.generated_test_path && (
+                                                        <button
+                                                            onClick={() => { setMenuOpen(null); handleRunDirect(spec.name, spec.generated_test_path!, spec.path, true); }}
+                                                            style={menuItemStyle}
+                                                            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                        >
+                                                            <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => { setMenuOpen(null); handleGenerateTest(spec.name); }}
+                                                        style={menuItemStyle}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                    >
+                                                        <Play size={13} style={{ color: 'var(--accent)' }} /> Generate
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { setMenuOpen(null); handleRunTest(spec.path); }}
+                                                        style={menuItemStyle}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                    >
+                                                        <Activity size={13} style={{ color: 'var(--primary)' }} /> Generate & Run (AI)
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { setMenuOpen(null); handleEdgeCases(spec.path); }}
+                                                        style={menuItemStyle}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                    >
+                                                        <Shield size={13} style={{ color: 'var(--warning)' }} /> Edge Cases
+                                                    </button>
+                                                    <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
+                                                    <button
+                                                        onClick={() => {
+                                                            setMenuOpen(null);
+                                                            setExpandedSpec(spec.name);
+                                                            loadSpecContent(spec.name);
+                                                            setTimeout(() => {
+                                                                setEditingSpec(spec.name);
+                                                                setEditContent(specContents[spec.name] || '');
+                                                                setEditMode('visual');
+                                                            }, 100);
+                                                        }}
+                                                        style={menuItemStyle}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                    >
+                                                        <Edit2 size={13} /> Edit
+                                                    </button>
+                                                </>
                                             )}
-                                            {spec.has_generated_test && spec.generated_test_path && (
-                                                <button
-                                                    onClick={() => { setMenuOpen(null); handleRunDirect(spec.name, spec.generated_test_path!, spec.path, true); }}
-                                                    style={menuItemStyle}
-                                                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
-                                            </button>
-                                            )}
-                                            <button
-                                                onClick={() => { setMenuOpen(null); handleGenerateTest(spec.name); }}
-                                                style={menuItemStyle}
-                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Play size={13} style={{ color: 'var(--accent)' }} /> Generate
-                                            </button>
-                                            <button
-                                                onClick={() => { setMenuOpen(null); handleRunTest(spec.path); }}
-                                                style={menuItemStyle}
-                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Activity size={13} style={{ color: 'var(--primary)' }} /> Generate & Run (AI)
-                                            </button>
-                                            <button
-                                                onClick={() => { setMenuOpen(null); handleEdgeCases(spec.path); }}
-                                                style={menuItemStyle}
-                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Shield size={13} style={{ color: 'var(--warning)' }} /> Edge Cases
-                                            </button>
-                                            <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
-                                            <button
-                                                onClick={() => {
-                                                    setMenuOpen(null);
-                                                    setExpandedSpec(spec.name);
-                                                    loadSpecContent(spec.name);
-                                                    setTimeout(() => {
-                                                        setEditingSpec(spec.name);
-                                                        setEditContent(specContents[spec.name] || '');
-                                                        setEditMode('visual');
-                                                    }, 100);
-                                                }}
-                                                style={menuItemStyle}
-                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Edit2 size={13} /> Edit
-                                            </button>
                                             <button
                                                 onClick={() => handleCopyPath(spec)}
                                                 style={menuItemStyle}
@@ -692,15 +710,19 @@ export default React.memo(function ApiSpecsTable({
                                             >
                                                 <Copy size={13} /> Copy Path
                                             </button>
-                                            <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
-                                            <button
-                                                onClick={() => { setMenuOpen(null); handleDeleteSpec(spec.name, spec.path); }}
-                                                style={{ ...menuItemStyle, color: 'var(--danger)' }}
-                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(239, 68, 68, 0.05)')}
-                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                            >
-                                                <Trash2 size={13} /> Delete
-                                            </button>
+                                            {canEdit && (
+                                                <>
+                                                    <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
+                                                    <button
+                                                        onClick={() => { setMenuOpen(null); handleDeleteSpec(spec.name, spec.path); }}
+                                                        style={{ ...menuItemStyle, color: 'var(--danger)' }}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(239, 68, 68, 0.05)')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                    >
+                                                        <Trash2 size={13} /> Delete
+                                                    </button>
+                                                </>
+                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -739,7 +761,7 @@ export default React.memo(function ApiSpecsTable({
                         {/* Expanded content */}
                         {isExpanded && (
                             <div style={{ borderTop: '1px solid var(--border)', padding: '1rem', background: 'rgba(0,0,0,0.02)' }}>
-                                {isEditing ? (
+                                {isEditing && canEdit ? (
                                     <div>
                                         {/* Code / Visual toggle */}
                                         <div style={{ display: 'flex', gap: '0', marginBottom: '0.75rem' }}>
@@ -831,23 +853,24 @@ export default React.memo(function ApiSpecsTable({
                                         </SyntaxHighlighter>
 
                                         {/* Action buttons row */}
+                                        {canEdit && (
                                         <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
-                                            <button
-                                                onClick={() => {
-                                                    setEditingSpec(spec.name);
-                                                    setEditContent(specContents[spec.name] || '');
-                                                    setEditMode('visual');
-                                                }}
-                                                style={{
-                                                    display: 'flex', alignItems: 'center', gap: '0.3rem',
-                                                    padding: '0.4rem 0.8rem',
-                                                    background: 'var(--surface)', color: 'var(--text-secondary)',
-                                                    border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-                                                    cursor: 'pointer', fontSize: '0.8rem',
-                                                }}
-                                            >
-                                                <Edit2 size={12} /> Edit Spec
-                                            </button>
+                                                <button
+                                                    onClick={() => {
+                                                        setEditingSpec(spec.name);
+                                                        setEditContent(specContents[spec.name] || '');
+                                                        setEditMode('visual');
+                                                    }}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '0.3rem',
+                                                        padding: '0.4rem 0.8rem',
+                                                        background: 'var(--surface)', color: 'var(--text-secondary)',
+                                                        border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+                                                        cursor: 'pointer', fontSize: '0.8rem',
+                                                    }}
+                                                >
+                                                    <Edit2 size={12} /> Edit Spec
+                                                </button>
                                             {spec.has_generated_test && spec.generated_test_path && (
                                                 <button
                                                     onClick={() => handleRunDirect(spec.name, spec.generated_test_path!, spec.path)}
@@ -909,6 +932,7 @@ export default React.memo(function ApiSpecsTable({
                                                 <Activity size={12} /> Generate & Run (AI)
                                             </button>
                                         </div>
+                                        )}
 
                                         {/* Generated test links */}
                                         {spec.generated_tests && spec.generated_tests.length > 0 && (

@@ -20,6 +20,7 @@ interface ApiSpecsToolbarProps {
     onRefresh: () => void;
     totalShowing: number;
     totalSpecs: number;
+    canEdit: boolean;
 }
 
 const selectStyle: React.CSSProperties = {
@@ -62,6 +63,7 @@ export default function ApiSpecsToolbar({
     onRefresh,
     totalShowing,
     totalSpecs,
+    canEdit,
 }: ApiSpecsToolbarProps) {
     const [localSearch, setLocalSearch] = useState(search);
     const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,24 +89,26 @@ export default function ApiSpecsToolbar({
             marginBottom: '1rem',
         }}>
             {/* Create button */}
-            <button
-                onClick={onCreateClick}
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    padding: '0.5rem 1rem',
-                    background: 'var(--primary)',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: 'var(--radius)',
-                    cursor: 'pointer',
-                    fontWeight: 600,
-                    fontSize: '0.85rem',
-                }}
-            >
-                <Plus size={14} /> Create
-            </button>
+            {canEdit && (
+                <button
+                    onClick={onCreateClick}
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.5rem',
+                        padding: '0.5rem 1rem',
+                        background: 'var(--primary)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 'var(--radius)',
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                        fontSize: '0.85rem',
+                    }}
+                >
+                    <Plus size={14} /> Create
+                </button>
+            )}
 
             {/* Search input */}
             <div style={{ position: 'relative', flex: '1 1 180px', maxWidth: '250px' }}>

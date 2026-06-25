@@ -7,6 +7,7 @@ import TagEditor from '@/components/TagEditor';
 import SpecBuilder from '@/components/SpecBuilder';
 import { TestDataPicker } from '@/components/TestDataPicker';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
@@ -41,6 +42,8 @@ function NewSpecPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const { currentProject } = useProject();
+    const { canEdit: canEditProject } = useProjectRole(currentProject?.id ?? null);
+    const canEdit = !currentProject?.id || canEditProject;
 
     // Read requirement context from URL params
     const requirementId = searchParams.get('requirement_id');
@@ -219,6 +222,7 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
     };
 
     const handleSave = async () => {
+        if (!canEdit) return;
         if (!name || !content) {
             alert('Please fill in name and content');
             return;
@@ -288,7 +292,7 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
                         <ArrowLeft size={16} /> Back to Specs
                     </Link>
                 }
-                actions={
+                actions={canEdit ? (
                     <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                         <div style={{ background: 'var(--surface)', borderRadius: 'var(--radius)', padding: '4px', display: 'flex', border: '1px solid var(--border)' }}>
                             <button
@@ -325,8 +329,13 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
                             {loading ? 'Saving...' : 'Save Spec'}
                         </button>
                     </div>
-                }
+                ) : null}
             />
+            {!canEdit && (
+                <div className="card" style={{ padding: '1rem', marginBottom: '1.5rem', color: 'var(--text-secondary)' }}>
+                    Viewers can inspect specs but cannot create new specs.
+                </div>
+            )}
 
             {/* Linked Requirement Banner */}
             {requirement && (
@@ -603,11 +612,13 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
                 <div className="card" style={{ height: 'calc(100vh - 450px)', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}>
                     <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
                         <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)' }}>Content</span>
-                        <TestDataPicker
-                            projectId={currentProject?.id}
-                            mode="directive"
-                            onInsert={(value) => setContent(prev => `${prev.trimEnd()}\n\n${value}\n`)}
-                        />
+                        {canEdit && (
+                            <TestDataPicker
+                                projectId={currentProject?.id}
+                                mode="directive"
+                                onInsert={(value) => setContent(prev => `${prev.trimEnd()}\n\n${value}\n`)}
+                            />
+                        )}
                     </div>
                     <div style={{ flex: 1, overflow: 'auto', background: 'var(--code-bg)' }}>
                         {mode === 'visual' ? (

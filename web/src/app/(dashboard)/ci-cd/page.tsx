@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Activity, ChevronDown, ChevronUp, CircleAlert, Code2, GitBranch, GitPullRequest, Loader2, Play, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { PipelineStatusCard } from '@/components/PipelineStatusCard';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -49,6 +50,7 @@ const activeStatuses = ['pending', 'running', 'queued', 'waiting', 'in_progress'
 export default function CiCdPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || (typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null) || 'default';
+    const { canEdit } = useProjectRole(projectId);
     const pid = encodeURIComponent(projectId);
 
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -119,13 +121,13 @@ export default function CiCdPage() {
     }, [ghConfigured, pid]);
 
     const syncGithubRuns = useCallback(async () => {
-        if (!anyProviderConfigured) return;
+        if (!canEdit || !anyProviderConfigured) return;
         await fetch(`${API_BASE}/projects/${pid}/ci/runs/sync`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ provider: 'all', per_page: 20 }),
         }).catch(() => null);
-    }, [anyProviderConfigured, pid]);
+    }, [anyProviderConfigured, canEdit, pid]);
 
     const fetchQualityGates = useCallback(async () => {
         if (!ghConfigured) {
@@ -158,8 +160,8 @@ export default function CiCdPage() {
 
     useEffect(() => {
         setLoading(true);
-        fetchProviders().finally(() => fetchPipelines(true));
-    }, [fetchProviders, fetchPipelines]);
+        fetchProviders().finally(() => fetchPipelines(canEdit));
+    }, [canEdit, fetchProviders, fetchPipelines]);
 
     useEffect(() => {
         fetchWorkflows();
@@ -175,7 +177,7 @@ export default function CiCdPage() {
         const hasActive = pipelines.some(p => activeStatuses.includes(p.status));
         const hasActiveGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
         if (hasActive || hasActiveGate) {
-            refreshTimer.current = setInterval(() => fetchPipelines(true), 15000);
+            refreshTimer.current = setInterval(() => fetchPipelines(canEdit), 15000);
         } else if (refreshTimer.current) {
             clearInterval(refreshTimer.current);
             refreshTimer.current = null;
@@ -183,7 +185,7 @@ export default function CiCdPage() {
         return () => {
             if (refreshTimer.current) clearInterval(refreshTimer.current);
         };
-    }, [pipelines, qualityGates, fetchPipelines]);
+    }, [pipelines, qualityGates, fetchPipelines, canEdit]);
 
     const parseInputs = () => {
         const trimmed = triggerInputs.trim();
@@ -203,6 +205,7 @@ export default function CiCdPage() {
     };
 
     const handleTrigger = async () => {
+        if (!canEdit) return;
         setTriggering(true);
         setTriggerError('');
         try {
@@ -255,7 +258,7 @@ export default function CiCdPage() {
     }, [pid]);
 
     const runAction = async (action: 'cancel' | 'rerun' | 'rerun-failed') => {
-        if (!selectedRun) return;
+        if (!canEdit || !selectedRun) return;
         setRunActionLoading(action);
         setRunError('');
         try {
@@ -299,6 +302,14 @@ export default function CiCdPage() {
     };
 
     const generateWorkflow = async (payload: any) => {
+        if (!canEdit) {
+            return {
+                workflow_path: 'Read-only access',
+                generated_yaml: '',
+                validation_errors: ['Viewers cannot generate workflow change requests.'],
+                validation_warnings: [],
+            };
+        }
         const res = await fetch(`${API_BASE}/projects/${pid}/ci/workflow-change-requests`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -315,6 +326,7 @@ export default function CiCdPage() {
     };
 
     const openWorkflowPr = async (changeRequestId: string) => {
+        if (!canEdit) throw new Error('Viewers cannot open workflow pull requests.');
         const res = await fetch(`${API_BASE}/projects/${pid}/ci/workflow-change-requests/${encodeURIComponent(changeRequestId)}/pull-request`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -327,12 +339,14 @@ export default function CiCdPage() {
     };
 
     const openTriggerPanel = (provider?: 'github' | 'gitlab') => {
+        if (!canEdit) return;
         if (provider) setTriggerProvider(provider);
         setShowTrigger(true);
         window.setTimeout(() => triggerPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
     };
 
     const openWorkflowGenerator = () => {
+        if (!canEdit) return;
         setShowWorkflowGenerator(true);
         window.setTimeout(() => workflowPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
     };
@@ -345,10 +359,12 @@ export default function CiCdPage() {
             return;
         }
         if (action.action === 'generate_workflow') {
+            if (!canEdit) return;
             openWorkflowGenerator();
             return;
         }
         if (action.action === 'open_trigger') {
+            if (!canEdit) return;
             openTriggerPanel(provider.provider);
         }
     };
@@ -363,6 +379,7 @@ export default function CiCdPage() {
     };
 
     const startQualityGate = async () => {
+        if (!canEdit) return;
         const pr = Number(gatePrNumber);
         if (!Number.isInteger(pr) || pr <= 0) {
             setGateError('Enter a valid PR number');
@@ -391,6 +408,7 @@ export default function CiCdPage() {
     };
 
     const loadQualityGateDetail = useCallback(async (analysisId: string, refreshFeedback = false) => {
+        if (refreshFeedback && !canEdit) return null;
         setGateDetailLoading(true);
         setGateDetailError('');
         try {
@@ -410,7 +428,7 @@ export default function CiCdPage() {
         } finally {
             setGateDetailLoading(false);
         }
-    }, [pid]);
+    }, [canEdit, pid]);
 
     const selectQualityGate = useCallback((gate: QualityGate) => {
         setSelectedGate(gate);
@@ -418,7 +436,7 @@ export default function CiCdPage() {
     }, [loadQualityGateDetail]);
 
     const rerunQualityGate = async () => {
-        if (!selectedGate) return;
+        if (!canEdit || !selectedGate) return;
         setGateActionLoading('rerun');
         setGateDetailError('');
         try {
@@ -517,7 +535,7 @@ export default function CiCdPage() {
                 icon={<GitBranch size={20} />}
                 actions={
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        {anyProviderConfigured && (
+                        {canEdit && anyProviderConfigured && (
                             <button type="button" onClick={() => setShowTrigger(!showTrigger)} style={primaryButtonStyle}>
                                 <Play size={14} />
                                 Trigger
@@ -526,7 +544,7 @@ export default function CiCdPage() {
                         )}
                         <button
                             type="button"
-                            onClick={() => fetchPipelines(true)}
+                            onClick={() => fetchPipelines(canEdit)}
                             disabled={syncing}
                             style={secondaryButtonStyle(syncing)}
                         >
@@ -561,7 +579,7 @@ export default function CiCdPage() {
                                 ))}
                             </div>
                         )}
-                        {provider.recommended_next_action && (
+                        {provider.recommended_next_action && (canEdit || provider.recommended_next_action.action === 'open_settings') && (
                             <button type="button" onClick={() => applyProviderAction(provider)} style={{ ...secondaryButtonStyle(false), marginTop: '0.85rem', width: '100%', justifyContent: 'center' }}>
                                 <Settings size={14} />
                                 {provider.recommended_next_action.label}
@@ -573,21 +591,21 @@ export default function CiCdPage() {
 
             <section style={{ marginBottom: '1rem' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '0.75rem' }}>
-                    <button type="button" onClick={() => openTriggerPanel(readyProviders[0]?.provider)} disabled={readyProviders.length === 0} style={taskButtonStyle(readyProviders.length === 0)}>
+                    <button type="button" onClick={() => openTriggerPanel(readyProviders[0]?.provider)} disabled={!canEdit || readyProviders.length === 0} style={taskButtonStyle(!canEdit || readyProviders.length === 0)}>
                         <Play size={18} />
                         <span style={taskTextStyle}>
                             <strong style={taskTitleStyle}>Run pipeline</strong>
                             <small style={taskDescriptionStyle}>Dispatch a GitHub workflow or GitLab pipeline.</small>
                         </span>
                     </button>
-                    <button type="button" onClick={focusPrGate} disabled={!ghConfigured} style={taskButtonStyle(!ghConfigured)}>
+                    <button type="button" onClick={focusPrGate} disabled={!canEdit || !ghConfigured} style={taskButtonStyle(!canEdit || !ghConfigured)}>
                         <ShieldCheck size={18} />
                         <span style={taskTextStyle}>
                             <strong style={taskTitleStyle}>Start PR gate</strong>
                             <small style={taskDescriptionStyle}>Analyze a PR and run recommended tests.</small>
                         </span>
                     </button>
-                    <button type="button" onClick={openWorkflowGenerator} disabled={!ghConfigured} style={taskButtonStyle(!ghConfigured)}>
+                    <button type="button" onClick={openWorkflowGenerator} disabled={!canEdit || !ghConfigured} style={taskButtonStyle(!canEdit || !ghConfigured)}>
                         <Code2 size={18} />
                         <span style={taskTextStyle}>
                             <strong style={taskTitleStyle}>Generate workflow</strong>
@@ -604,7 +622,7 @@ export default function CiCdPage() {
                 </div>
             </section>
 
-            {showTrigger && anyProviderConfigured && (
+            {canEdit && showTrigger && anyProviderConfigured && (
                 <section ref={triggerPanelRef} style={panelStyle}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.85rem', fontWeight: 800 }}>
                         <Activity size={16} />
@@ -644,7 +662,7 @@ export default function CiCdPage() {
                 </section>
             )}
 
-            {showWorkflowGenerator && (
+            {canEdit && showWorkflowGenerator && (
                 <div ref={workflowPanelRef}>
                     <WorkflowGeneratorPanel onGenerate={generateWorkflow} onOpenPr={openWorkflowPr} onClose={() => setShowWorkflowGenerator(false)} />
                 </div>
@@ -661,7 +679,7 @@ export default function CiCdPage() {
                             Changed-file-aware Quorvex test selection and merge confidence.
                         </div>
                     </div>
-                    {ghConfigured && (
+                    {canEdit && ghConfigured && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                             <input value={gatePrNumber} onChange={e => setGatePrNumber(e.target.value)} placeholder="PR #" inputMode="numeric" style={{ ...inputStyle, width: 100 }} />
                             <button type="button" onClick={startQualityGate} disabled={startingGate} style={primaryButtonStyle}>
@@ -706,19 +724,30 @@ export default function CiCdPage() {
                 )}
             </section>
 
-            <QualityGateDetailDrawer
-                gate={selectedGate}
-                loading={gateDetailLoading}
-                actionLoading={gateActionLoading}
-                error={gateDetailError}
-                onClose={() => setSelectedGate(null)}
-                onRefresh={() => selectedGate && loadQualityGateDetail(selectedGate.id)}
-                onRerun={rerunQualityGate}
-                onPublishFeedback={() => selectedGate && loadQualityGateDetail(selectedGate.id, true)}
-            />
+            <div className={!canEdit ? 'ci-cd-read-only-quality-drawer' : undefined}>
+                <QualityGateDetailDrawer
+                    gate={selectedGate}
+                    loading={gateDetailLoading}
+                    actionLoading={gateActionLoading}
+                    error={gateDetailError}
+                    onClose={() => setSelectedGate(null)}
+                    onRefresh={() => selectedGate && loadQualityGateDetail(selectedGate.id)}
+                    onRerun={canEdit ? rerunQualityGate : () => {}}
+                    onPublishFeedback={canEdit ? () => selectedGate && loadQualityGateDetail(selectedGate.id, true) : () => {}}
+                />
+            </div>
 
             <RunDetailDrawer
-                run={selectedRun}
+                run={selectedRun && !canEdit ? {
+                    ...selectedRun,
+                    action_availability: {
+                        ...selectedRun.action_availability,
+                        can_cancel: false,
+                        can_rerun: false,
+                        can_rerun_failed: false,
+                        disabled_reason: 'Read-only access',
+                    },
+                } : selectedRun}
                 jobs={runJobs}
                 artifacts={runArtifacts}
                 loading={runLoading}
@@ -781,6 +810,12 @@ export default function CiCdPage() {
                 @keyframes spin {
                     from { transform: rotate(0deg); }
                     to { transform: rotate(360deg); }
+                }
+            `}</style>
+            <style jsx global>{`
+                .ci-cd-read-only-quality-drawer aside > div:nth-child(2) button:nth-of-type(2),
+                .ci-cd-read-only-quality-drawer aside > div:nth-child(2) button:nth-of-type(3) {
+                    display: none !important;
                 }
             `}</style>
         </PageLayout>

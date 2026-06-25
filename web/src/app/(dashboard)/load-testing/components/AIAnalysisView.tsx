@@ -5,7 +5,7 @@ import type { LoadTestAnalysis } from './types';
 
 interface AIAnalysisViewProps {
     analysis?: LoadTestAnalysis;
-    onAnalyze: () => void;
+    onAnalyze?: () => void;
     analyzing: boolean;
     runStatus: string;
 }
@@ -46,7 +46,7 @@ export default function AIAnalysisView({ analysis, onAnalyze, analyzing, runStat
                         <Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} />
                         <span style={{ fontSize: '0.875rem' }}>Analyzing performance data with AI...</span>
                     </div>
-                ) : runStatus === 'completed' ? (
+                ) : runStatus === 'completed' && onAnalyze ? (
                     <>
                         <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.75rem' }}>
                             Get AI-powered insights on performance bottlenecks and optimization recommendations.
@@ -65,7 +65,7 @@ export default function AIAnalysisView({ analysis, onAnalyze, analyzing, runStat
                     </>
                 ) : (
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                        AI analysis is available after the run completes.
+                        {runStatus === 'completed' ? 'AI analysis has not been generated for this run.' : 'AI analysis is available after the run completes.'}
                     </p>
                 )}
             </div>

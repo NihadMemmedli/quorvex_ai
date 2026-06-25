@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Key, Eye, EyeOff, Plus, Trash2, AlertCircle, CheckCircle, FileCode, HardDrive } from 'lucide-react';
 import { API_BASE } from '@/lib/api';
+import { useProjectRole } from '@/hooks/useProjectRole';
 
 interface Credential {
     key: string;
@@ -16,6 +17,7 @@ interface CredentialsManagerProps {
 }
 
 export function CredentialsManager({ projectId, projectName }: CredentialsManagerProps) {
+    const { canEdit } = useProjectRole(projectId);
     const [credentials, setCredentials] = useState<Credential[]>([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -50,6 +52,7 @@ export function CredentialsManager({ projectId, projectName }: CredentialsManage
 
     const handleAddCredential = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (!canEdit) return;
 
         if (!newKey.trim() || !newValue.trim()) {
             setError('Both key and value are required');
@@ -92,6 +95,7 @@ export function CredentialsManager({ projectId, projectName }: CredentialsManage
     };
 
     const handleDeleteCredential = async (key: string) => {
+        if (!canEdit) return;
         try {
             setDeletingKey(key);
             setError(null);
@@ -294,7 +298,7 @@ export function CredentialsManager({ projectId, projectName }: CredentialsManage
                                         </span>
                                     </td>
                                     <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
-                                        {cred.source === 'project' ? (
+                                        {canEdit && cred.source === 'project' ? (
                                             <button
                                                 onClick={() => handleDeleteCredential(cred.key)}
                                                 disabled={deletingKey === cred.key}
@@ -350,150 +354,152 @@ export function CredentialsManager({ projectId, projectName }: CredentialsManage
             )}
 
             {/* Add Credential Form */}
-            <form onSubmit={handleAddCredential} style={{
-                padding: '1.5rem',
-                background: 'var(--surface)',
-                borderRadius: 'var(--radius)',
-                border: '1px solid var(--border)'
-            }}>
-                <div style={{ marginBottom: '1rem', fontWeight: 600 }}>
-                    Add Credential
-                </div>
-
-                <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                    {/* Key input */}
-                    <div style={{ flex: '1 1 200px' }}>
-                        <label style={{
-                            display: 'block',
-                            fontSize: '0.875rem',
-                            fontWeight: 500,
-                            marginBottom: '0.375rem',
-                            color: 'var(--text-secondary)'
-                        }}>
-                            Credential Key
-                        </label>
-                        <input
-                            type="text"
-                            value={newKey}
-                            onChange={(e) => setNewKey(e.target.value.toUpperCase())}
-                            placeholder="LOGIN_PASSWORD"
-                            className="input"
-                            style={{
-                                width: '100%',
-                                fontFamily: 'monospace',
-                                textTransform: 'uppercase'
-                            }}
-                        />
+            {canEdit && (
+                <form onSubmit={handleAddCredential} style={{
+                    padding: '1.5rem',
+                    background: 'var(--surface)',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border)'
+                }}>
+                    <div style={{ marginBottom: '1rem', fontWeight: 600 }}>
+                        Add Credential
                     </div>
 
-                    {/* Value input */}
-                    <div style={{ flex: '2 1 300px' }}>
-                        <label style={{
-                            display: 'block',
-                            fontSize: '0.875rem',
-                            fontWeight: 500,
-                            marginBottom: '0.375rem',
-                            color: 'var(--text-secondary)'
-                        }}>
-                            Value
-                        </label>
-                        <div style={{ position: 'relative' }}>
+                    <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                        {/* Key input */}
+                        <div style={{ flex: '1 1 200px' }}>
+                            <label style={{
+                                display: 'block',
+                                fontSize: '0.875rem',
+                                fontWeight: 500,
+                                marginBottom: '0.375rem',
+                                color: 'var(--text-secondary)'
+                            }}>
+                                Credential Key
+                            </label>
                             <input
-                                type={showNewValue ? 'text' : 'password'}
-                                value={newValue}
-                                onChange={(e) => setNewValue(e.target.value)}
-                                placeholder="Enter credential value"
+                                type="text"
+                                value={newKey}
+                                onChange={(e) => setNewKey(e.target.value.toUpperCase())}
+                                placeholder="LOGIN_PASSWORD"
                                 className="input"
                                 style={{
                                     width: '100%',
-                                    paddingRight: '2.5rem'
+                                    fontFamily: 'monospace',
+                                    textTransform: 'uppercase'
                                 }}
                             />
+                        </div>
+
+                        {/* Value input */}
+                        <div style={{ flex: '2 1 300px' }}>
+                            <label style={{
+                                display: 'block',
+                                fontSize: '0.875rem',
+                                fontWeight: 500,
+                                marginBottom: '0.375rem',
+                                color: 'var(--text-secondary)'
+                            }}>
+                                Value
+                            </label>
+                            <div style={{ position: 'relative' }}>
+                                <input
+                                    type={showNewValue ? 'text' : 'password'}
+                                    value={newValue}
+                                    onChange={(e) => setNewValue(e.target.value)}
+                                    placeholder="Enter credential value"
+                                    className="input"
+                                    style={{
+                                        width: '100%',
+                                        paddingRight: '2.5rem'
+                                    }}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowNewValue(!showNewValue)}
+                                    style={{
+                                        position: 'absolute',
+                                        right: '0.5rem',
+                                        top: '50%',
+                                        transform: 'translateY(-50%)',
+                                        background: 'transparent',
+                                        border: 'none',
+                                        padding: '0.25rem',
+                                        cursor: 'pointer',
+                                        color: 'var(--text-secondary)'
+                                    }}
+                                    title={showNewValue ? 'Hide value' : 'Show value'}
+                                >
+                                    {showNewValue ? <EyeOff size={18} /> : <Eye size={18} />}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Submit button */}
+                        <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'flex-end' }}>
                             <button
-                                type="button"
-                                onClick={() => setShowNewValue(!showNewValue)}
+                                type="submit"
+                                className="btn btn-primary"
+                                disabled={saving || !newKey.trim() || !newValue.trim()}
                                 style={{
-                                    position: 'absolute',
-                                    right: '0.5rem',
-                                    top: '50%',
-                                    transform: 'translateY(-50%)',
-                                    background: 'transparent',
-                                    border: 'none',
-                                    padding: '0.25rem',
-                                    cursor: 'pointer',
-                                    color: 'var(--text-secondary)'
+                                    minWidth: '120px',
+                                    justifyContent: 'center',
+                                    opacity: saving ? 0.7 : 1
                                 }}
-                                title={showNewValue ? 'Hide value' : 'Show value'}
                             >
-                                {showNewValue ? <EyeOff size={18} /> : <Eye size={18} />}
+                                {saving ? 'Saving...' : (
+                                    <>
+                                        <Plus size={16} />
+                                        Add
+                                    </>
+                                )}
                             </button>
                         </div>
                     </div>
 
-                    {/* Submit button */}
-                    <div style={{ flex: '0 0 auto', display: 'flex', alignItems: 'flex-end' }}>
-                        <button
-                            type="submit"
-                            className="btn btn-primary"
-                            disabled={saving || !newKey.trim() || !newValue.trim()}
-                            style={{
-                                minWidth: '120px',
-                                justifyContent: 'center',
-                                opacity: saving ? 0.7 : 1
-                            }}
-                        >
-                            {saving ? 'Saving...' : (
-                                <>
-                                    <Plus size={16} />
-                                    Add
-                                </>
-                            )}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Quick suggestions */}
-                {unusedSuggestions.length > 0 && (
-                    <div style={{ marginTop: '1rem' }}>
-                        <div style={{
-                            fontSize: '0.75rem',
-                            color: 'var(--text-secondary)',
-                            marginBottom: '0.5rem'
-                        }}>
-                            Suggestions:
+                    {/* Quick suggestions */}
+                    {unusedSuggestions.length > 0 && (
+                        <div style={{ marginTop: '1rem' }}>
+                            <div style={{
+                                fontSize: '0.75rem',
+                                color: 'var(--text-secondary)',
+                                marginBottom: '0.5rem'
+                            }}>
+                                Suggestions:
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                {unusedSuggestions.slice(0, 4).map(suggestion => (
+                                    <button
+                                        key={suggestion}
+                                        type="button"
+                                        onClick={() => setNewKey(suggestion)}
+                                        style={{
+                                            padding: '0.25rem 0.5rem',
+                                            fontSize: '0.75rem',
+                                            fontFamily: 'monospace',
+                                            background: 'var(--surface-hover)',
+                                            border: '1px solid var(--border)',
+                                            borderRadius: 4,
+                                            cursor: 'pointer',
+                                            transition: 'all 0.15s'
+                                        }}
+                                        onMouseEnter={(e) => {
+                                            e.currentTarget.style.borderColor = 'var(--primary)';
+                                            e.currentTarget.style.color = 'var(--primary)';
+                                        }}
+                                        onMouseLeave={(e) => {
+                                            e.currentTarget.style.borderColor = 'var(--border)';
+                                            e.currentTarget.style.color = 'inherit';
+                                        }}
+                                    >
+                                        {suggestion}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
-                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                            {unusedSuggestions.slice(0, 4).map(suggestion => (
-                                <button
-                                    key={suggestion}
-                                    type="button"
-                                    onClick={() => setNewKey(suggestion)}
-                                    style={{
-                                        padding: '0.25rem 0.5rem',
-                                        fontSize: '0.75rem',
-                                        fontFamily: 'monospace',
-                                        background: 'var(--surface-hover)',
-                                        border: '1px solid var(--border)',
-                                        borderRadius: 4,
-                                        cursor: 'pointer',
-                                        transition: 'all 0.15s'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                        e.currentTarget.style.borderColor = 'var(--primary)';
-                                        e.currentTarget.style.color = 'var(--primary)';
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        e.currentTarget.style.borderColor = 'var(--border)';
-                                        e.currentTarget.style.color = 'inherit';
-                                    }}
-                                >
-                                    {suggestion}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                )}
-            </form>
+                    )}
+                </form>
+            )}
 
             {/* Usage hint */}
             <div style={{

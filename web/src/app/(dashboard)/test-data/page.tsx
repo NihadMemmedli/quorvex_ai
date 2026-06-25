@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import { API_BASE } from '@/lib/api';
 import { fetchWithAuth } from '@/contexts/AuthContext';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { Button } from '@/components/ui/button';
@@ -118,6 +119,7 @@ function toggleSensitiveField(value: string, field: string, enabled: boolean) {
 
 export default function TestDataPage() {
   const { currentProject } = useProject();
+  const { canEdit } = useProjectRole(currentProject?.id ?? null);
   const [datasets, setDatasets] = useState<TestDataSet[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState<string>('');
   const [items, setItems] = useState<TestDataItem[]>([]);
@@ -161,6 +163,7 @@ export default function TestDataPage() {
     [itemForm.dataText, itemForm.format],
   );
   const canSaveItem = Boolean(selectedDataset)
+    && canEdit
     && !savingItem
     && Boolean(itemForm.key.trim())
     && Boolean(itemForm.name.trim())
@@ -248,7 +251,7 @@ export default function TestDataPage() {
   }, [selectedItem]);
 
   async function saveDataset() {
-    if (!currentProject?.id || savingDataset) return;
+    if (!canEdit || !currentProject?.id || savingDataset) return;
     const key = datasetForm.key.trim();
     if (!key) {
       toast.error('Dataset key is required');
@@ -284,7 +287,7 @@ export default function TestDataPage() {
   }
 
   async function saveItem() {
-    if (!selectedDataset || savingItem) return;
+    if (!canEdit || !selectedDataset || savingItem) return;
     const key = itemForm.key.trim();
     if (!key) {
       toast.error('Item key is required');
@@ -341,7 +344,7 @@ export default function TestDataPage() {
   }
 
   async function deleteItem() {
-    if (!currentProject?.id || !selectedDataset || !selectedItem || deletingItem) return;
+    if (!canEdit || !currentProject?.id || !selectedDataset || !selectedItem || deletingItem) return;
     setDeletingItem(true);
     try {
       const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items/${encodeURIComponent(selectedItem.id)}?project_id=${encodeURIComponent(currentProject.id)}`, { method: 'DELETE' });
@@ -360,7 +363,7 @@ export default function TestDataPage() {
   }
 
   async function deleteDataset() {
-    if (!currentProject?.id || !selectedDataset || deletingDataset) return;
+    if (!canEdit || !currentProject?.id || !selectedDataset || deletingDataset) return;
     const datasetId = selectedDataset.id;
     setDeletingDataset(true);
     try {
@@ -386,6 +389,7 @@ export default function TestDataPage() {
   }
 
   function setPasswordProtected(checked: boolean) {
+    if (!canEdit) return;
     setItemForm(prev => ({
       ...prev,
       sensitiveFields: formatSensitiveFields(toggleSensitiveField(prev.sensitiveFields, 'password', checked)),
@@ -399,6 +403,7 @@ export default function TestDataPage() {
   }
 
   function formatJson() {
+    if (!canEdit) return;
     if (!itemForm.dataText.trim()) return;
     const result = formatJsonContent(itemForm.dataText);
     if (!result.valid) {
@@ -410,6 +415,7 @@ export default function TestDataPage() {
   }
 
   function repairJsonPaste() {
+    if (!canEdit) return;
     const result = repairJsonPasteContent(itemForm.dataText);
     if (!result.valid) {
       focusJsonEditor();
@@ -479,12 +485,13 @@ export default function TestDataPage() {
                   <CompactEmpty
                     icon={<Layers3 size={18} />}
                     title="No datasets yet"
-                    description="Create the first fixture collection below."
+                    description={canEdit ? 'Create the first fixture collection below.' : 'No fixture collections are available.'}
                   />
                 ) : null}
               </CardContent>
             </Card>
 
+            {canEdit && (
             <Card>
               <CardHeader className="test-data-card-header">
                 <CardTitle className="test-data-card-title">Create Dataset</CardTitle>
@@ -546,6 +553,7 @@ export default function TestDataPage() {
                 </Button>
               </CardContent>
             </Card>
+            )}
           </aside>
 
           <main className="test-data-main">
@@ -556,6 +564,7 @@ export default function TestDataPage() {
                   itemCount={items.length}
                   deleting={deletingDataset}
                   onDelete={() => setDeleteDatasetOpen(true)}
+                  canEdit={canEdit}
                 />
 
                 <Card>
@@ -564,18 +573,20 @@ export default function TestDataPage() {
                       <div className="test-data-min">
                         <CardTitle className="test-data-card-title">Items</CardTitle>
                         <p className="test-data-muted test-data-compact-line">
-                          Select an item to edit it, or start a new fixture.
+                          {canEdit ? 'Select an item to edit it, or start a new fixture.' : 'Select an item to inspect its fixture details.'}
                         </p>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="test-data-new-item-button"
-                        onClick={() => setSelectedItemId('')}
-                      >
-                        <Plus size={16} />
-                        New item
-                      </Button>
+                      {canEdit && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="test-data-new-item-button"
+                          onClick={() => setSelectedItemId('')}
+                        >
+                          <Plus size={16} />
+                          New item
+                        </Button>
+                      )}
                     </div>
                   </CardHeader>
                   <CardContent className="test-data-card-content">
@@ -600,18 +611,19 @@ export default function TestDataPage() {
                       <CompactEmpty
                         icon={<FileJson size={18} />}
                         title="No items in this dataset yet"
-                        description="Use the editor below to add the first fixture."
+                        description={canEdit ? 'Use the editor below to add the first fixture.' : 'No fixture items are available.'}
                       />
                     )}
                   </CardContent>
                 </Card>
 
+                {(canEdit || selectedItem) && (
                 <Card>
                   <CardHeader className="test-data-card-header">
                     <div className="test-data-header-row">
                       <div className="test-data-min">
                         <CardTitle className="test-data-card-title">
-                          {selectedItem ? 'Edit Item' : 'New Item'}
+                          {selectedItem ? (canEdit ? 'Edit Item' : 'Item Details') : 'New Item'}
                         </CardTitle>
                         <p className="test-data-code-muted test-data-compact-line">
                           {selectedItem ? selectedItem.ref : `${selectedDataset.key}.<item-key>`}
@@ -624,7 +636,7 @@ export default function TestDataPage() {
                             Directive
                           </Button>
                         ) : null}
-                        {selectedItem ? (
+                        {canEdit && selectedItem ? (
                           <Button variant="outline" size="sm" onClick={() => setSelectedItemId('')}>
                             <Plus size={16} />
                             New
@@ -643,6 +655,7 @@ export default function TestDataPage() {
                           value={itemForm.key}
                           onChange={event => setItemForm(prev => ({ ...prev, key: event.target.value }))}
                           placeholder="valid-admin"
+                          disabled={!canEdit}
                         />
                       </Field>
                       <Field id="item-name" label="Name">
@@ -652,6 +665,7 @@ export default function TestDataPage() {
                           value={itemForm.name}
                           onChange={event => setItemForm(prev => ({ ...prev, name: event.target.value }))}
                           placeholder="Valid admin"
+                          disabled={!canEdit}
                         />
                       </Field>
                       <SelectField
@@ -660,6 +674,7 @@ export default function TestDataPage() {
                         value={itemForm.format}
                         onValueChange={value => setItemForm(prev => ({ ...prev, format: value as DataFormat }))}
                         values={['json', 'text', 'mixed']}
+                        disabled={!canEdit}
                       />
                       <SelectField
                         id="item-status"
@@ -667,6 +682,7 @@ export default function TestDataPage() {
                         value={itemForm.status}
                         onValueChange={value => setItemForm(prev => ({ ...prev, status: value as DataStatus }))}
                         values={['active', 'archived']}
+                        disabled={!canEdit}
                       />
                     </div>
 
@@ -676,6 +692,7 @@ export default function TestDataPage() {
                         value={itemForm.description}
                         onChange={event => setItemForm(prev => ({ ...prev, description: event.target.value }))}
                         placeholder="Admin user credentials for login specs"
+                        disabled={!canEdit}
                       />
                     </Field>
 
@@ -685,6 +702,7 @@ export default function TestDataPage() {
                         value={itemForm.sensitiveFields}
                         onChange={event => setItemForm(prev => ({ ...prev, sensitiveFields: event.target.value }))}
                         placeholder="password, token, profile.ssn, $text"
+                        disabled={!canEdit}
                       />
                     </Field>
 
@@ -699,6 +717,7 @@ export default function TestDataPage() {
                         checked={passwordProtected}
                         onCheckedChange={setPasswordProtected}
                         aria-label="Protect password"
+                        disabled={!canEdit}
                       />
                     </div>
 
@@ -706,7 +725,7 @@ export default function TestDataPage() {
                       <Field
                         id="item-json"
                         label="JSON"
-                        labelActions={(
+                        labelActions={canEdit ? (
                           <div className="test-data-editor-actions">
                             <Button type="button" variant="outline" size="sm" onClick={formatJson} data-testid="test-data-format-json">
                               Format
@@ -715,7 +734,7 @@ export default function TestDataPage() {
                               Repair paste
                             </Button>
                           </div>
-                        )}
+                        ) : undefined}
                       >
                         <div
                           className={cn('test-data-json-editor-frame', !jsonValidation.valid ? 'test-data-json-editor-frame-error' : '')}
@@ -731,6 +750,7 @@ export default function TestDataPage() {
                             ariaLabel="JSON"
                             wrapperClassName="test-data-json-editor"
                             wrapperTestId="test-data-item-json"
+                            readOnly={!canEdit}
                             options={{ tabSize: 2 }}
                           />
                         </div>
@@ -749,6 +769,7 @@ export default function TestDataPage() {
                           className={cn(textareaClass, 'test-data-text-editor')}
                           value={itemForm.text}
                           onChange={event => setItemForm(prev => ({ ...prev, text: event.target.value }))}
+                          readOnly={!canEdit}
                         />
                       </Field>
                     ) : null}
@@ -777,11 +798,13 @@ export default function TestDataPage() {
                     ) : null}
 
                     <div className="test-data-actions">
-                      <Button onClick={saveItem} disabled={!canSaveItem} data-testid="test-data-save-item">
-                        {savingItem ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-                        Save item
-                      </Button>
-                      {selectedItem ? (
+                      {canEdit && (
+                        <Button onClick={saveItem} disabled={!canSaveItem} data-testid="test-data-save-item">
+                          {savingItem ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                          Save item
+                        </Button>
+                      )}
+                      {canEdit && selectedItem ? (
                         <Button
                           variant="outline"
                           onClick={() => setDeleteOpen(true)}
@@ -801,16 +824,17 @@ export default function TestDataPage() {
                     </div>
                   </CardContent>
                 </Card>
+                )}
               </>
             ) : (
-              <EmptyState title="Choose a dataset" description="Create or select a dataset to manage fixture items." icon={<Database size={28} />} />
+              <EmptyState title="Choose a dataset" description={canEdit ? 'Create or select a dataset to manage fixture items.' : 'Select a dataset to inspect fixture items.'} icon={<Database size={28} />} />
             )}
           </main>
         </div>
       )}
 
       <ConfirmDialog
-        open={deleteDatasetOpen}
+        open={canEdit && deleteDatasetOpen}
         onOpenChange={setDeleteDatasetOpen}
         title="Delete test data dataset?"
         description={selectedDataset ? `This will permanently delete "${selectedDataset.name || selectedDataset.key}" and ${items.length} item${items.length === 1 ? '' : 's'}.` : 'This dataset and its items will be permanently deleted.'}
@@ -821,7 +845,7 @@ export default function TestDataPage() {
       />
 
       <ConfirmDialog
-        open={deleteOpen}
+        open={canEdit && deleteOpen}
         onOpenChange={setDeleteOpen}
         title="Delete test data item?"
         description={selectedItem ? `This will permanently delete "${selectedItem.name || selectedItem.key}" from ${selectedDataset?.name || 'this dataset'}.` : 'This item will be permanently deleted.'}
@@ -1396,11 +1420,13 @@ function DatasetSummary({
   itemCount,
   deleting,
   onDelete,
+  canEdit,
 }: {
   dataset: TestDataSet;
   itemCount: number;
   deleting: boolean;
   onDelete: () => void;
+  canEdit: boolean;
 }) {
   return (
     <Card>
@@ -1423,16 +1449,18 @@ function DatasetSummary({
               <SummaryMetric label="Format" value={dataset.format} />
               <SummaryMetric label="Tags" value={String(dataset.tags?.length || 0)} />
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDelete}
-              disabled={deleting}
-              data-testid="test-data-delete-dataset"
-            >
-              {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-              Delete dataset
-            </Button>
+            {canEdit && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={onDelete}
+                disabled={deleting}
+                data-testid="test-data-delete-dataset"
+              >
+                {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                Delete dataset
+              </Button>
+            )}
           </div>
         </div>
       </CardContent>
@@ -1505,17 +1533,19 @@ function SelectField({
   value,
   values,
   onValueChange,
+  disabled,
 }: {
   id: string;
   label: string;
   value: string;
   values: string[];
   onValueChange: (value: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <Field id={id} label={label}>
-      <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger id={id}><SelectValue /></SelectTrigger>
+      <Select value={value} onValueChange={onValueChange} disabled={disabled}>
+        <SelectTrigger id={id} disabled={disabled}><SelectValue /></SelectTrigger>
         <SelectContent>
           {values.map(item => <SelectItem key={item} value={item}>{item}</SelectItem>)}
         </SelectContent>

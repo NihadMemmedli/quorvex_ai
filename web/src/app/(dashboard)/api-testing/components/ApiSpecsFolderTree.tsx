@@ -11,6 +11,7 @@ interface ApiSpecsFolderTreeProps {
     totalCount: number;
     projectId: string;
     setMessage: (msg: { type: 'success' | 'error'; text: string } | null) => void;
+    canEdit: boolean;
 }
 
 const itemStyle: React.CSSProperties = {
@@ -38,12 +39,14 @@ export default function ApiSpecsFolderTree({
     totalCount,
     projectId,
     setMessage,
+    canEdit,
 }: ApiSpecsFolderTreeProps) {
     const [collapsed, setCollapsed] = useState(false);
     const [creatingFolder, setCreatingFolder] = useState(false);
     const [newFolderName, setNewFolderName] = useState('');
 
     const handleCreateFolder = async () => {
+        if (!canEdit) return;
         if (!newFolderName.trim()) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/specs/folder', projectId)}`, {
@@ -163,7 +166,7 @@ export default function ApiSpecsFolderTree({
                     })}
 
                     {/* New folder */}
-                    <div style={{ marginTop: '0.5rem' }}>
+                    {canEdit && <div style={{ marginTop: '0.5rem' }}>
                         {creatingFolder ? (
                             <div style={{ display: 'flex', gap: '0.3rem', padding: '0.25rem' }}>
                                 <input
@@ -217,7 +220,7 @@ export default function ApiSpecsFolderTree({
                                 <span>New Folder</span>
                             </button>
                         )}
-                    </div>
+                    </div>}
                 </div>
             )}
         </div>

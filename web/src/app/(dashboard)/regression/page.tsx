@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { fetchWithAuth } from '@/contexts/AuthContext';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
@@ -211,6 +212,7 @@ export default function RegressionPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const { projectId, isLoading: projectLoading } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
 
     // Core state
     const [specs, setSpecs] = useState<AutomatedSpec[]>([]);
@@ -600,6 +602,7 @@ export default function RegressionPage() {
         label: string,
         options?: { automatedOnly?: boolean; tags?: string[]; displayCount?: number }
     ) => {
+        if (!canEdit) return;
         if (specsToRun.length === 0 && !options?.automatedOnly) {
             alert('No tests to run');
             return;
@@ -632,6 +635,7 @@ export default function RegressionPage() {
     };
 
     const submitRunSetup = async () => {
+        if (!canEdit) return;
         const validationError = validateRunSetup();
         if (validationError) {
             setRunSetupError(validationError);
@@ -678,6 +682,7 @@ export default function RegressionPage() {
     const canSubmitRunSetup = pendingRunAutomatedOnly || pendingRunSpecs.length > 0;
 
     const runFiltered = async () => {
+        if (!canEdit) return;
         if (totalFiltered === 0) {
             alert('No tests to run');
             return;
@@ -830,7 +835,7 @@ export default function RegressionPage() {
                                 </p>
                             </div>
                         </div>
-                        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                        {canEdit && <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                             <select
                                 value={selectedBrowser}
                                 onChange={(e) => setSelectedBrowser(e.target.value)}
@@ -854,7 +859,7 @@ export default function RegressionPage() {
                                 <Zap size={16} />
                                 {hybridHealing ? 'Extended' : 'Standard'}
                             </button>
-                        </div>
+                        </div>}
                     </div>
 
                     {/* Tag Filters */}
@@ -918,15 +923,17 @@ export default function RegressionPage() {
                                 className="input has-icon"
                             />
                         </div>
-                        <button
-                            className="btn btn-primary"
-                            onClick={runFiltered}
-                            disabled={running || totalFiltered === 0}
-                            style={{ whiteSpace: 'nowrap' }}
-                        >
-                            <Play size={16} fill="currentColor" />
-                            Run All ({totalFiltered})
-                        </button>
+                        {canEdit && (
+                            <button
+                                className="btn btn-primary"
+                                onClick={runFiltered}
+                                disabled={running || totalFiltered === 0}
+                                style={{ whiteSpace: 'nowrap' }}
+                            >
+                                <Play size={16} fill="currentColor" />
+                                Run All ({totalFiltered})
+                            </button>
+                        )}
                     </div>
                 </header>
 
@@ -1148,7 +1155,7 @@ export default function RegressionPage() {
             </main>
 
             {/* Selection Action Bar */}
-            {selectedSpecs.size > 0 && (
+            {canEdit && selectedSpecs.size > 0 && (
                 <div style={{
                     position: 'fixed',
                     bottom: '1.5rem',
@@ -1213,7 +1220,7 @@ export default function RegressionPage() {
                 </div>
             )}
 
-            {runSetupOpen && (
+            {canEdit && runSetupOpen && (
                 <div
                     role="dialog"
                     aria-modal="true"

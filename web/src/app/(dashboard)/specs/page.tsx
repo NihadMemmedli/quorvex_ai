@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { splitSpecWithJob } from '@/lib/spec-split-jobs';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
@@ -125,6 +126,8 @@ function SpecsPageContent() {
     const fileParam = searchParams.get('file');
     const searchParam = searchParams.get('search') || '';
     const { currentProject, isLoading: projectLoading } = useProject();
+    const { canEdit: canEditProject } = useProjectRole(currentProject?.id ?? null);
+    const canEdit = !currentProject?.id || canEditProject;
 
     const [activeTab, setActiveTab] = useState<TabType>('specs');
     const [specs, setSpecs] = useState<Spec[]>([]);
@@ -534,6 +537,10 @@ function SpecsPageContent() {
 
     // Drag-and-drop handlers
     const handleDragStart = (e: React.DragEvent, path: string, type: 'file' | 'folder', isTemplate: boolean) => {
+        if (!canEdit) {
+            e.preventDefault();
+            return;
+        }
         e.stopPropagation();
         setDraggedItem({ path, type, isTemplate });
         e.dataTransfer.effectAllowed = 'move';
@@ -541,6 +548,7 @@ function SpecsPageContent() {
     };
 
     const handleDragOver = (e: React.DragEvent, targetPath: string, isFolder: boolean, isTemplate: boolean) => {
+        if (!canEdit) return;
         e.preventDefault();
         e.stopPropagation();
 
@@ -575,6 +583,7 @@ function SpecsPageContent() {
         e.preventDefault();
         e.stopPropagation();
 
+        if (!canEdit) return;
         if (!draggedItem || isMoving) return;
 
         // Validate same type (templates vs specs)
@@ -648,12 +657,13 @@ function SpecsPageContent() {
     const openRunModal = (specName: string, e?: React.MouseEvent | Event) => {
         e?.preventDefault();
         e?.stopPropagation?.();
+        if (!canEdit) return;
         setSelectedSpec(specName);
         setRunModalOpen(true);
     };
 
     const confirmRun = async () => {
-        if (!selectedSpec || isStartingRun) return;
+        if (!canEdit || !selectedSpec || isStartingRun) return;
         if (!validateBrowserAuthSelection()) return;
 
         setIsStartingRun(true);
@@ -697,12 +707,13 @@ function SpecsPageContent() {
     const openSplitModal = (specName: string, e?: React.MouseEvent | Event) => {
         e?.preventDefault();
         e?.stopPropagation?.();
+        if (!canEdit) return;
         setSplitSpecName(specName);
         setSplitModalOpen(true);
     };
 
     const confirmSplit = async () => {
-        if (!splitSpecName) return;
+        if (!canEdit || !splitSpecName) return;
         setSplitting(true);
 
         try {
@@ -748,6 +759,7 @@ function SpecsPageContent() {
     const openDeleteModal = (specName: string, hasCode: boolean, e?: React.MouseEvent | Event) => {
         e?.preventDefault();
         e?.stopPropagation?.();
+        if (!canEdit) return;
         setDeleteSpecName(specName);
         setDeleteSpecHasCode(hasCode);
         setDeleteGeneratedTest(false);
@@ -755,7 +767,7 @@ function SpecsPageContent() {
     };
 
     const confirmDelete = async () => {
-        if (!deleteSpecName) return;
+        if (!canEdit || !deleteSpecName) return;
         setDeleting(true);
         try {
             const res = await fetch(
@@ -781,6 +793,7 @@ function SpecsPageContent() {
     const openDeleteFolderModal = (folderPath: string, specCount: number, e?: React.MouseEvent | Event) => {
         e?.preventDefault();
         e?.stopPropagation?.();
+        if (!canEdit) return;
         setDeleteFolderPath(folderPath);
         setDeleteFolderSpecCount(specCount);
         setDeleteFolderGeneratedTests(false);
@@ -788,7 +801,7 @@ function SpecsPageContent() {
     };
 
     const confirmDeleteFolder = async () => {
-        if (!deleteFolderPath) return;
+        if (!canEdit || !deleteFolderPath) return;
         setDeletingFolder(true);
         try {
             const res = await fetch(
@@ -816,13 +829,14 @@ function SpecsPageContent() {
     const openTagEditor = (specName: string, currentTags: string[], e?: React.MouseEvent | Event) => {
         e?.preventDefault();
         e?.stopPropagation?.();
+        if (!canEdit) return;
         setEditingSpecName(specName);
         setEditingTags([...currentTags]);
         setTagEditModalOpen(true);
     };
 
     const saveTags = async () => {
-        if (!editingSpecName) return;
+        if (!canEdit || !editingSpecName) return;
 
         try {
             await fetch(`${API_BASE}/spec-metadata/${editingSpecName}`, {
@@ -929,7 +943,7 @@ function SpecsPageContent() {
     };
 
     const handlePushToTestrail = async () => {
-        if (selectedSpecs.size === 0 || !currentProject?.id || !trConfig.project_id || !trConfig.suite_id) return;
+        if (!canEdit || selectedSpecs.size === 0 || !currentProject?.id || !trConfig.project_id || !trConfig.suite_id) return;
         setPushing(true);
         setPushResult(null);
         try {
@@ -969,6 +983,7 @@ function SpecsPageContent() {
     const startRename = (path: string, isFolder: boolean, currentName: string, e?: React.MouseEvent | Event) => {
         e?.preventDefault();
         e?.stopPropagation();
+        if (!canEdit) return;
         setRenamingPath(path);
         setRenameIsFolder(isFolder);
         // For files, strip .md extension for editing
@@ -983,7 +998,7 @@ function SpecsPageContent() {
     };
 
     const confirmRename = async () => {
-        if (!renamingPath || !renameValue.trim() || renameLoading) return;
+        if (!canEdit || !renamingPath || !renameValue.trim() || renameLoading) return;
 
         setRenameLoading(true);
         setRenameError(null);
@@ -1020,7 +1035,7 @@ function SpecsPageContent() {
     };
 
     const confirmCreateFolder = async () => {
-        if (!newFolderName.trim() || creatingFolder) return;
+        if (!canEdit || !newFolderName.trim() || creatingFolder) return;
 
         setCreatingFolder(true);
         setCreateFolderError(null);
@@ -1057,6 +1072,7 @@ function SpecsPageContent() {
     };
 
     const openDeleteSpecByName = (specName: string, hasCode: boolean) => {
+        if (!canEdit) return;
         setDeleteSpecName(specName);
         setDeleteSpecHasCode(hasCode);
         setDeleteGeneratedTest(false);
@@ -1064,6 +1080,7 @@ function SpecsPageContent() {
     };
 
     const openDeleteFolderByPath = (folderPath: string, specCount: number) => {
+        if (!canEdit) return;
         setDeleteFolderPath(folderPath);
         setDeleteFolderSpecCount(specCount);
         setDeleteFolderGeneratedTests(false);
@@ -1071,7 +1088,7 @@ function SpecsPageContent() {
     };
 
     const handleBulkRun = async () => {
-        if (selectedSpecs.size === 0) return;
+        if (!canEdit || selectedSpecs.size === 0) return;
         if (!validateBrowserAuthSelection(true)) return;
 
         try {
@@ -1220,7 +1237,7 @@ function SpecsPageContent() {
             return (
                 <div
                     key={node.path}
-                    draggable
+                    draggable={canEdit}
                     onDragStart={(e) => handleDragStart(e, node.path, 'file', false)}
                     onDragEnd={handleDragEnd}
                     style={{
@@ -1230,7 +1247,7 @@ function SpecsPageContent() {
                         background: isSelected ? 'rgba(96, 165, 250, 0.04)' : 'transparent',
                         paddingLeft: `${depth * 1.5}rem`,
                         opacity: isDragging ? 0.5 : 1,
-                        cursor: 'grab'
+                        cursor: canEdit ? 'grab' : 'default'
                     }}
                 >
                     <label
@@ -1427,60 +1444,64 @@ function SpecsPageContent() {
                         </div>
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}>
-                            <button
-                                className="btn-icon focus-ring"
-                                aria-label={`Run ${node.name}`}
-                                title="Run Spec"
-                                onClick={(e) => node.spec && openRunModal(node.spec.name, e)}
-                                style={{
-                                    width: 32, height: 32,
-                                    color: 'var(--success)',
-                                    background: 'var(--success-muted)'
-                                }}
-                            >
-                                <Play size={14} fill="currentColor" />
-                            </button>
-                            <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
+                            {canEdit && (
+                                <>
                                     <button
-                                        className="btn-icon focus-ring specs-flat-menu-trigger"
-                                        aria-label={`More actions for ${node.name}`}
-                                        title="More Actions"
-                                        style={flatActionIconStyle}
+                                        className="btn-icon focus-ring"
+                                        aria-label={`Run ${node.name}`}
+                                        title="Run Spec"
+                                        onClick={(e) => node.spec && openRunModal(node.spec.name, e)}
+                                        style={{
+                                            width: 32, height: 32,
+                                            color: 'var(--success)',
+                                            background: 'var(--success-muted)'
+                                        }}
                                     >
-                                        <MoreHorizontal size={16} />
+                                        <Play size={14} fill="currentColor" />
                                     </button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end" sideOffset={6} style={flatMenuContentStyle}>
-                                    <DropdownMenuItem
-                                        style={flatMenuItemStyle}
-                                        onSelect={(e) => { e.preventDefault(); startRename(node.path, false, node.name, e); }}
-                                    >
-                                        <Pencil size={13} /> Rename
-                                    </DropdownMenuItem>
-                                    <DropdownMenuItem
-                                        style={flatMenuItemStyle}
-                                        onSelect={(e) => { e.preventDefault(); node.spec && openTagEditor(node.spec.name, node.spec.metadata?.tags || [], e); }}
-                                    >
-                                        <Edit size={13} /> Edit Tags
-                                    </DropdownMenuItem>
-                                    {(node.spec?.spec_type === 'prd' || node.spec?.spec_type === 'native_plan' || node.spec?.spec_type === 'standard_multi' || ((node.spec?.test_count ?? 0) > 1 && node.spec?.spec_type === 'standard')) && (
-                                        <DropdownMenuItem
-                                            style={flatMenuItemStyle}
-                                            onSelect={(e) => { e.preventDefault(); node.spec && openSplitModal(node.spec.name, e); }}
-                                        >
-                                            <Split size={13} /> Split Tests
-                                        </DropdownMenuItem>
-                                    )}
-                                    <DropdownMenuItem
-                                        className="specs-flat-menu-danger"
-                                        style={flatMenuDestructiveItemStyle}
-                                        onSelect={(e) => { e.preventDefault(); node.spec && openDeleteSpecByName(node.spec.name, !!node.spec.is_automated); }}
-                                    >
-                                        <Trash2 size={13} /> Delete
-                                    </DropdownMenuItem>
-                                </DropdownMenuContent>
-                            </DropdownMenu>
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                            <button
+                                                className="btn-icon focus-ring specs-flat-menu-trigger"
+                                                aria-label={`More actions for ${node.name}`}
+                                                title="More Actions"
+                                                style={flatActionIconStyle}
+                                            >
+                                                <MoreHorizontal size={16} />
+                                            </button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end" sideOffset={6} style={flatMenuContentStyle}>
+                                            <DropdownMenuItem
+                                                style={flatMenuItemStyle}
+                                                onSelect={(e) => { e.preventDefault(); startRename(node.path, false, node.name, e); }}
+                                            >
+                                                <Pencil size={13} /> Rename
+                                            </DropdownMenuItem>
+                                            <DropdownMenuItem
+                                                style={flatMenuItemStyle}
+                                                onSelect={(e) => { e.preventDefault(); node.spec && openTagEditor(node.spec.name, node.spec.metadata?.tags || [], e); }}
+                                            >
+                                                <Edit size={13} /> Edit Tags
+                                            </DropdownMenuItem>
+                                            {(node.spec?.spec_type === 'prd' || node.spec?.spec_type === 'native_plan' || node.spec?.spec_type === 'standard_multi' || ((node.spec?.test_count ?? 0) > 1 && node.spec?.spec_type === 'standard')) && (
+                                                <DropdownMenuItem
+                                                    style={flatMenuItemStyle}
+                                                    onSelect={(e) => { e.preventDefault(); node.spec && openSplitModal(node.spec.name, e); }}
+                                                >
+                                                    <Split size={13} /> Split Tests
+                                                </DropdownMenuItem>
+                                            )}
+                                            <DropdownMenuItem
+                                                className="specs-flat-menu-danger"
+                                                style={flatMenuDestructiveItemStyle}
+                                                onSelect={(e) => { e.preventDefault(); node.spec && openDeleteSpecByName(node.spec.name, !!node.spec.is_automated); }}
+                                            >
+                                                <Trash2 size={13} /> Delete
+                                            </DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -1495,7 +1516,7 @@ function SpecsPageContent() {
         return (
             <div
                 key={node.path}
-                draggable
+                draggable={canEdit}
                 onDragStart={(e) => handleDragStart(e, node.path, 'folder', false)}
                 onDragEnd={handleDragEnd}
                 onDragOver={(e) => handleDragOver(e, node.path, true, false)}
@@ -1510,7 +1531,7 @@ function SpecsPageContent() {
                         gap: '0.75rem',
                         padding: '0.75rem 1rem',
                         paddingLeft: `${depth * 1.5 + 0.5}rem`,
-                        cursor: 'grab',
+                        cursor: canEdit ? 'grab' : 'default',
                         userSelect: 'none',
                         color: 'var(--text)',
                         background: isDropTarget ? 'rgba(96, 165, 250, 0.15)' : 'transparent',
@@ -1615,10 +1636,11 @@ function SpecsPageContent() {
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600, whiteSpace: 'nowrap' }}>
                         {folderSpecs.length} spec{folderSpecs.length === 1 ? '' : 's'}
                     </span>
-                    <button
-                        className="btn btn-secondary btn-sm focus-ring specs-flat-action-button"
-                        aria-label={`Run all specs in ${formatFolderName(node.name)}`}
-                        onClick={async (e) => {
+                    {canEdit && (
+                        <button
+                            className="btn btn-secondary btn-sm focus-ring specs-flat-action-button"
+                            aria-label={`Run all specs in ${formatFolderName(node.name)}`}
+                            onClick={async (e) => {
                             e.stopPropagation();
                             const folderSpecs = getAllSpecsInNode(node);
                             if (!validateBrowserAuthSelection(true)) return;
@@ -1654,46 +1676,49 @@ function SpecsPageContent() {
                                     }
                                 }
                             }
-                        }}
-                        style={{
-                            padding: '0.32rem 0.68rem',
-                            fontSize: '0.75rem',
-                            border: 'none',
-                            borderRadius: '6px',
-                            background: 'transparent',
-                            color: 'var(--text-secondary)',
-                            boxShadow: 'none',
-                        }}
-                    >
-                        Run All
-                    </button>
-                    <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                            <button
-                                className="btn-icon focus-ring specs-flat-menu-trigger"
-                                aria-label={`More actions for folder ${formatFolderName(node.name)}`}
-                                title="More Actions"
-                                style={flatActionIconStyle}
-                            >
-                                <MoreHorizontal size={16} />
-                            </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" sideOffset={6} style={flatMenuContentStyle}>
-                            <DropdownMenuItem
-                                style={flatMenuItemStyle}
-                                onSelect={(e) => { e.preventDefault(); startRename(node.path, true, node.name, e); }}
-                            >
-                                <Pencil size={13} /> Rename
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                className="specs-flat-menu-danger"
-                                style={flatMenuDestructiveItemStyle}
-                                onSelect={(e) => { e.preventDefault(); openDeleteFolderByPath(node.path, folderSpecs.length); }}
-                            >
-                                <Trash2 size={13} /> Delete
-                            </DropdownMenuItem>
-                        </DropdownMenuContent>
-                    </DropdownMenu>
+                            }}
+                            style={{
+                                padding: '0.32rem 0.68rem',
+                                fontSize: '0.75rem',
+                                border: 'none',
+                                borderRadius: '6px',
+                                background: 'transparent',
+                                color: 'var(--text-secondary)',
+                                boxShadow: 'none',
+                            }}
+                        >
+                            Run All
+                        </button>
+                    )}
+                    {canEdit && (
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <button
+                                    className="btn-icon focus-ring specs-flat-menu-trigger"
+                                    aria-label={`More actions for folder ${formatFolderName(node.name)}`}
+                                    title="More Actions"
+                                    style={flatActionIconStyle}
+                                >
+                                    <MoreHorizontal size={16} />
+                                </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" sideOffset={6} style={flatMenuContentStyle}>
+                                <DropdownMenuItem
+                                    style={flatMenuItemStyle}
+                                    onSelect={(e) => { e.preventDefault(); startRename(node.path, true, node.name, e); }}
+                                >
+                                    <Pencil size={13} /> Rename
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                    className="specs-flat-menu-danger"
+                                    style={flatMenuDestructiveItemStyle}
+                                    onSelect={(e) => { e.preventDefault(); openDeleteFolderByPath(node.path, folderSpecs.length); }}
+                                >
+                                    <Trash2 size={13} /> Delete
+                                </DropdownMenuItem>
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    )}
                 </div>
                 {isExpanded && node.children && (
                     <div style={{ background: 'var(--surface)' }}>
@@ -1721,7 +1746,7 @@ function SpecsPageContent() {
             return (
                 <div
                     key={node.path}
-                    draggable
+                    draggable={canEdit}
                     onDragStart={(e) => handleDragStart(e, node.path, 'file', true)}
                     onDragEnd={handleDragEnd}
                     style={{
@@ -1730,7 +1755,7 @@ function SpecsPageContent() {
                         borderBottom: '1px solid var(--border)',
                         paddingLeft: `${depth * 1.5}rem`,
                         opacity: isDraggingTemplate ? 0.5 : 1,
-                        cursor: 'grab'
+                        cursor: canEdit ? 'grab' : 'default'
                     }}
                 >
                     <div style={{ padding: '0 0.5rem 0 1rem', display: 'flex', alignItems: 'center' }}>
@@ -1799,18 +1824,20 @@ function SpecsPageContent() {
                         </div>
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <button
-                                className="btn-icon"
-                                title="Run to Automate"
-                                onClick={(e) => node.spec && openRunModal(node.spec.name, e)}
-                                style={{
-                                    width: 32, height: 32,
-                                    color: 'var(--success)',
-                                    background: 'var(--success-muted)'
-                                }}
-                            >
-                                <Play size={14} fill="currentColor" />
-                            </button>
+                            {canEdit && (
+                                <button
+                                    className="btn-icon"
+                                    title="Run to Automate"
+                                    onClick={(e) => node.spec && openRunModal(node.spec.name, e)}
+                                    style={{
+                                        width: 32, height: 32,
+                                        color: 'var(--success)',
+                                        background: 'var(--success-muted)'
+                                    }}
+                                >
+                                    <Play size={14} fill="currentColor" />
+                                </button>
+                            )}
                             <ChevronRight size={18} color="var(--text-secondary)" />
                         </div>
                     </Link>
@@ -1822,7 +1849,7 @@ function SpecsPageContent() {
         return (
             <div
                 key={node.path}
-                draggable
+                draggable={canEdit}
                 onDragStart={(e) => handleDragStart(e, node.path, 'folder', true)}
                 onDragEnd={handleDragEnd}
                 onDragOver={(e) => handleDragOver(e, node.path, true, true)}
@@ -1837,7 +1864,7 @@ function SpecsPageContent() {
                         gap: '0.75rem',
                         padding: '0.75rem 1rem',
                         paddingLeft: `${depth * 1.5 + 0.5}rem`,
-                        cursor: 'grab',
+                        cursor: canEdit ? 'grab' : 'default',
                         userSelect: 'none',
                         color: 'var(--text)',
                         background: isDropTargetTemplate ? 'rgba(96, 165, 250, 0.15)' : 'transparent',
@@ -1968,7 +1995,7 @@ function SpecsPageContent() {
                 subtitle="Manage and execute your test specifications and templates."
                 breadcrumb={<WorkflowBreadcrumb />}
                 actions={
-                    activeTab === 'specs' ? (
+                    canEdit && activeTab === 'specs' ? (
                         <>
                             <button
                                 className="btn btn-secondary"
@@ -1983,12 +2010,12 @@ function SpecsPageContent() {
                                 New Spec
                             </Link>
                         </>
-                    ) : (
+                    ) : canEdit ? (
                         <Link href="/templates/new" className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', textDecoration: 'none', padding: '0.6rem 1.25rem' }}>
                             <Plus size={18} />
                             New Template
                         </Link>
-                    )
+                    ) : null
                 }
             />
 
@@ -2080,7 +2107,7 @@ function SpecsPageContent() {
                         .map(node => renderNode(node))}
 
                     {/* Root Drop Zone for Specs */}
-                    {draggedItem && !draggedItem.isTemplate && (
+                    {canEdit && draggedItem && !draggedItem.isTemplate && (
                         <div
                             onDragOver={(e) => {
                                 e.preventDefault();
@@ -2176,7 +2203,7 @@ function SpecsPageContent() {
                         .map(node => renderTemplateNode(node))}
 
                     {/* Root Drop Zone for Templates */}
-                    {draggedItem && draggedItem.isTemplate && (
+                    {canEdit && draggedItem && draggedItem.isTemplate && (
                         <div
                             onDragOver={(e) => {
                                 e.preventDefault();
@@ -2212,7 +2239,7 @@ function SpecsPageContent() {
             )}
 
             {/* Tag Edit Modal */}
-            {tagEditModalOpen && (
+            {canEdit && tagEditModalOpen && (
                 <div className="modal-overlay" onClick={() => setTagEditModalOpen(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '500px' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -2254,7 +2281,7 @@ function SpecsPageContent() {
             )}
 
             {/* Split Multi-Test Spec Modal */}
-            {splitModalOpen && (
+            {canEdit && splitModalOpen && (
                 <div className="modal-overlay" onClick={() => { if (!splitting) { setSplitModalOpen(false); setSplitMode('individual'); setSplitExtractionMethod('ai'); } }}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '500px', maxHeight: '90vh', overflowY: 'auto' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -2480,7 +2507,7 @@ function SpecsPageContent() {
             )}
 
             {/* Delete Spec Modal */}
-            {deleteModalOpen && (
+            {canEdit && deleteModalOpen && (
                 <div className="modal-overlay" onClick={() => !deleting && setDeleteModalOpen(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '520px' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -2568,7 +2595,7 @@ function SpecsPageContent() {
             )}
 
             {/* Delete Folder Modal */}
-            {deleteFolderModalOpen && (
+            {canEdit && deleteFolderModalOpen && (
                 <div className="modal-overlay" onClick={() => !deletingFolder && setDeleteFolderModalOpen(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '450px' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -2661,7 +2688,7 @@ function SpecsPageContent() {
             )}
 
             {/* Create Folder Modal */}
-            {createFolderModalOpen && (
+            {canEdit && createFolderModalOpen && (
                 <div className="modal-overlay" onClick={() => !creatingFolder && setCreateFolderModalOpen(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '450px' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -2730,7 +2757,7 @@ function SpecsPageContent() {
             )}
 
             {/* Run Configuration Modal */}
-            {runModalOpen && (
+            {canEdit && runModalOpen && (
                 <div className="modal-overlay" onClick={() => !isStartingRun && setRunModalOpen(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '450px' }}>
                         <h2 style={{ marginBottom: '1.5rem' }}>Run Configuration</h2>
@@ -2937,7 +2964,7 @@ function SpecsPageContent() {
                     selectedAutomatedCount={selectedAutomatedCount}
                     onClear={clearSelection}
                     label="Specs Selected"
-                    extraControls={renderBrowserAuthSelect(true)}
+                    extraControls={canEdit ? renderBrowserAuthSelect(true) : undefined}
                     actions={[
                         {
                             id: 'export',
@@ -2950,7 +2977,7 @@ function SpecsPageContent() {
                             id: 'testrail',
                             label: `Push to TestRail (${selectedSpecs.size})`,
                             icon: <Upload size={16} />,
-                            hidden: !(trConfigured && trConfig.project_id && trConfig.suite_id),
+                            hidden: !canEdit || !(trConfigured && trConfig.project_id && trConfig.suite_id),
                             onClick: () => { setPushResult(null); setPushModalOpen(true); },
                         },
                         {
@@ -2958,8 +2985,9 @@ function SpecsPageContent() {
                             label: `Run ${selectedAutomatedCount} Automated`,
                             icon: <CheckCircle size={16} />,
                             variant: 'success',
-                            hidden: !(selectedAutomatedCount > 0 && selectedAutomatedCount < selectedSpecs.size),
+                            hidden: !canEdit || !(selectedAutomatedCount > 0 && selectedAutomatedCount < selectedSpecs.size),
                             onClick: async () => {
+                                if (!canEdit) return;
                                 if (!validateBrowserAuthSelection(true)) return;
                                 const automatedSpecs = Array.from(selectedSpecs).filter(name => {
                                     const spec = specs.find(s => s.name === name);
@@ -3001,6 +3029,7 @@ function SpecsPageContent() {
                             id: 'run-all',
                             label: `Run All (${selectedSpecs.size})`,
                             icon: <Play size={16} fill="currentColor" />,
+                            hidden: !canEdit,
                             onClick: handleBulkRun,
                         },
                     ]}
@@ -3082,7 +3111,7 @@ function SpecsPageContent() {
             )}
 
             {/* Push to TestRail Modal */}
-            {pushModalOpen && (
+            {canEdit && pushModalOpen && (
                 <div className="modal-overlay" onClick={() => setPushModalOpen(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '460px' }}>
                         <h3 style={{ marginTop: 0, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

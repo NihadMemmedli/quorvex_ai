@@ -10,6 +10,7 @@ import CodeEditor from '@/components/CodeEditor';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
@@ -122,6 +123,8 @@ export default function SpecDetailPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const { currentProject } = useProject();
+    const { canEdit: canEditProject } = useProjectRole(currentProject?.id ?? null);
+    const canEdit = !currentProject?.id || canEditProject;
 
     const nameParam = params?.name;
     const rawName = Array.isArray(nameParam) ? nameParam.join('/') : (nameParam as string);
@@ -298,7 +301,7 @@ export default function SpecDetailPage() {
     };
 
     const handleSaveGeneratedCode = async () => {
-        if (!generatedCode) return;
+        if (!canEdit || !generatedCode) return;
         setSavingCode(true);
         try {
             const res = await fetch(`${API_BASE}/specs/${activeSpecName}/generated-code${projectParam}`, {
@@ -320,6 +323,7 @@ export default function SpecDetailPage() {
     };
 
     const handleSave = async () => {
+        if (!canEdit) return;
         setSaving(true);
         try {
             const res = await fetch(`${API_BASE}/specs/${activeSpecName}${projectParam}`, {
@@ -343,7 +347,7 @@ export default function SpecDetailPage() {
     };
 
     const runTest = async () => {
-        if (isRunning) return;
+        if (!canEdit || isRunning) return;
 
         setIsRunning(true);
         try {
@@ -407,7 +411,7 @@ export default function SpecDetailPage() {
                         <ArrowLeft size={16} /> Back to Specs
                     </Link>
                 }
-                actions={
+                actions={canEdit ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                         <select
                             aria-label="Browser login session"
@@ -444,7 +448,7 @@ export default function SpecDetailPage() {
                             )}
                         </button>
                     </div>
-                }
+                ) : null}
             />
 
             {isAutomated && (
@@ -492,19 +496,21 @@ export default function SpecDetailPage() {
                                         <Code size={13} />
                                         Code
                                     </button>
-                                    <button
-                                        type="button"
-                                        aria-label="Switch to visual editor"
-                                        onClick={() => { setMode('visual'); setIsEditing(true); }}
-                                        style={segmentButtonStyle(mode === 'visual')}
-                                    >
-                                        <Eye size={13} />
-                                        Visual
-                                    </button>
+                                    {canEdit && (
+                                        <button
+                                            type="button"
+                                            aria-label="Switch to visual editor"
+                                            onClick={() => { setMode('visual'); setIsEditing(true); }}
+                                            style={segmentButtonStyle(mode === 'visual')}
+                                        >
+                                            <Eye size={13} />
+                                            Visual
+                                        </button>
+                                    )}
                                 </div>
                             </div>
 
-                            <div style={editorHeaderActionsStyle}>
+                            {canEdit && <div style={editorHeaderActionsStyle}>
                                 <button
                                     type="button"
                                     className="btn btn-secondary btn-sm"
@@ -536,9 +542,9 @@ export default function SpecDetailPage() {
                                         {saving ? 'Saving...' : <><Save size={14} /> Save</>}
                                     </button>
                                 )}
-                            </div>
+                            </div>}
                         </div>
-                        {showTestDataPanel && (
+                        {canEdit && showTestDataPanel && (
                             <div id="spec-test-data-panel" style={testDataPanelStyle}>
                                 <TestDataPicker
                                     projectId={currentProject?.id}
@@ -605,7 +611,7 @@ export default function SpecDetailPage() {
                                 }}>
                                     <code style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{codePath}</code>
                                     <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                        {isEditingCode ? (
+                                        {canEdit && isEditingCode ? (
                                             <>
                                                 <button
                                                     className="btn btn-secondary btn-sm"
@@ -624,18 +630,18 @@ export default function SpecDetailPage() {
                                                     {savingCode ? 'Saving...' : <><Save size={14} /> Save</>}
                                                 </button>
                                             </>
-                                        ) : (
+                                        ) : canEdit ? (
                                             <button
                                                 className="btn btn-secondary btn-sm"
                                                 onClick={() => setIsEditingCode(true)}
                                             >
                                                 <Edit size={14} /> Edit generated test
                                             </button>
-                                        )}
+                                        ) : null}
                                     </div>
                                 </div>
                                 <div style={{ flex: 1, overflow: 'hidden', position: 'relative', background: 'var(--code-bg)' }}>
-                                    {isEditingCode ? (
+                                    {canEdit && isEditingCode ? (
                                         <div style={{ position: 'absolute', inset: 0 }}>
                                             <CodeEditor
                                                 value={generatedCode || ''}

@@ -14,9 +14,10 @@ import type { Dataset, DatasetCase, DatasetVersion, Provider } from './types';
 
 interface DatasetsTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
-export default function DatasetsTab({ projectId }: DatasetsTabProps) {
+export default function DatasetsTab({ projectId, canEdit }: DatasetsTabProps) {
     const [datasets, setDatasets] = useState<Dataset[]>([]);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [cases, setCases] = useState<DatasetCase[]>([]);
@@ -167,6 +168,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const createDataset = async () => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/datasets`, {
                 method: 'POST',
@@ -189,6 +191,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const deleteDataset = async (id: string) => {
+        if (!canEdit) return;
         try {
             await fetch(`${API_BASE}/llm-testing/datasets/${id}`, { method: 'DELETE' });
             if (selectedId === id) {
@@ -204,7 +207,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const updateDatasetMeta = async () => {
-        if (!selectedId) return;
+        if (!canEdit || !selectedId) return;
         await fetch(`${API_BASE}/llm-testing/datasets/${selectedId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -220,7 +223,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const addCase = async () => {
-        if (!selectedId || !newCase.input_prompt.trim()) return;
+        if (!canEdit || !selectedId || !newCase.input_prompt.trim()) return;
         const assertions: { type: string; value: string }[] = [];
         if (newCase.assertions.trim()) {
             for (const part of newCase.assertions.split(';')) {
@@ -241,7 +244,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const updateCase = async (caseId: number) => {
-        if (!selectedId) return;
+        if (!canEdit || !selectedId) return;
         const assertions: { type: string; value: string }[] = [];
         if (caseForm.assertions.trim()) {
             for (const part of caseForm.assertions.split(';')) {
@@ -260,14 +263,14 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const deleteCase = async (caseId: number) => {
-        if (!selectedId) return;
+        if (!canEdit || !selectedId) return;
         await fetch(`${API_BASE}/llm-testing/datasets/${selectedId}/cases/${caseId}`, { method: 'DELETE' });
         fetchCases(selectedId);
         fetchDatasets();
     };
 
     const bulkDelete = async () => {
-        if (!selectedId || selectedCaseIds.size === 0) return;
+        if (!canEdit || !selectedId || selectedCaseIds.size === 0) return;
         for (const caseId of selectedCaseIds) {
             await fetch(`${API_BASE}/llm-testing/datasets/${selectedId}/cases/${caseId}`, { method: 'DELETE' });
         }
@@ -288,6 +291,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const handleCsvImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!canEdit) return;
         const file = e.target.files?.[0];
         if (!file) return;
         const formData = new FormData();
@@ -307,6 +311,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const importFromSpec = async (specName: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/datasets/from-spec/${specName}?project_id=${projectId}`, { method: 'POST' });
             if (res.ok) {
@@ -339,7 +344,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const convertToSpec = async () => {
-        if (!selectedId) return;
+        if (!canEdit || !selectedId) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/datasets/${selectedId}/to-spec?project_id=${projectId}`, { method: 'POST' });
             if (res.ok) {
@@ -352,7 +357,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const duplicateDataset = async () => {
-        if (!selectedId) return;
+        if (!canEdit || !selectedId) return;
         const res = await fetch(`${API_BASE}/llm-testing/datasets/${selectedId}/duplicate`, { method: 'POST' });
         if (res.ok) {
             const data = await res.json();
@@ -362,6 +367,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const toggleCaseSelect = (id: number) => {
+        if (!canEdit) return;
         setSelectedCaseIds(prev => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id); else next.add(id);
@@ -370,6 +376,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const toggleAllCases = () => {
+        if (!canEdit) return;
         if (selectedCaseIds.size === cases.length) {
             setSelectedCaseIds(new Set());
         } else {
@@ -380,6 +387,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     // Golden toggle
     const toggleGolden = async (dataset: Dataset, e: React.MouseEvent) => {
         e.stopPropagation();
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/datasets/${dataset.id}/golden?is_golden=${!dataset.is_golden}`, { method: 'POST' });
             if (res.ok) {
@@ -396,7 +404,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
 
     // Run dataset
     const startDatasetRun = async () => {
-        if (!selectedId || !runProviderId) return;
+        if (!canEdit || !selectedId || !runProviderId) return;
         setIsRunning(true);
         setRunProgress(null);
         try {
@@ -440,11 +448,12 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
 
     // Compare dataset
     const toggleCompareProvider = (id: string) => {
+        if (!canEdit) return;
         setCompareProviderIds(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
     };
 
     const startDatasetCompare = async () => {
-        if (!selectedId || compareProviderIds.length < 2) return;
+        if (!canEdit || !selectedId || compareProviderIds.length < 2) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/datasets/${selectedId}/compare`, {
                 method: 'POST',
@@ -465,7 +474,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
 
     // AI Augment
     const startAugment = async () => {
-        if (!selectedId) return;
+        if (!canEdit || !selectedId) return;
         setIsAugmenting(true);
         setAugmentResults([]);
         try {
@@ -512,7 +521,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     useEffect(() => { if (!augmentJobId) stopAugmentPoll(); }, [augmentJobId, stopAugmentPoll]);
 
     const acceptAugmented = async () => {
-        if (!selectedId || augmentResults.length === 0) return;
+        if (!canEdit || !selectedId || augmentResults.length === 0) return;
         const selected = augmentResults.filter((_, i) => augmentSelected.has(i));
         if (selected.length === 0) { toast.error('No cases selected'); return; }
         try {
@@ -540,6 +549,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     // Bulk dataset run
     const toggleDatasetSelect = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
+        if (!canEdit) return;
         setSelectedDatasetIds(prev => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id); else next.add(id);
@@ -548,7 +558,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
     };
 
     const startBulkRun = async () => {
-        if (selectedDatasetIds.size === 0 || !bulkRunProviderId) return;
+        if (!canEdit || selectedDatasetIds.size === 0 || !bulkRunProviderId) return;
         for (const dsId of selectedDatasetIds) {
             try {
                 await fetch(`${API_BASE}/llm-testing/datasets/${dsId}/run`, {
@@ -574,15 +584,17 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
             {/* Left Panel - Dataset List */}
             <div style={{ width: '300px', flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', paddingRight: '1rem' }}>
                 {/* Toolbar */}
-                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
-                    <button onClick={() => setShowNewDataset(true)} style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>+ New</button>
-                    <button onClick={() => csvInputRef.current?.click()} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>Import CSV</button>
-                    <button onClick={() => { fetchSpecs(); setShowSpecSelector(true); }} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>From Spec</button>
-                    <input ref={csvInputRef} type="file" accept=".csv" onChange={handleCsvImport} style={{ display: 'none' }} />
-                </div>
+                {canEdit && (
+                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                        <button onClick={() => setShowNewDataset(true)} style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>+ New</button>
+                        <button onClick={() => csvInputRef.current?.click()} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>Import CSV</button>
+                        <button onClick={() => { fetchSpecs(); setShowSpecSelector(true); }} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>From Spec</button>
+                        <input ref={csvInputRef} type="file" accept=".csv" onChange={handleCsvImport} style={{ display: 'none' }} />
+                    </div>
+                )}
 
                 {/* Bulk Run Button */}
-                {selectedDatasetIds.size > 0 && (
+                {canEdit && selectedDatasetIds.size > 0 && (
                     <button onClick={() => { fetchProviders(); setShowBulkRunPanel(true); }}
                         style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem', marginBottom: '0.5rem', background: 'var(--success)' }}>
                         <Play size={14} /> Run Selected ({selectedDatasetIds.size})
@@ -590,7 +602,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                 )}
 
                 {/* Bulk Run Provider Selector */}
-                {showBulkRunPanel && (
+                {canEdit && showBulkRunPanel && (
                     <div style={{ ...cardStyleCompact, marginBottom: '0.5rem' }}>
                         <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.5rem' }}>Select provider for bulk run:</div>
                         <select value={bulkRunProviderId} onChange={e => setBulkRunProviderId(e.target.value)} style={{ ...inputStyle, marginBottom: '0.5rem' }}>
@@ -605,7 +617,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                 )}
 
                 {/* New Dataset Form */}
-                {showNewDataset && (
+                {canEdit && showNewDataset && (
                     <div style={{ ...cardStyleCompact, marginBottom: '0.5rem' }}>
                         <input placeholder="Dataset name" value={newDataset.name} onChange={e => setNewDataset({ ...newDataset, name: e.target.value })} style={{ ...inputStyle, marginBottom: '0.5rem' }} />
                         <input placeholder="Description" value={newDataset.description} onChange={e => setNewDataset({ ...newDataset, description: e.target.value })} style={{ ...inputStyle, marginBottom: '0.5rem' }} />
@@ -618,7 +630,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                 )}
 
                 {/* Spec Selector Modal */}
-                {showSpecSelector && (
+                {canEdit && showSpecSelector && (
                     <div style={{ ...cardStyleCompact, marginBottom: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
                         <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.5rem' }}>Select a spec:</div>
                         {specs.length === 0 && <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>No specs found</div>}
@@ -637,7 +649,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                 <div style={{ flex: 1, overflowY: 'auto' }}>
                     {datasets.length === 0 && (
                         <div style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                            No datasets yet. Create one or import from CSV.
+                            {canEdit ? 'No datasets yet. Create one or import from CSV.' : 'No datasets yet.'}
                         </div>
                     )}
                     {datasets.map(d => (
@@ -652,27 +664,35 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                             }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flex: 1, overflow: 'hidden' }}>
-                                    <input type="checkbox" checked={selectedDatasetIds.has(d.id)}
-                                        onClick={e => e.stopPropagation()}
-                                        onChange={e => toggleDatasetSelect(d.id, e as any)}
-                                        style={{ flexShrink: 0 }} />
-                                    <button onClick={e => toggleGolden(d, e)}
-                                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0, lineHeight: 1 }}
-                                        title={d.is_golden ? 'Remove golden baseline' : 'Mark as golden baseline'}>
-                                        <Star size={14} style={{ color: '#f59e0b', fill: d.is_golden ? '#f59e0b' : 'none' }} />
-                                    </button>
+                                    {canEdit && (
+                                        <input type="checkbox" checked={selectedDatasetIds.has(d.id)}
+                                            onClick={e => e.stopPropagation()}
+                                            onChange={e => toggleDatasetSelect(d.id, e as any)}
+                                            style={{ flexShrink: 0 }} />
+                                    )}
+                                    {canEdit ? (
+                                        <button onClick={e => toggleGolden(d, e)}
+                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0, lineHeight: 1 }}
+                                            title={d.is_golden ? 'Remove golden baseline' : 'Mark as golden baseline'}>
+                                            <Star size={14} style={{ color: '#f59e0b', fill: d.is_golden ? '#f59e0b' : 'none' }} />
+                                        </button>
+                                    ) : d.is_golden ? (
+                                        <Star size={14} style={{ color: '#f59e0b', fill: '#f59e0b', flexShrink: 0 }} />
+                                    ) : null}
                                     <span style={{ fontSize: '0.85rem', fontWeight: selectedId === d.id ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                         {d.name}
                                     </span>
                                 </div>
-                                <button onClick={(e) => {
-                                    e.stopPropagation();
-                                    setConfirmDelete({ open: true, id: d.id, name: d.name });
-                                }}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.9rem', padding: '0 0.25rem', lineHeight: 1 }}
-                                    title="Delete dataset">
-                                    x
-                                </button>
+                                {canEdit && (
+                                    <button onClick={(e) => {
+                                        e.stopPropagation();
+                                        setConfirmDelete({ open: true, id: d.id, name: d.name });
+                                    }}
+                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.9rem', padding: '0 0.25rem', lineHeight: 1 }}
+                                        title="Delete dataset">
+                                        x
+                                    </button>
+                                )}
                             </div>
                             <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem', alignItems: 'center', paddingLeft: '2.5rem' }}>
                                 <span style={{ fontSize: '0.7rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '4px', padding: '0.1rem 0.4rem' }}>
@@ -702,7 +722,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                     <div>
                         {/* Dataset Header */}
                         <div style={{ marginBottom: '1rem' }}>
-                            {editingName ? (
+                            {editingName && canEdit ? (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                     <input value={editName} onChange={e => setEditName(e.target.value)} style={{ ...inputStyle, fontWeight: 600, fontSize: '1.1rem' }} />
                                     <input value={editDesc} onChange={e => setEditDesc(e.target.value)} placeholder="Description" style={inputStyle} />
@@ -715,15 +735,19 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                             ) : (
                                 <div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                        <button onClick={e => toggleGolden(selectedDataset, e)}
-                                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, lineHeight: 1 }}
-                                            title={selectedDataset.is_golden ? 'Remove golden baseline' : 'Mark as golden baseline'}>
-                                            <Star size={18} style={{ color: '#f59e0b', fill: selectedDataset.is_golden ? '#f59e0b' : 'none' }} />
-                                        </button>
-                                        <h2 style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0, cursor: 'pointer' }} onClick={() => setEditingName(true)} title="Click to edit">
+                                        {canEdit ? (
+                                            <button onClick={e => toggleGolden(selectedDataset, e)}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, lineHeight: 1 }}
+                                                title={selectedDataset.is_golden ? 'Remove golden baseline' : 'Mark as golden baseline'}>
+                                                <Star size={18} style={{ color: '#f59e0b', fill: selectedDataset.is_golden ? '#f59e0b' : 'none' }} />
+                                            </button>
+                                        ) : selectedDataset.is_golden ? (
+                                            <Star size={18} style={{ color: '#f59e0b', fill: '#f59e0b' }} />
+                                        ) : null}
+                                        <h2 style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0, cursor: canEdit ? 'pointer' : 'default' }} onClick={() => { if (canEdit) setEditingName(true); }} title={canEdit ? 'Click to edit' : undefined}>
                                             {selectedDataset.name}
                                         </h2>
-                                        <button onClick={() => setEditingName(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>edit</button>
+                                        {canEdit && <button onClick={() => setEditingName(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>edit</button>}
                                     </div>
                                     {selectedDataset.description && <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>{selectedDataset.description}</div>}
                                     {selectedDataset.tags.length > 0 && (
@@ -739,23 +763,27 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
 
                         {/* Action Toolbar */}
                         <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-                            <button onClick={() => { fetchProviders(); setShowRunPanel(!showRunPanel); setShowComparePanel(false); setShowAugmentPanel(false); }}
-                                style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.3rem 0.6rem', background: 'var(--success)' }}>
-                                <Play size={14} /> Run
-                            </button>
-                            <button onClick={() => { fetchProviders(); setShowComparePanel(!showComparePanel); setShowRunPanel(false); setShowAugmentPanel(false); }}
-                                style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>
-                                <GitCompare size={14} /> Compare
-                            </button>
-                            <button onClick={() => { setShowAugmentPanel(!showAugmentPanel); setShowRunPanel(false); setShowComparePanel(false); }}
-                                style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>
-                                <Wand2 size={14} /> AI Augment
-                            </button>
+                            {canEdit && (
+                                <>
+                                    <button onClick={() => { fetchProviders(); setShowRunPanel(!showRunPanel); setShowComparePanel(false); setShowAugmentPanel(false); }}
+                                        style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.3rem 0.6rem', background: 'var(--success)' }}>
+                                        <Play size={14} /> Run
+                                    </button>
+                                    <button onClick={() => { fetchProviders(); setShowComparePanel(!showComparePanel); setShowRunPanel(false); setShowAugmentPanel(false); }}
+                                        style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>
+                                        <GitCompare size={14} /> Compare
+                                    </button>
+                                    <button onClick={() => { setShowAugmentPanel(!showAugmentPanel); setShowRunPanel(false); setShowComparePanel(false); }}
+                                        style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>
+                                        <Wand2 size={14} /> AI Augment
+                                    </button>
+                                </>
+                            )}
                             <button onClick={() => exportDataset('csv')} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>Export CSV</button>
                             <button onClick={() => exportDataset('json')} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>Export JSON</button>
-                            <button onClick={convertToSpec} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>Convert to Spec</button>
-                            <button onClick={duplicateDataset} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>Duplicate</button>
-                            {selectedCaseIds.size > 0 && (
+                            {canEdit && <button onClick={convertToSpec} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>Convert to Spec</button>}
+                            {canEdit && <button onClick={duplicateDataset} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem' }}>Duplicate</button>}
+                            {canEdit && selectedCaseIds.size > 0 && (
                                 <button onClick={() => setConfirmBulkDelete(true)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.3rem 0.6rem', color: 'var(--danger)', borderColor: 'var(--danger)' }}>
                                     Delete Selected ({selectedCaseIds.size})
                                 </button>
@@ -763,7 +791,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                         </div>
 
                         {/* Run Panel */}
-                        {showRunPanel && (
+                        {canEdit && showRunPanel && (
                             <div style={{ ...cardStyleCompact, marginBottom: '0.75rem' }}>
                                 <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>Run Dataset</div>
                                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
@@ -803,7 +831,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                         )}
 
                         {/* Compare Panel */}
-                        {showComparePanel && (
+                        {canEdit && showComparePanel && (
                             <div style={{ ...cardStyleCompact, marginBottom: '0.75rem' }}>
                                 <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>Compare Providers (select 2+)</div>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginBottom: '0.5rem' }}>
@@ -822,7 +850,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                         )}
 
                         {/* AI Augment Panel */}
-                        {showAugmentPanel && (
+                        {canEdit && showAugmentPanel && (
                             <div style={{ ...cardStyleCompact, marginBottom: '0.75rem' }}>
                                 <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>AI Augmentation</div>
                                 <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
@@ -954,19 +982,19 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                                     <thead>
                                         <tr>
                                             <th style={{ ...thStyle, width: '30px' }}>
-                                                <input type="checkbox" checked={cases.length > 0 && selectedCaseIds.size === cases.length} onChange={toggleAllCases} />
+                                                {canEdit && <input type="checkbox" checked={cases.length > 0 && selectedCaseIds.size === cases.length} onChange={toggleAllCases} />}
                                             </th>
                                             <th style={{ ...thStyle, width: '40px' }}>#</th>
                                             <th style={thStyle}>Input Prompt</th>
                                             <th style={thStyle}>Expected Output</th>
                                             <th style={{ ...thStyle, width: '120px' }}>Assertions</th>
-                                            <th style={{ ...thStyle, width: '80px' }}>Actions</th>
+                                            <th style={{ ...thStyle, width: '80px' }}>{canEdit ? 'Actions' : ''}</th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {cases.map(c => (
                                             <tr key={c.id}>
-                                                {expandedCaseId === c.id ? (
+                                                {canEdit && expandedCaseId === c.id ? (
                                                     <td colSpan={6} style={{ ...tdStyle, padding: '0.75rem' }}>
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                                             <label style={{ fontSize: '0.8rem', fontWeight: 500 }}>Input Prompt</label>
@@ -988,11 +1016,11 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                                                 ) : (
                                                     <>
                                                         <td style={tdStyle}>
-                                                            <input type="checkbox" checked={selectedCaseIds.has(c.id)} onChange={() => toggleCaseSelect(c.id)} />
+                                                            {canEdit && <input type="checkbox" checked={selectedCaseIds.has(c.id)} onChange={() => toggleCaseSelect(c.id)} />}
                                                         </td>
                                                         <td style={tdStyle}>{c.case_index + 1}</td>
                                                         <td style={{ ...tdStyle, maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
-                                                            onClick={() => expandCase(c)} title={c.input_prompt}>
+                                                            onClick={() => { if (canEdit) expandCase(c); }} title={c.input_prompt}>
                                                             {c.input_prompt.length > 80 ? c.input_prompt.substring(0, 80) + '...' : c.input_prompt}
                                                         </td>
                                                         <td style={{ ...tdStyle, maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -1007,10 +1035,12 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                                                             ) : '-'}
                                                         </td>
                                                         <td style={tdStyle}>
-                                                            <div style={{ display: 'flex', gap: '0.25rem' }}>
-                                                                <button onClick={() => expandCase(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', fontSize: '0.8rem' }}>edit</button>
-                                                                <button onClick={() => deleteCase(c.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger)', fontSize: '0.8rem' }}>del</button>
-                                                            </div>
+                                                            {canEdit && (
+                                                                <div style={{ display: 'flex', gap: '0.25rem' }}>
+                                                                    <button onClick={() => expandCase(c)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--primary)', fontSize: '0.8rem' }}>edit</button>
+                                                                    <button onClick={() => deleteCase(c.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger)', fontSize: '0.8rem' }}>del</button>
+                                                                </div>
+                                                            )}
                                                         </td>
                                                     </>
                                                 )}
@@ -1020,14 +1050,14 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                                 </table>
                                 {cases.length === 0 && (
                                     <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                        No cases yet. Add one below.
+	                                        {canEdit ? 'No cases yet. Add one below.' : 'No cases yet.'}
                                     </div>
                                 )}
                             </div>
                         )}
 
                         {/* Add Case */}
-                        {showAddCase ? (
+                        {canEdit && showAddCase ? (
                             <div style={{ ...cardStyleCompact, marginTop: '0.75rem' }}>
                                 <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '0.5rem' }}>Add New Case</div>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -1043,9 +1073,9 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
                                     </div>
                                 </div>
                             </div>
-                        ) : (
-                            <button onClick={() => setShowAddCase(true)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem', marginTop: '0.75rem' }}>+ Add Case</button>
-                        )}
+	                        ) : canEdit ? (
+	                            <button onClick={() => setShowAddCase(true)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem', marginTop: '0.75rem' }}>+ Add Case</button>
+	                        ) : null}
 
                         {error && <div style={{ color: 'var(--danger)', marginTop: '0.5rem', fontSize: '0.8rem' }}>{error}</div>}
                     </div>
@@ -1053,7 +1083,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
             </div>
 
             <ConfirmDialog
-                open={confirmDelete.open}
+                open={canEdit && confirmDelete.open}
                 onOpenChange={(open) => setConfirmDelete(s => ({ ...s, open }))}
                 title="Delete Dataset"
                 description={`Delete "${confirmDelete.name}" and all its cases? This action cannot be undone.`}
@@ -1063,7 +1093,7 @@ export default function DatasetsTab({ projectId }: DatasetsTabProps) {
             />
 
             <ConfirmDialog
-                open={confirmBulkDelete}
+                open={canEdit && confirmBulkDelete}
                 onOpenChange={setConfirmBulkDelete}
                 title="Delete Selected Cases"
                 description={`Delete ${selectedCaseIds.size} selected case${selectedCaseIds.size !== 1 ? 's' : ''}? This action cannot be undone.`}

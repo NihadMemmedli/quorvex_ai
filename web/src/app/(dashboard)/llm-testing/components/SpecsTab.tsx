@@ -37,9 +37,10 @@ function formatBytes(bytes: number): string {
 
 interface SpecsTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
-export default function SpecsTab({ projectId }: SpecsTabProps) {
+export default function SpecsTab({ projectId, canEdit }: SpecsTabProps) {
     const [specs, setSpecs] = useState<Spec[]>([]);
     const [loading, setLoading] = useState(true);
     const [editing, setEditing] = useState<string | null>(null);
@@ -84,7 +85,7 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
     }, [projectId]);
 
     const saveSpec = useCallback(async () => {
-        if (!editing) return;
+        if (!canEdit || !editing) return;
         try {
             await fetch(`${API_BASE}/llm-testing/specs/${editing}?project_id=${projectId}`, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
@@ -95,10 +96,10 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
         } catch {
             toast.error('Failed to save spec');
         }
-    }, [editing, content, projectId, fetchSpecs]);
+    }, [editing, content, projectId, fetchSpecs, canEdit]);
 
     const createSpec = useCallback(async () => {
-        if (!newName) return;
+        if (!canEdit || !newName) return;
         try {
             await fetch(`${API_BASE}/llm-testing/specs`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -108,9 +109,10 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
         } catch {
             toast.error('Failed to create spec');
         }
-    }, [newName, projectId, fetchSpecs]);
+    }, [newName, projectId, fetchSpecs, canEdit]);
 
     const deleteSpec = useCallback(async (name: string) => {
+        if (!canEdit) return;
         try {
             await fetch(`${API_BASE}/llm-testing/specs/${name}?project_id=${projectId}`, { method: 'DELETE' });
             if (editing === name) { setEditing(null); setContent(''); setSavedContent(''); }
@@ -119,7 +121,7 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
         } catch {
             toast.error('Failed to delete spec');
         }
-    }, [projectId, editing, fetchSpecs]);
+    }, [projectId, editing, fetchSpecs, canEdit]);
 
     // Poll for AI generation job completion
     const genPollFn = useCallback(async () => {
@@ -153,6 +155,7 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
     }, [genJobId, stopGenPoll]);
 
     const generateWithAI = useCallback(async () => {
+        if (!canEdit) return;
         setGenerating(true);
         try {
             const res = await fetch(`${API_BASE}/llm-testing/generate-suite`, {
@@ -168,7 +171,7 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
             toast.error('Failed to start generation');
             setGenerating(false);
         }
-    }, [genForm, projectId]);
+    }, [genForm, projectId, canEdit]);
 
     const filteredSpecs = specs.filter(s => s.name.toLowerCase().includes(searchQuery.toLowerCase()));
     const hasUnsaved = editing && content !== savedContent;
@@ -177,13 +180,15 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
         <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
                 <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Test Specs</h2>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button onClick={() => setShowGenerate(!showGenerate)} style={btnPrimary}>Generate with AI</button>
-                    <button onClick={() => setShowCreate(!showCreate)} style={btnPrimary}>+ New Spec</button>
-                </div>
+                {canEdit && (
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button onClick={() => setShowGenerate(!showGenerate)} style={btnPrimary}>Generate with AI</button>
+                        <button onClick={() => setShowCreate(!showCreate)} style={btnPrimary}>+ New Spec</button>
+                    </div>
+                )}
             </div>
 
-            {showGenerate && (
+            {canEdit && showGenerate && (
                 <div style={cardStyleCompact}>
                     <h3 style={{ fontWeight: 600, marginBottom: '0.5rem' }}>AI Test Suite Generator</h3>
                     <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)', display: 'block', marginBottom: '0.2rem' }}>System Prompt</label>
@@ -204,7 +209,7 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
                 </div>
             )}
 
-            {showCreate && (
+            {canEdit && showCreate && (
                 <div style={{ ...cardStyleCompact, display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                     <input placeholder="Spec name" value={newName} onChange={e => setNewName(e.target.value)} style={inputStyle} />
                     <button onClick={createSpec} style={btnPrimary} disabled={!newName}>Create</button>
@@ -283,14 +288,18 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
                                                 <Copy size={14} />
                                                 Duplicate
                                             </DropdownMenuItem>
-                                            <DropdownMenuSeparator />
-                                            <DropdownMenuItem
-                                                onClick={() => setConfirmState({ open: true, specName: s.name })}
-                                                style={{ color: 'var(--danger)' }}
-                                            >
-                                                <Trash2 size={14} />
-                                                Delete
-                                            </DropdownMenuItem>
+                                            {canEdit && (
+                                                <>
+                                                    <DropdownMenuSeparator />
+                                                    <DropdownMenuItem
+                                                        onClick={() => setConfirmState({ open: true, specName: s.name })}
+                                                        style={{ color: 'var(--danger)' }}
+                                                    >
+                                                        <Trash2 size={14} />
+                                                        Delete
+                                                    </DropdownMenuItem>
+                                                </>
+                                            )}
                                         </DropdownMenuContent>
                                     </DropdownMenu>
                                 </div>
@@ -323,11 +332,11 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
                     <div style={{ flex: 1 }} onKeyDown={e => {
                         if ((e.metaKey || e.ctrlKey) && e.key === 's') {
                             e.preventDefault();
-                            saveSpec();
+                            if (canEdit) saveSpec();
                         }
                     }}>
-                        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', alignItems: 'center' }}>
-                            {(['markdown', 'visual', 'templates'] as const).map(m => (
+	                        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', alignItems: 'center' }}>
+	                            {(canEdit ? ['markdown', 'visual', 'templates'] as const : ['markdown'] as const).map(m => (
                                 <button key={m} onClick={() => setEditorMode(m)} style={{
                                     padding: '0.4rem 1rem',
                                     borderRadius: 'var(--radius)',
@@ -339,7 +348,7 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
                                     {m === 'markdown' ? 'Markdown' : m === 'visual' ? 'Visual Builder' : 'Templates'}
                                 </button>
                             ))}
-                            {hasUnsaved && (
+	                            {canEdit && hasUnsaved && (
                                 <span style={{
                                     width: 8,
                                     height: 8,
@@ -352,34 +361,36 @@ export default function SpecsTab({ projectId }: SpecsTabProps) {
                         </div>
                         {editorMode === 'markdown' && (
                             <div style={{ height: 500, border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
-                                <CodeEditor value={content} onChange={setContent} language="markdown" />
+                                <CodeEditor value={content} onChange={canEdit ? setContent : () => {}} language="markdown" readOnly={!canEdit} />
                             </div>
                         )}
-                        {editorMode === 'visual' && (
-                            <VisualSpecBuilder content={content} onChange={setContent} />
-                        )}
-                        {editorMode === 'templates' && (
-                            <TemplateGallery onSelect={(md) => { setContent(md); setEditorMode('markdown'); }} />
-                        )}
-                        <button onClick={saveSpec} style={{ ...btnPrimary, marginTop: '0.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
-                            <Save size={14} />
-                            Save
-                        </button>
+	                        {canEdit && editorMode === 'visual' && (
+	                            <VisualSpecBuilder content={content} onChange={setContent} />
+	                        )}
+	                        {canEdit && editorMode === 'templates' && (
+	                            <TemplateGallery onSelect={(md) => { setContent(md); setEditorMode('markdown'); }} />
+	                        )}
+	                        {canEdit && (
+	                            <button onClick={saveSpec} style={{ ...btnPrimary, marginTop: '0.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+	                                <Save size={14} />
+	                                Save
+	                            </button>
+	                        )}
                     </div>
                 ) : (
                     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                         <EmptyState
                             icon={<MousePointerClick size={48} />}
-                            title="Select a spec to start editing"
-                            description="Choose a spec from the sidebar, or create a new one"
-                            action={<button onClick={() => setShowCreate(true)} style={btnPrimary}>Create New Spec</button>}
+                            title="Select a spec to view"
+                            description={canEdit ? 'Choose a spec from the sidebar, or create a new one' : 'Choose a spec from the sidebar'}
+                            action={canEdit ? <button onClick={() => setShowCreate(true)} style={btnPrimary}>Create New Spec</button> : undefined}
                         />
                     </div>
                 )}
             </div>
 
             <ConfirmDialog
-                open={confirmState.open}
+                open={canEdit && confirmState.open}
                 onOpenChange={(open) => setConfirmState(s => ({ ...s, open }))}
                 title="Delete Spec"
                 description={`Are you sure you want to delete "${confirmState.specName}"? This action cannot be undone.`}

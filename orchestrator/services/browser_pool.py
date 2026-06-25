@@ -56,6 +56,16 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _pool_runtime_metadata(pool: object, *, effective_max_browsers: int) -> dict[str, object]:
+    requested = getattr(pool, "requested_max_browsers", effective_max_browsers)
+    return {
+        "requested_max_browsers": requested,
+        "effective_max_browsers": getattr(pool, "effective_max_browsers", effective_max_browsers),
+        "browser_runtime_mode": getattr(pool, "browser_runtime_mode", None),
+        "parallelism_clamp_reason": getattr(pool, "parallelism_clamp_reason", None),
+    }
+
+
 class OperationType(str, Enum):
     """Types of operations that require browser resources."""
 
@@ -449,6 +459,7 @@ class InMemoryBrowserPool(AbstractBrowserPool):
 
         return {
             "max_browsers": self.max_browsers,
+            **_pool_runtime_metadata(self, effective_max_browsers=self.max_browsers),
             "running": len(self._running),
             "queued": len(self._queue),
             "available": max(0, self.max_browsers - len(self._running)),
@@ -859,6 +870,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
 
         return {
             "max_browsers": max_browsers,
+            **_pool_runtime_metadata(self, effective_max_browsers=max_browsers),
             "running": running_count,
             "queued": queue_len,
             "available": max(0, max_browsers - running_count),

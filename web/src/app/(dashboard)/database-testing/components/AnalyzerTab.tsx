@@ -17,9 +17,10 @@ interface AnalyzerTabProps {
     onSpecsSaved: () => void;
     preferredConnectionId?: string;
     initialRunId?: string;
+    canEdit: boolean;
 }
 
-export default function AnalyzerTab({ connections, projectId, onSpecsSaved, preferredConnectionId, initialRunId }: AnalyzerTabProps) {
+export default function AnalyzerTab({ connections, projectId, onSpecsSaved, preferredConnectionId, initialRunId, canEdit }: AnalyzerTabProps) {
     const [analyzerConnId, setAnalyzerConnId] = useState('');
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analyzeJobId, setAnalyzeJobId] = useState<string | null>(null);
@@ -190,6 +191,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
     }, [analyzeJobId, suggestJobId, analyzeRunId, projectId]);
 
     const startAnalysis = async () => {
+        if (!canEdit) return;
         if (!analyzerConnId) return;
         setIsAnalyzing(true);
         setAnalyzeJobStatus(null);
@@ -221,6 +223,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
     };
 
     const generateSuggestions = async () => {
+        if (!canEdit) return;
         if (!analyzeRunId) return;
         setIsGeneratingSuggestions(true);
         setSuggestions([]);
@@ -248,6 +251,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
     };
 
     const saveSuggestionsAsSpec = async () => {
+        if (!canEdit) return;
         if (!analyzeRunId) return;
         const approved = suggestions.filter(s => s.approved);
         if (approved.length === 0) { alert('Select at least one suggestion'); return; }
@@ -270,6 +274,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
     };
 
     const toggleSuggestion = (idx: number) => {
+        if (!canEdit) return;
         setSuggestions(prev => prev.map((s, i) => i === idx ? { ...s, approved: !s.approved } : s));
     };
 
@@ -383,19 +388,21 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                             ))}
                         </select>
                     </div>
-                    <button
-                        onClick={startAnalysis}
-                        disabled={isAnalyzing || !analyzerConnId}
-                        style={{
-                            ...btnPrimary,
-                            minHeight: '40px',
-                            cursor: isAnalyzing || !analyzerConnId ? 'not-allowed' : 'pointer',
-                            background: isAnalyzing || !analyzerConnId ? 'var(--border)' : 'var(--primary)',
-                        }}
-                    >
-                        {isAnalyzing ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Search size={16} />}
-                        {isAnalyzing ? 'Reviewing...' : 'Start AI Review'}
-                    </button>
+                    {canEdit && (
+                        <button
+                            onClick={startAnalysis}
+                            disabled={isAnalyzing || !analyzerConnId}
+                            style={{
+                                ...btnPrimary,
+                                minHeight: '40px',
+                                cursor: isAnalyzing || !analyzerConnId ? 'not-allowed' : 'pointer',
+                                background: isAnalyzing || !analyzerConnId ? 'var(--border)' : 'var(--primary)',
+                            }}
+                        >
+                            {isAnalyzing ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Search size={16} />}
+                            {isAnalyzing ? 'Reviewing...' : 'Start AI Review'}
+                        </button>
+                    )}
                 </div>
 
                 <div style={{
@@ -567,6 +574,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                         </div>
                     )}
 
+                    {canEdit && (
                     <div style={{ marginTop: '1.25rem' }}>
                         <button
                             onClick={generateSuggestions}
@@ -583,6 +591,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                             {isGeneratingSuggestions ? 'Generating checks...' : 'Generate Checks from Findings'}
                         </button>
                     </div>
+                    )}
                 </section>
             )}
 
@@ -595,19 +604,21 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                                 Select the checks you want to keep. Saved checks become runnable database test specs.
                             </p>
                         </div>
-                        <button
-                            onClick={saveSuggestionsAsSpec}
-                            disabled={savingSpec || selectedSuggestionsCount === 0}
-                            style={{
-                                ...btnPrimary,
-                                fontSize: '0.8rem',
-                                cursor: savingSpec || selectedSuggestionsCount === 0 ? 'not-allowed' : 'pointer',
-                                background: savingSpec || selectedSuggestionsCount === 0 ? 'var(--border)' : 'var(--primary)',
-                            }}
-                        >
-                            {savingSpec ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
-                            Save Selected Checks ({selectedSuggestionsCount})
-                        </button>
+                        {canEdit && (
+                            <button
+                                onClick={saveSuggestionsAsSpec}
+                                disabled={savingSpec || selectedSuggestionsCount === 0}
+                                style={{
+                                    ...btnPrimary,
+                                    fontSize: '0.8rem',
+                                    cursor: savingSpec || selectedSuggestionsCount === 0 ? 'not-allowed' : 'pointer',
+                                    background: savingSpec || selectedSuggestionsCount === 0 ? 'var(--border)' : 'var(--primary)',
+                                }}
+                            >
+                                {savingSpec ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
+                                Save Selected Checks ({selectedSuggestionsCount})
+                            </button>
+                        )}
                     </div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
@@ -621,13 +632,15 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                                 gap: '0.75rem',
                                 background: sugg.approved ? 'rgba(59, 130, 246, 0.04)' : 'transparent',
                             }}>
-                                <input
-                                    aria-label={`Select ${sugg.check_name}`}
-                                    type="checkbox"
-                                    checked={Boolean(sugg.approved)}
-                                    onChange={() => toggleSuggestion(idx)}
-                                    style={{ marginTop: '3px', flexShrink: 0 }}
-                                />
+                                {canEdit && (
+                                    <input
+                                        aria-label={`Select ${sugg.check_name}`}
+                                        type="checkbox"
+                                        checked={Boolean(sugg.approved)}
+                                        onChange={() => toggleSuggestion(idx)}
+                                        style={{ marginTop: '3px', flexShrink: 0 }}
+                                    />
+                                )}
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '4px', flexWrap: 'wrap' }}>
                                         <SeverityBadge severity={sugg.severity} />

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { CheckCircle, Clock, Key, Loader2, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Star, Trash2 } from 'lucide-react';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { getAuthHeaders } from '@/lib/styles';
 
@@ -103,6 +104,7 @@ function modeButtonStyle(active: boolean): CSSProperties {
 }
 
 export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsManagerProps) {
+    const { canEdit, isLoading: roleLoading } = useProjectRole(projectId);
     const [sessions, setSessions] = useState<BrowserAuthSession[]>([]);
     const [credentials, setCredentials] = useState<Credential[]>([]);
     const [loading, setLoading] = useState(true);
@@ -132,30 +134,34 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
     const credentialKeys = useMemo(() => credentials.map(item => item.key), [credentials]);
 
     const load = useCallback(async (preserveMessage = false) => {
+        if (roleLoading) return false;
         setLoading(true);
         if (!preserveMessage) setMessage(null);
         try {
             const pid = encodeURIComponent(projectId);
-            const [sessionsRes, credentialsRes] = await Promise.all([
-                fetch(`${API_BASE}/projects/${pid}/browser-auth-sessions`, { headers: getAuthHeaders() }),
-                fetch(`${API_BASE}/projects/${pid}/credentials?include_env=true`, { headers: getAuthHeaders() }),
-            ]);
+            const sessionsRes = await fetch(`${API_BASE}/projects/${pid}/browser-auth-sessions`, { headers: getAuthHeaders() });
             if (!sessionsRes.ok) {
                 throw new Error(await readApiError(sessionsRes, 'Failed to load browser login sessions'));
             }
-            if (!credentialsRes.ok) {
-                throw new Error(await readApiError(credentialsRes, 'Failed to load credential keys'));
-            }
             const sessionsData = await sessionsRes.json();
-            const credentialsData = await credentialsRes.json();
-            const loadedCredentials = credentialsData.credentials || [];
+            let loadedCredentials: Credential[] = [];
+            if (canEdit) {
+                const credentialsRes = await fetch(`${API_BASE}/projects/${pid}/credentials?include_env=true`, { headers: getAuthHeaders() });
+                if (!credentialsRes.ok) {
+                    throw new Error(await readApiError(credentialsRes, 'Failed to load credential keys'));
+                }
+                const credentialsData = await credentialsRes.json();
+                loadedCredentials = credentialsData.credentials || [];
+            }
             setSessions(sessionsData.sessions || []);
             setCredentials(loadedCredentials);
-            setForm(prev => ({
-                ...prev,
-                username_key: prev.username_key || loadedCredentials.find((item: Credential) => /USER|EMAIL|LOGIN/i.test(item.key))?.key || '',
-                password_key: prev.password_key || loadedCredentials.find((item: Credential) => /PASSWORD/i.test(item.key))?.key || '',
-            }));
+            if (canEdit) {
+                setForm(prev => ({
+                    ...prev,
+                    username_key: prev.username_key || loadedCredentials.find((item: Credential) => /USER|EMAIL|LOGIN/i.test(item.key))?.key || '',
+                    password_key: prev.password_key || loadedCredentials.find((item: Credential) => /PASSWORD/i.test(item.key))?.key || '',
+                }));
+            }
             return true;
         } catch (err: any) {
             setMessage({ type: 'error', text: err.message || 'Failed to load browser login sessions' });
@@ -163,13 +169,16 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
         } finally {
             setLoading(false);
         }
-    }, [projectId]);
+    }, [canEdit, projectId, roleLoading]);
 
     useEffect(() => {
         load();
     }, [load]);
 
     const saveCredential = async (key: string, value: string) => {
+        if (!canEdit) {
+            throw new Error('Read-only access cannot save credentials.');
+        }
         const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/credentials`, {
             method: 'POST',
             headers: jsonHeaders(),
@@ -180,6 +189,10 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
 
     const createSession = async (event: React.FormEvent) => {
         event.preventDefault();
+        if (!canEdit) {
+            setMessage({ type: 'error', text: 'Read-only access cannot create browser login sessions.' });
+            return;
+        }
         const baseUrl = form.base_url.trim();
         const loginUrl = form.login_url.trim();
         const usernameKey = credentialMode === 'direct' ? form.direct_username_key.trim() : form.username_key;
@@ -251,6 +264,10 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
     };
 
     const runSessionAction = async (id: string, action: SessionAction) => {
+        if (!canEdit) {
+            setMessage({ type: 'error', text: 'Read-only access cannot modify browser login sessions.' });
+            return;
+        }
         setBusyId(id);
         setBusyAction(action);
         setMessage(null);
@@ -276,7 +293,7 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
         }
     };
 
-    if (loading) {
+    if (loading || roleLoading) {
         return (
             <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}>
                 <div className="loading-spinner" />
@@ -301,6 +318,19 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
                 </div>
             </div>
 
+            {!canEdit && (
+                <div style={{
+                    padding: '1rem',
+                    borderRadius: 'var(--radius)',
+                    background: 'rgba(100, 116, 139, 0.1)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-secondary)',
+                    fontSize: '0.875rem'
+                }}>
+                    You have read-only access to this project. Browser login sessions are visible, but create, validate, refresh, default, revoke, and credential-save actions are disabled.
+                </div>
+            )}
+
             {message && (
                 <div style={{
                     padding: '1rem',
@@ -317,93 +347,95 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
                 </div>
             )}
 
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                <button
-                    type="button"
-                    className="btn"
-                    aria-pressed={credentialMode === 'existing'}
-                    onClick={() => setCredentialMode('existing')}
-                    style={modeButtonStyle(credentialMode === 'existing')}
-                >
-                    Use existing keys
-                </button>
-                <button
-                    type="button"
-                    className="btn"
-                    aria-pressed={credentialMode === 'direct'}
-                    onClick={() => setCredentialMode('direct')}
-                    style={modeButtonStyle(credentialMode === 'direct')}
-                >
-                    Enter credentials
-                </button>
-            </div>
+            {canEdit && (
+                <>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                            type="button"
+                            className="btn"
+                            aria-pressed={credentialMode === 'existing'}
+                            onClick={() => setCredentialMode('existing')}
+                            style={modeButtonStyle(credentialMode === 'existing')}
+                        >
+                            Use existing keys
+                        </button>
+                        <button
+                            type="button"
+                            className="btn"
+                            aria-pressed={credentialMode === 'direct'}
+                            onClick={() => setCredentialMode('direct')}
+                            style={modeButtonStyle(credentialMode === 'direct')}
+                        >
+                            Enter credentials
+                        </button>
+                    </div>
 
-            <form onSubmit={createSession} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', alignItems: 'end' }}>
-                    <div className="form-group">
-                        <label className="label">Name</label>
-                        <input className="input" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Staging login" />
-                    </div>
-                    <div className="form-group">
-                        <label className="label">Base URL</label>
-                        <input className="input" value={form.base_url} onChange={e => setForm({ ...form, base_url: e.target.value })} placeholder="https://app.example.com" />
-                    </div>
-                    <div className="form-group">
-                        <label className="label">Login URL</label>
-                        <input className="input" value={form.login_url} onChange={e => setForm({ ...form, login_url: e.target.value })} placeholder="https://app.example.com/login" />
-                    </div>
-                    {credentialMode === 'existing' ? (
-                        <>
+                    <form onSubmit={createSession} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', alignItems: 'end' }}>
                             <div className="form-group">
-                                <label className="label">Username Key</label>
-                                <select className="input" value={form.username_key} onChange={e => setForm({ ...form, username_key: e.target.value })}>
-                                    <option value="">Select key</option>
-                                    {credentials.map(credential => <option key={credential.key} value={credential.key}>{credential.key} ({credential.source})</option>)}
-                                </select>
+                                <label className="label">Name</label>
+                                <input className="input" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Staging login" />
                             </div>
                             <div className="form-group">
-                                <label className="label">Password Key</label>
-                                <select className="input" value={form.password_key} onChange={e => setForm({ ...form, password_key: e.target.value })}>
-                                    <option value="">Select key</option>
-                                    {credentials.map(credential => <option key={credential.key} value={credential.key}>{credential.key} ({credential.source})</option>)}
-                                </select>
-                            </div>
-                        </>
-                    ) : (
-                        <>
-                            <div className="form-group">
-                                <label className="label">Username</label>
-                                <input className="input" value={form.username_value} onChange={e => setForm({ ...form, username_value: e.target.value })} placeholder="user@example.com" autoComplete="username" />
+                                <label className="label">Base URL</label>
+                                <input className="input" value={form.base_url} onChange={e => setForm({ ...form, base_url: e.target.value })} placeholder="https://app.example.com" />
                             </div>
                             <div className="form-group">
-                                <label className="label">Password</label>
-                                <input className="input" type="password" value={form.password_value} onChange={e => setForm({ ...form, password_value: e.target.value })} placeholder="Password" autoComplete="current-password" />
+                                <label className="label">Login URL</label>
+                                <input className="input" value={form.login_url} onChange={e => setForm({ ...form, login_url: e.target.value })} placeholder="https://app.example.com/login" />
                             </div>
-                            <div className="form-group">
-                                <label className="label">Username Key</label>
-                                <input className="input" value={form.direct_username_key} onChange={e => setForm({ ...form, direct_username_key: e.target.value })} placeholder="LOGIN_USERNAME" autoComplete="off" />
-                            </div>
-                            <div className="form-group">
-                                <label className="label">Password Key</label>
-                                <input className="input" value={form.direct_password_key} onChange={e => setForm({ ...form, direct_password_key: e.target.value })} placeholder="LOGIN_PASSWORD" autoComplete="off" />
-                            </div>
-                        </>
-                    )}
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minHeight: 42 }}>
-                        <input type="checkbox" checked={form.make_default} onChange={e => setForm({ ...form, make_default: e.target.checked })} />
-                        <span style={{ fontSize: '0.875rem' }}>Default</span>
-                    </label>
-                    <button className="btn btn-primary" type="submit" disabled={saving || (credentialMode === 'existing' && !credentialKeys.length)} style={{ minHeight: 42, justifyContent: 'center' }}>
-                        {saving ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
-                        {saving ? 'Creating session...' : 'Create'}
-                    </button>
-                </div>
-                <details style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '0.875rem 1rem', background: 'var(--surface)' }}>
-                    <summary style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600 }}>
-                        <SlidersHorizontal size={16} />
-                        Advanced selectors
-                    </summary>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginTop: '1rem' }}>
+                            {credentialMode === 'existing' ? (
+                                <>
+                                    <div className="form-group">
+                                        <label className="label">Username Key</label>
+                                        <select className="input" value={form.username_key} onChange={e => setForm({ ...form, username_key: e.target.value })}>
+                                            <option value="">Select key</option>
+                                            {credentials.map(credential => <option key={credential.key} value={credential.key}>{credential.key} ({credential.source})</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="label">Password Key</label>
+                                        <select className="input" value={form.password_key} onChange={e => setForm({ ...form, password_key: e.target.value })}>
+                                            <option value="">Select key</option>
+                                            {credentials.map(credential => <option key={credential.key} value={credential.key}>{credential.key} ({credential.source})</option>)}
+                                        </select>
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="form-group">
+                                        <label className="label">Username</label>
+                                        <input className="input" value={form.username_value} onChange={e => setForm({ ...form, username_value: e.target.value })} placeholder="user@example.com" autoComplete="username" />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="label">Password</label>
+                                        <input className="input" type="password" value={form.password_value} onChange={e => setForm({ ...form, password_value: e.target.value })} placeholder="Password" autoComplete="current-password" />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="label">Username Key</label>
+                                        <input className="input" value={form.direct_username_key} onChange={e => setForm({ ...form, direct_username_key: e.target.value })} placeholder="LOGIN_USERNAME" autoComplete="off" />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="label">Password Key</label>
+                                        <input className="input" value={form.direct_password_key} onChange={e => setForm({ ...form, direct_password_key: e.target.value })} placeholder="LOGIN_PASSWORD" autoComplete="off" />
+                                    </div>
+                                </>
+                            )}
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minHeight: 42 }}>
+                                <input type="checkbox" checked={form.make_default} onChange={e => setForm({ ...form, make_default: e.target.checked })} />
+                                <span style={{ fontSize: '0.875rem' }}>Default</span>
+                            </label>
+                            <button className="btn btn-primary" type="submit" disabled={saving || (credentialMode === 'existing' && !credentialKeys.length)} style={{ minHeight: 42, justifyContent: 'center' }}>
+                                {saving ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
+                                {saving ? 'Creating session...' : 'Create'}
+                            </button>
+                        </div>
+                        <details style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '0.875rem 1rem', background: 'var(--surface)' }}>
+                            <summary style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600 }}>
+                                <SlidersHorizontal size={16} />
+                                Advanced selectors
+                            </summary>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginTop: '1rem' }}>
                         <div className="form-group">
                             <label className="label">Username Selector</label>
                             <input className="input" value={form.username_selector} onChange={e => setForm({ ...form, username_selector: e.target.value })} placeholder="#email" autoComplete="off" />
@@ -424,9 +456,11 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
                             <label className="label">Success URL Pattern</label>
                             <input className="input" value={form.success_url_pattern} onChange={e => setForm({ ...form, success_url_pattern: e.target.value })} placeholder="/dashboard$" autoComplete="off" />
                         </div>
-                    </div>
-                </details>
-            </form>
+                            </div>
+                        </details>
+                    </form>
+                </>
+            )}
 
             <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
                 {sessions.length === 0 ? (
@@ -461,24 +495,26 @@ export function BrowserAuthSessionsManager({ projectId }: BrowserAuthSessionsMan
                                     </div>
                                 )}
                             </div>
-                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                                <button className="btn btn-sm browser-auth-action browser-auth-action--validate" type="button" disabled={busyId === session.id} onClick={() => runSessionAction(session.id, 'validate')} title="Validate stored state" aria-label={`Validate ${session.name}`}>
-                                    {busyId === session.id && busyAction === 'validate' ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
-                                    <span>Validate</span>
-                                </button>
-                                <button className="btn btn-sm browser-auth-action browser-auth-action--refresh" type="button" disabled={busyId === session.id} onClick={() => runSessionAction(session.id, 'refresh')} title="Refresh with AI browser capture" aria-label={`Refresh ${session.name}`}>
-                                    {busyId === session.id && busyAction === 'refresh' ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                                    <span>{busyId === session.id && busyAction === 'refresh' ? 'Refreshing' : 'Refresh'}</span>
-                                </button>
-                                <button className="btn btn-sm browser-auth-action browser-auth-action--default" type="button" disabled={busyId === session.id || session.is_default} onClick={() => runSessionAction(session.id, 'default')} title="Set default" aria-label={`Set ${session.name} as default`}>
-                                    {busyId === session.id && busyAction === 'default' ? <Loader2 size={16} className="animate-spin" /> : <Star size={16} />}
-                                    <span>Default</span>
-                                </button>
-                                <button className="btn btn-sm browser-auth-action browser-auth-action--revoke" type="button" disabled={busyId === session.id} onClick={() => runSessionAction(session.id, 'delete')} title="Revoke" aria-label={`Revoke ${session.name}`}>
-                                    {busyId === session.id && busyAction === 'delete' ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                                    <span>Revoke</span>
-                                </button>
-                            </div>
+                            {canEdit && (
+                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                    <button className="btn btn-sm browser-auth-action browser-auth-action--validate" type="button" disabled={busyId === session.id} onClick={() => runSessionAction(session.id, 'validate')} title="Validate stored state" aria-label={`Validate ${session.name}`}>
+                                        {busyId === session.id && busyAction === 'validate' ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}
+                                        <span>Validate</span>
+                                    </button>
+                                    <button className="btn btn-sm browser-auth-action browser-auth-action--refresh" type="button" disabled={busyId === session.id} onClick={() => runSessionAction(session.id, 'refresh')} title="Refresh with AI browser capture" aria-label={`Refresh ${session.name}`}>
+                                        {busyId === session.id && busyAction === 'refresh' ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                                        <span>{busyId === session.id && busyAction === 'refresh' ? 'Refreshing' : 'Refresh'}</span>
+                                    </button>
+                                    <button className="btn btn-sm browser-auth-action browser-auth-action--default" type="button" disabled={busyId === session.id || session.is_default} onClick={() => runSessionAction(session.id, 'default')} title="Set default" aria-label={`Set ${session.name} as default`}>
+                                        {busyId === session.id && busyAction === 'default' ? <Loader2 size={16} className="animate-spin" /> : <Star size={16} />}
+                                        <span>Default</span>
+                                    </button>
+                                    <button className="btn btn-sm browser-auth-action browser-auth-action--revoke" type="button" disabled={busyId === session.id} onClick={() => runSessionAction(session.id, 'delete')} title="Revoke" aria-label={`Revoke ${session.name}`}>
+                                        {busyId === session.id && busyAction === 'delete' ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                        <span>Revoke</span>
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     ))
                 )}

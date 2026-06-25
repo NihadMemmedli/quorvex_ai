@@ -6,6 +6,7 @@ import { Switch } from '@/components/ui/switch';
 import type { TestResult } from './types';
 
 interface TestGenerationPanelProps {
+    canEdit: boolean;
     generatedSpecs: string[];
     onGenerateTests: () => void;
     testResults: TestResult[];
@@ -15,6 +16,7 @@ interface TestGenerationPanelProps {
 }
 
 export function TestGenerationPanel({
+    canEdit,
     generatedSpecs,
     onGenerateTests,
     testResults,
@@ -58,93 +60,96 @@ export function TestGenerationPanel({
                 </p>
             </div>
 
-            {/* AI-Powered Generation Toggle */}
-            <div
-                className="flex items-center justify-between p-3 rounded-lg mb-4 mt-4"
-                style={{
-                    background: 'rgba(255,255,255,0.02)',
-                    border: '1px solid rgba(255,255,255,0.06)',
-                }}
-            >
-                <div className="flex items-center gap-3">
-                    <div
-                        className="p-1.5 rounded-lg transition-all duration-300"
-                        style={{
-                            background: useNativeAgents ? 'rgba(251,191,36,0.2)' : 'rgba(100,116,139,0.1)',
-                            color: useNativeAgents ? '#facc15' : 'var(--text-tertiary)',
-                            boxShadow: useNativeAgents ? '0 0 12px rgba(251,191,36,0.2)' : 'none',
-                        }}
-                    >
-                        <Zap size={16} />
+            {canEdit && (
+                <div
+                    className="flex items-center justify-between p-3 rounded-lg mb-4 mt-4"
+                    style={{
+                        background: 'rgba(255,255,255,0.02)',
+                        border: '1px solid rgba(255,255,255,0.06)',
+                    }}
+                >
+                    <div className="flex items-center gap-3">
+                        <div
+                            className="p-1.5 rounded-lg transition-all duration-300"
+                            style={{
+                                background: useNativeAgents ? 'rgba(251,191,36,0.2)' : 'rgba(100,116,139,0.1)',
+                                color: useNativeAgents ? '#facc15' : 'var(--text-tertiary)',
+                                boxShadow: useNativeAgents ? '0 0 12px rgba(251,191,36,0.2)' : 'none',
+                            }}
+                        >
+                            <Zap size={16} />
+                        </div>
+                        <div className="flex flex-col">
+                            <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>
+                                AI-Powered Generation
+                            </span>
+                            <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+                                {useNativeAgents
+                                    ? 'Live browser generation & intelligent repair'
+                                    : 'Static code generation only'}
+                            </span>
+                        </div>
                     </div>
-                    <div className="flex flex-col">
-                        <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>
-                            AI-Powered Generation
-                        </span>
-                        <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
-                            {useNativeAgents
-                                ? 'Live browser generation & intelligent repair'
-                                : 'Static code generation only'}
-                        </span>
-                    </div>
+                    <Switch
+                        checked={useNativeAgents}
+                        onCheckedChange={onToggleNativeAgents}
+                    />
                 </div>
-                <Switch
-                    checked={useNativeAgents}
-                    onCheckedChange={onToggleNativeAgents}
-                />
-            </div>
+            )}
 
             {/* Action Button */}
-            <button
-                onClick={onGenerateTests}
-                disabled={isRunning || isComplete}
-                className="w-full h-[52px] rounded-lg font-semibold text-base transition-all duration-300 relative overflow-hidden disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                style={
-                    isComplete
-                        ? {
-                              background: 'linear-gradient(135deg, #16a34a, #34d399)',
-                              color: '#fff',
-                              cursor: 'default',
-                          }
-                        : isRunning
-                          ? {
-                                background: 'var(--primary)',
-                                color: '#fff',
-                            }
-                          : {
-                                background: 'linear-gradient(135deg, var(--primary), #2563eb)',
-                                color: '#fff',
-                                boxShadow: '0 0 20px rgba(59,130,246,0.2)',
-                            }
-                }
-                onMouseEnter={(e) => {
-                    if (!isRunning && !isComplete) {
-                        e.currentTarget.style.boxShadow = '0 0 30px rgba(59,130,246,0.3)';
-                        e.currentTarget.style.transform = 'translateY(-1px)';
+            {canEdit && (
+                <button
+                    onClick={onGenerateTests}
+                    disabled={isRunning || isComplete}
+                    className="w-full h-[52px] rounded-lg font-semibold text-base transition-all duration-300 relative overflow-hidden disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    style={
+                        isComplete
+                            ? {
+                                  background: 'linear-gradient(135deg, #16a34a, #34d399)',
+                                  color: '#fff',
+                                  cursor: 'default',
+                              }
+                            : isRunning
+                              ? {
+                                    background: 'var(--primary)',
+                                    color: '#fff',
+                                }
+                              : {
+                                    background: 'linear-gradient(135deg, var(--primary), #2563eb)',
+                                    color: '#fff',
+                                    boxShadow: '0 0 20px rgba(59,130,246,0.2)',
+                                }
                     }
-                }}
-                onMouseLeave={(e) => {
-                    if (!isRunning && !isComplete) {
-                        e.currentTarget.style.boxShadow = '0 0 20px rgba(59,130,246,0.2)';
-                        e.currentTarget.style.transform = 'translateY(0)';
-                    }
-                }}
-            >
-                {isRunning ? (
-                    <>
-                        Generating Code <Loader2 className="h-4 w-4 animate-spin" />
-                    </>
-                ) : isComplete ? (
-                    <>
-                        Tests Generated <CheckCircle className="h-4 w-4" />
-                    </>
-                ) : (
-                    <>
-                        Generate Code <Play className="h-4 w-4" />
-                    </>
-                )}
-                {isRunning && <div className="absolute inset-0 progress-shimmer" />}
-            </button>
+                    onMouseEnter={(e) => {
+                        if (!isRunning && !isComplete) {
+                            e.currentTarget.style.boxShadow = '0 0 30px rgba(59,130,246,0.3)';
+                            e.currentTarget.style.transform = 'translateY(-1px)';
+                        }
+                    }}
+                    onMouseLeave={(e) => {
+                        if (!isRunning && !isComplete) {
+                            e.currentTarget.style.boxShadow = '0 0 20px rgba(59,130,246,0.2)';
+                            e.currentTarget.style.transform = 'translateY(0)';
+                        }
+                    }}
+                >
+                    {isRunning ? (
+                        <>
+                            Generating Code <Loader2 className="h-4 w-4 animate-spin" />
+                        </>
+                    ) : isComplete ? (
+                        <>
+                            Tests Generated <CheckCircle className="h-4 w-4" />
+                        </>
+                    ) : (
+                        <>
+                            Generate Code <Play className="h-4 w-4" />
+                        </>
+                    )}
+                    {isRunning && <div className="absolute inset-0 progress-shimmer" />}
+                </button>
+            )}
 
             {/* Results List */}
             {testResults.length > 0 && (

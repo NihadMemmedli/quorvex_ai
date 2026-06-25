@@ -13,6 +13,7 @@ import type { Provider, Dataset, LlmSchedule, LlmScheduleExecution } from './typ
 
 interface SchedulesTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
 const COMMON_TIMEZONES = [
@@ -49,7 +50,7 @@ function cronToHuman(cron: string): string {
     return cron;
 }
 
-export default function SchedulesTab({ projectId }: SchedulesTabProps) {
+export default function SchedulesTab({ projectId, canEdit }: SchedulesTabProps) {
     const [schedules, setSchedules] = useState<LlmSchedule[]>([]);
     const [providers, setProviders] = useState<Provider[]>([]);
     const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -107,14 +108,17 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
     }, [providers]);
 
     const toggleFormProvider = (id: string) => {
+        if (!canEdit) return;
         setFormProviderIds(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
     };
 
     const toggleEditProvider = (id: string) => {
+        if (!canEdit) return;
         setEditProviderIds(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
     };
 
     const createSchedule = async () => {
+        if (!canEdit) return;
         if (!formName.trim() || !formDatasetId || formProviderIds.length === 0 || !formCron.trim()) {
             toast.error('Please fill in all required fields');
             return;
@@ -157,6 +161,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
     };
 
     const toggleEnabled = async (schedule: LlmSchedule) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/schedules/${schedule.id}`, {
                 method: 'PUT',
@@ -176,6 +181,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
     };
 
     const deleteSchedule = async (id: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/schedules/${id}`, { method: 'DELETE' });
             if (res.ok) {
@@ -202,6 +208,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
     };
 
     const runNow = async (scheduleId: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/schedules/${scheduleId}/run`, { method: 'POST' });
             if (res.ok) {
@@ -220,6 +227,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
     };
 
     const startEdit = (schedule: LlmSchedule) => {
+        if (!canEdit) return;
         setEditMode(true);
         setEditName(schedule.name);
         setEditCron(schedule.cron_expression);
@@ -230,6 +238,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
     };
 
     const saveEdit = async () => {
+        if (!canEdit) return;
         if (!selectedSchedule) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/schedules/${selectedSchedule.id}`, {
@@ -272,7 +281,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
                 </button>
 
                 <div style={{ ...cardStyleCompact, marginBottom: '1rem' }}>
-                    {editMode ? (
+                    {canEdit && editMode ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                             <div>
                                 <label style={labelStyle}>Name</label>
@@ -325,15 +334,17 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
                         <div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                                 <h2 style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0 }}>{selectedSchedule.name}</h2>
-                                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                    <button onClick={() => runNow(selectedSchedule.id)} style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem', background: 'var(--success)' }}>
-                                        <Play size={14} /> Run Now
-                                    </button>
-                                    <button onClick={() => startEdit(selectedSchedule)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>Edit</button>
-                                    <button onClick={() => toggleEnabled(selectedSchedule)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>
-                                        {selectedSchedule.enabled ? <><Pause size={14} /> Pause</> : <><Play size={14} /> Enable</>}
-                                    </button>
-                                </div>
+                                {canEdit && (
+                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                        <button onClick={() => runNow(selectedSchedule.id)} style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem', background: 'var(--success)' }}>
+                                            <Play size={14} /> Run Now
+                                        </button>
+                                        <button onClick={() => startEdit(selectedSchedule)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>Edit</button>
+                                        <button onClick={() => toggleEnabled(selectedSchedule)} style={{ ...btnSecondary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>
+                                            {selectedSchedule.enabled ? <><Pause size={14} /> Pause</> : <><Play size={14} /> Enable</>}
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '0.5rem', fontSize: '0.85rem' }}>
                                 <div><span style={{ color: 'var(--text-secondary)' }}>Dataset:</span> {selectedSchedule.dataset_name || selectedSchedule.dataset_id}</div>
@@ -417,13 +428,15 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
         <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <h2 style={{ fontSize: '1.1rem', fontWeight: 600, margin: 0 }}>Schedules</h2>
-                <button onClick={() => setShowCreate(!showCreate)} style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>
-                    <Plus size={14} /> New Schedule
-                </button>
+                {canEdit && (
+                    <button onClick={() => setShowCreate(!showCreate)} style={{ ...btnPrimary, fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}>
+                        <Plus size={14} /> New Schedule
+                    </button>
+                )}
             </div>
 
             {/* Create Form */}
-            {showCreate && (
+            {canEdit && showCreate && (
                 <div style={{ ...cardStyleCompact, marginBottom: '1rem' }}>
                     <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>Create Schedule</h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -492,7 +505,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
             {/* Schedule List */}
             {schedules.length === 0 ? (
                 <div style={{ ...cardStyleCompact, textAlign: 'center', color: 'var(--text-secondary)', padding: '2rem' }}>
-                    No schedules yet. Create one to automate recurring test runs.
+                    {canEdit ? 'No schedules yet. Create one to automate recurring test runs.' : 'No schedules yet.'}
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -527,27 +540,31 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
                                     }}>
                                         {s.enabled ? 'Active' : 'Paused'}
                                     </span>
-                                    <button
-                                        onClick={e => { e.stopPropagation(); toggleEnabled(s); }}
-                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '0.2rem' }}
-                                        title={s.enabled ? 'Pause' : 'Enable'}
-                                    >
-                                        {s.enabled ? <Pause size={14} /> : <Play size={14} />}
-                                    </button>
-                                    <button
-                                        onClick={e => { e.stopPropagation(); runNow(s.id); }}
-                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--success)', padding: '0.2rem' }}
-                                        title="Run Now"
-                                    >
-                                        <Play size={14} />
-                                    </button>
-                                    <button
-                                        onClick={e => { e.stopPropagation(); setConfirmDelete({ open: true, id: s.id, name: s.name }); }}
-                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '0.2rem' }}
-                                        title="Delete"
-                                    >
-                                        <Trash2 size={14} />
-                                    </button>
+                                    {canEdit && (
+                                        <>
+                                            <button
+                                                onClick={e => { e.stopPropagation(); toggleEnabled(s); }}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '0.2rem' }}
+                                                title={s.enabled ? 'Pause' : 'Enable'}
+                                            >
+                                                {s.enabled ? <Pause size={14} /> : <Play size={14} />}
+                                            </button>
+                                            <button
+                                                onClick={e => { e.stopPropagation(); runNow(s.id); }}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--success)', padding: '0.2rem' }}
+                                                title="Run Now"
+                                            >
+                                                <Play size={14} />
+                                            </button>
+                                            <button
+                                                onClick={e => { e.stopPropagation(); setConfirmDelete({ open: true, id: s.id, name: s.name }); }}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '0.2rem' }}
+                                                title="Delete"
+                                            >
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                             <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.35rem', flexWrap: 'wrap' }}>
@@ -572,7 +589,7 @@ export default function SchedulesTab({ projectId }: SchedulesTabProps) {
             )}
 
             <ConfirmDialog
-                open={confirmDelete.open}
+                open={canEdit && confirmDelete.open}
                 onOpenChange={open => setConfirmDelete(s => ({ ...s, open }))}
                 title="Delete Schedule"
                 description={`Delete schedule "${confirmDelete.name}"? This action cannot be undone.`}

@@ -978,7 +978,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'high',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/autopilot/${args.sessionId}/pause`,
+    getPath: (args) => `/autopilot/${encodeURIComponent(String(args.sessionId))}/pause`,
   },
   resumeAutoPilot: {
     label: 'Resume Auto Pilot',
@@ -986,7 +986,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/autopilot/${args.sessionId}/resume`,
+    getPath: (args) => `/autopilot/${encodeURIComponent(String(args.sessionId))}/resume`,
   },
   answerAutoPilotQuestion: {
     label: 'Answer Auto Pilot Question',
@@ -994,7 +994,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/autopilot/${args.sessionId}/answer`,
+    getPath: (args) => `/autopilot/${encodeURIComponent(String(args.sessionId))}/answer`,
     getBody: (args) => ({
       question_id: args.questionId,
       answer_text: args.answer,
@@ -1006,7 +1006,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'high',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/autopilot/${args.sessionId}/test-tasks/${args.taskId}/stop`,
+    getPath: (args) => `/autopilot/${encodeURIComponent(String(args.sessionId))}/test-tasks/${encodeURIComponent(String(args.taskId))}/stop`,
   },
   cancelAutoPilot: {
     label: 'Cancel Auto Pilot',
@@ -1014,7 +1014,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'destructive',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/autopilot/${args.sessionId}/cancel`,
+    getPath: (args) => `/autopilot/${encodeURIComponent(String(args.sessionId))}/cancel`,
   },
   createWorkflow: {
     label: 'Create Custom Workflow',

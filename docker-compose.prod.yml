@@ -3,13 +3,16 @@ x-backend-slim: &backend-slim
   build:
     context: .
     dockerfile: docker/backend-slim/Dockerfile
+    args:
+      INSTALL_NUCLEI: ${INSTALL_NUCLEI:-false}
 
 services:
   # ==========================================
   # Browser Workers (Phase 2: Docker Isolation)
   # ==========================================
-  # Isolated Playwright browser containers for parallel test execution.
-  # Each worker runs in its own container with crash isolation.
+  # Placeholder isolated Playwright browser containers.
+  # Classic generated test runs are executed by the backend runtime today; scaling
+  # this service does not distribute those runs until a queue consumer is wired in.
   # Scale with: docker-compose up -d --scale browser-workers=8
   browser-workers:
     image: ${QUORVEX_BROWSER_WORKER_IMAGE:-quorvex-browser-worker:prod}
@@ -573,6 +576,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: backend
+      args:
+        INSTALL_NUCLEI: ${INSTALL_NUCLEI:-false}
     restart: unless-stopped
     # dns:
     #   - 8.8.8.8
@@ -613,25 +618,26 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # VNC mode: headed browser on virtual display
-      # When VNC_ENABLED=true, browser runs headed on Xvfb display :99
-      # HEADLESS must be "false" for VNC to work (need visible browser)
+      # Scalable test execution defaults to headless. Set HEADLESS=false and
+      # PLAYWRIGHT_HEADLESS=false only for live VNC debugging; shared-display VNC
+      # is serialized by the backend browser pool.
       VNC_ENABLED: ${VNC_ENABLED:-true}
       VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:-}
       VNC_PUBLIC_URL: ${VNC_PUBLIC_URL:-}
       RECORDER_BROWSER_URL: ${RECORDER_BROWSER_URL:-}
       DISPLAY: ":99"
-      HEADLESS: "false"
-      PLAYWRIGHT_HEADLESS: "false"
+      HEADLESS: ${HEADLESS:-true}
+      PLAYWRIGHT_HEADLESS: ${PLAYWRIGHT_HEADLESS:-true}
       # Skill mode settings
       SKILL_DIR: /app/.claude/skills/playwright
       SKILL_TIMEOUT: ${SKILL_TIMEOUT:-30000}
       SLOW_MO: ${SLOW_MO:-0}
-      # Parallel execution settings
-      # Note: When VNC enabled, parallelism is limited to 1 (single browser)
+      # Parallel execution settings. Headless generated runs default to one
+      # Playwright worker per run; raise TEST_RUN_PLAYWRIGHT_WORKERS deliberately.
       PARALLEL_MODE_ENABLED: ${PARALLEL_MODE_ENABLED:-true}
       DEFAULT_PARALLELISM: ${DEFAULT_PARALLELISM:-4}
       PLAYWRIGHT_WORKERS: ${PLAYWRIGHT_WORKERS:-4}
+      TEST_RUN_PLAYWRIGHT_WORKERS: ${TEST_RUN_PLAYWRIGHT_WORKERS:-1}
       # Resource management - concurrent operation limits
       MAX_CONCURRENT_AGENTS: ${MAX_CONCURRENT_AGENTS:-8}
       MAX_CONCURRENT_EXPLORATIONS: ${MAX_CONCURRENT_EXPLORATIONS:-5}

@@ -4,6 +4,7 @@ import { Zap, FileCode, Play, Upload, Clock, Loader2, AlertCircle, CheckCircle, 
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { useSearchParams } from 'next/navigation';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { createTabStyle } from '@/lib/styles';
@@ -19,6 +20,7 @@ const RUNS_PAGE_SIZE = 20;
 
 export default function ApiTestingPage() {
     const { projectId, isLoading: projectLoading, projects, setCurrentProject } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const searchParams = useSearchParams();
     const requestedProjectId = searchParams.get('project_id') || '';
     const requestedSpec = searchParams.get('spec') || searchParams.get('spec_name') || '';
@@ -333,7 +335,7 @@ export default function ApiTestingPage() {
     }, []);
 
     const handleRetryRun = useCallback(async (runId: string) => {
-        if (!projectId) return;
+        if (!projectId || !canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/runs/${runId}/retry`, projectId)}`, { method: 'POST' });
             if (res.ok) {
@@ -349,7 +351,7 @@ export default function ApiTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to start retry' });
         }
-    }, [projectId, pollJob, fetchApiRuns]);
+    }, [projectId, canEdit, pollJob, fetchApiRuns]);
 
     // ========== Tab Styles ==========
 
@@ -445,6 +447,7 @@ export default function ApiTestingPage() {
                     folders={specsFolders}
                     summary={specsSummary}
                     initialSearch={requestedSpec}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -465,6 +468,7 @@ export default function ApiTestingPage() {
                     setActiveJobs={setActiveJobs}
                     pollJob={pollJob}
                     fetchApiRuns={fetchApiRuns}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -475,6 +479,7 @@ export default function ApiTestingPage() {
                     setActiveJobs={setActiveJobs}
                     setMessage={setMessage}
                     pollJob={pollJob}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -491,7 +496,8 @@ export default function ApiTestingPage() {
                     RUNS_PAGE_SIZE={RUNS_PAGE_SIZE}
                     runsTotal={runsTotal}
                     onViewDetail={(runId) => setDetailRunId(runId)}
-                    onRetry={(runId) => handleRetryRun(runId)}
+                    onRetry={canEdit ? (runId) => handleRetryRun(runId) : undefined}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -500,11 +506,12 @@ export default function ApiTestingPage() {
                     runId={detailRunId}
                     projectId={projectId}
                     onClose={() => setDetailRunId(null)}
-                    onRetry={(jobId) => {
+                    onRetry={canEdit ? (jobId) => {
                         setActiveJobs(prev => ({ ...prev, [jobId]: { job_id: jobId, status: 'running', message: 'Retrying...' } }));
                         pollJob(jobId, () => { fetchApiRuns(0); });
                         setDetailRunId(null);
-                    }}
+                    } : undefined}
+                    canEdit={canEdit}
                 />
             )}
 

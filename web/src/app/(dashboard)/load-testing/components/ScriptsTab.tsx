@@ -20,6 +20,7 @@ interface ScriptsTabProps {
     onLoadScriptContent: (name: string) => Promise<void>;
     scriptContents: Record<string, string>;
     initialScriptPath?: string;
+    canEdit: boolean;
 }
 
 export default function ScriptsTab({
@@ -33,6 +34,7 @@ export default function ScriptsTab({
     onLoadScriptContent,
     scriptContents,
     initialScriptPath,
+    canEdit,
 }: ScriptsTabProps) {
     const [expandedScript, setExpandedScript] = useState<string | null>(null);
     const [runVUs, setRunVUs] = useState('');
@@ -120,20 +122,22 @@ export default function ScriptsTab({
                                         {new Date(script.modified_at).toLocaleDateString()}
                                     </span>
                                     <div style={{ display: 'flex', gap: '0.25rem' }} onClick={e => e.stopPropagation()}>
-                                        <button
-                                            onClick={() => onRunScript(script.path, '', '')}
-                                            disabled={!!k6Status?.load_test_active}
-                                            title={k6Status?.load_test_active ? 'Load test in progress' : ''}
-                                            style={{
-                                                display: 'flex', alignItems: 'center', gap: '0.25rem',
-                                                padding: '0.3rem 0.6rem', background: 'var(--primary-glow)',
-                                                color: 'var(--primary)', border: '1px solid rgba(59, 130, 246, 0.2)',
-                                                borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
-                                                opacity: k6Status?.load_test_active ? 0.5 : 1,
-                                            }}
-                                        >
-                                            <Play size={12} /> Run
-                                        </button>
+                                        {canEdit && (
+                                            <button
+                                                onClick={() => onRunScript(script.path, '', '')}
+                                                disabled={!!k6Status?.load_test_active}
+                                                title={k6Status?.load_test_active ? 'Load test in progress' : ''}
+                                                style={{
+                                                    display: 'flex', alignItems: 'center', gap: '0.25rem',
+                                                    padding: '0.3rem 0.6rem', background: 'var(--primary-glow)',
+                                                    color: 'var(--primary)', border: '1px solid rgba(59, 130, 246, 0.2)',
+                                                    borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
+                                                    opacity: k6Status?.load_test_active ? 0.5 : 1,
+                                                }}
+                                            >
+                                                <Play size={12} /> Run
+                                            </button>
+                                        )}
                                         <a
                                             href={`${API_BASE}${withProjectQuery(`/load-testing/scripts/${script.name}/download`, projectId)}`}
                                             style={{
@@ -152,6 +156,7 @@ export default function ScriptsTab({
                                 {isExpanded && (
                                     <div style={{ borderTop: '1px solid var(--border)', padding: '1rem' }}>
                                         {/* VU/Duration overrides */}
+                                        {canEdit && (
                                         <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '0.75rem', alignItems: 'flex-start' }}>
                                             <div>
                                                 <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>VUs Override</label>
@@ -225,6 +230,7 @@ export default function ScriptsTab({
                                                 <Play size={14} /> Run with Overrides
                                             </button>
                                         </div>
+                                        )}
 
                                         <SyntaxHighlighter
                                             language="javascript"

@@ -3344,7 +3344,7 @@ class TestExecutionSettings:
         assert response.status_code in (200, 422)
 
     def test_update_execution_settings_updates_browser_pool_max(self, client, monkeypatch):
-        """PUT /execution-settings should push saved parallelism into the browser pool."""
+        """PUT /execution-settings should push saved headless parallelism into the browser pool."""
         import orchestrator.api.main as main_module
 
         class FakePool:
@@ -3357,11 +3357,46 @@ class TestExecutionSettings:
         pool = FakePool()
         monkeypatch.setattr(main_module, "BROWSER_POOL", pool)
         monkeypatch.setattr(main_module, "is_parallel_mode_available", lambda: True)
+        monkeypatch.setenv("VNC_ENABLED", "true")
+        monkeypatch.setenv("DISPLAY", ":99")
+        monkeypatch.setenv("HEADLESS", "true")
+        monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")
 
-        response = client.put("/execution-settings", json={"parallelism": 3})
+        response = client.put("/execution-settings", json={"parallelism": 3, "headless_in_parallel": True})
 
         assert response.status_code == 200, response.text
         assert pool.updated_to == response.json()["parallelism"]
+        assert pool.requested_max_browsers == response.json()["parallelism"]
+        assert pool.effective_max_browsers == response.json()["parallelism"]
+
+    def test_update_execution_settings_clamps_shared_vnc_headed_browser_pool(self, client, monkeypatch):
+        """Shared-display VNC headed mode should serialize browser-producing runs."""
+        import orchestrator.api.main as main_module
+
+        class FakePool:
+            def __init__(self):
+                self.updated_to = None
+
+            async def update_max_browsers(self, value):
+                self.updated_to = value
+
+        pool = FakePool()
+        monkeypatch.setattr(main_module, "BROWSER_POOL", pool)
+        monkeypatch.setattr(main_module, "is_parallel_mode_available", lambda: True)
+        monkeypatch.setenv("VNC_ENABLED", "true")
+        monkeypatch.setenv("DISPLAY", ":99")
+        monkeypatch.setenv("HEADLESS", "false")
+        monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "false")
+
+        response = client.put("/execution-settings", json={"parallelism": 5, "headless_in_parallel": False})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["parallelism"] == 5
+        assert pool.updated_to == 1
+        assert pool.requested_max_browsers == 5
+        assert pool.effective_max_browsers == 1
+        assert pool.browser_runtime_mode == "headed_vnc"
+        assert pool.parallelism_clamp_reason == "shared_vnc_display"
 
 
 class TestAISettings:

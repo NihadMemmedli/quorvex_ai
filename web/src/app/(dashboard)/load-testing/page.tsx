@@ -10,6 +10,7 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { Terminal, ChevronDown, ChevronRight } from 'lucide-react';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { timeAgo } from '@/lib/formatting';
 import { createTabStyle } from '@/lib/styles';
@@ -189,6 +190,7 @@ function JobStatusPanel({ job, projectId, onStop }: { job: JobStatus; projectId:
 
 export default function LoadTestingPage() {
     const { projectId } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -399,6 +401,7 @@ export default function LoadTestingPage() {
     // ========== Actions ==========
 
     const handleCreateSpec = useCallback(async (name: string, content: string) => {
+        if (!canEdit) return;
         const res = await fetch(`${API_BASE}/load-testing/specs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -412,9 +415,10 @@ export default function LoadTestingPage() {
             setMessage({ type: 'error', text: err.detail || 'Failed to create spec' });
             throw new Error('create failed');
         }
-    }, [projectId, fetchSpecs]);
+    }, [canEdit, projectId, fetchSpecs]);
 
     const handleUpdateSpec = useCallback(async (name: string, content: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/specs/${name}`, projectId)}`, {
                 method: 'PUT',
@@ -428,9 +432,10 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to update spec' });
         }
-    }, [projectId]);
+    }, [canEdit, projectId]);
 
     const handleDeleteSpec = useCallback(async (name: string) => {
+        if (!canEdit) return;
         if (!confirm('Delete this load test spec?')) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/specs/${name}`, projectId)}`, { method: 'DELETE' });
@@ -441,9 +446,10 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to delete spec' });
         }
-    }, [projectId, fetchSpecs]);
+    }, [canEdit, projectId, fetchSpecs]);
 
     const handleGenerateScript = useCallback(async (name: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/load-testing/generate`, {
                 method: 'POST',
@@ -458,9 +464,10 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to start script generation' });
         }
-    }, [projectId, pollJob]);
+    }, [canEdit, projectId, pollJob]);
 
     const handleRunFromSpec = useCallback(async (name: string, vus?: string, duration?: string) => {
+        if (!canEdit) return;
         const vusNum = vus ? parseInt(vus, 10) : 0;
         if (vusNum > 500) {
             const limitsInfo = systemLimits
@@ -500,9 +507,10 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to start load test' });
         }
-    }, [projectId, pollJob, systemLimits]);
+    }, [canEdit, projectId, pollJob, systemLimits]);
 
     const handleRunScript = useCallback(async (scriptPath: string, vus: string, duration: string) => {
+        if (!canEdit) return;
         const vusNum = vus ? parseInt(vus, 10) : 0;
         if (vusNum > 500) {
             const limitsInfo = systemLimits
@@ -542,9 +550,10 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to start script run' });
         }
-    }, [projectId, pollJob, systemLimits]);
+    }, [canEdit, projectId, pollJob, systemLimits]);
 
     const handleStopRun = useCallback(async (runId: string) => {
+        if (!canEdit) return;
         if (stoppingRunId) return;
         setStoppingRunId(runId);
         try {
@@ -566,9 +575,10 @@ export default function LoadTestingPage() {
         } finally {
             setStoppingRunId(null);
         }
-    }, [projectId, stoppingRunId]);
+    }, [canEdit, projectId, stoppingRunId]);
 
     const handleForceUnlock = useCallback(async () => {
+        if (!canEdit) return;
         if (stoppingRunId) return;
         setStoppingRunId('force-unlock');
         try {
@@ -585,7 +595,7 @@ export default function LoadTestingPage() {
         } finally {
             setStoppingRunId(null);
         }
-    }, [projectId, stoppingRunId]);
+    }, [canEdit, projectId, stoppingRunId]);
 
     const loadSpecContent = useCallback(async (name: string) => {
         if (specContents[name]) return;
@@ -673,13 +683,14 @@ export default function LoadTestingPage() {
     }, [activeTab, compareIds, comparisonData, comparisonLoading, loadComparison, searchParams]);
 
     const toggleCompareId = useCallback((id: string) => {
+        if (!canEdit) return;
         setCompareIds(prev => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id);
             else if (next.size < 2) next.add(id);
             return next;
         });
-    }, []);
+    }, [canEdit]);
 
     const handleSetExpandedRunId = useCallback((id: string | null) => {
         setExpandedRunId(id);
@@ -687,6 +698,7 @@ export default function LoadTestingPage() {
     }, []);
 
     const handleAnalyzeRun = useCallback(async (runId: string) => {
+        if (!canEdit) return;
         setAnalyzingRunId(runId);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs/${runId}/analyze`, projectId)}`, {
@@ -716,7 +728,7 @@ export default function LoadTestingPage() {
             setMessage({ type: 'error', text: 'Failed to start AI analysis' });
             setAnalyzingRunId(null);
         }
-    }, [projectId, pollJob, loadRunDetails]);
+    }, [canEdit, projectId, pollJob, loadRunDetails]);
 
     const handleNavigateToRun = useCallback((runId: string) => {
         setActiveTab('history');
@@ -823,27 +835,29 @@ export default function LoadTestingPage() {
                             })()}
                         </div>
                     </div>
-                    <button
-                        onClick={() => k6Status.active_run?.run_id
-                            ? handleStopRun(k6Status.active_run.run_id)
-                            : handleForceUnlock()
-                        }
-                        disabled={!!stoppingRunId}
-                        style={{
-                            display: 'flex', alignItems: 'center', gap: '0.35rem',
-                            padding: '0.4rem 0.75rem', borderRadius: 'var(--radius)', fontSize: '0.8rem',
-                            fontWeight: 600, background: 'var(--danger-muted)', color: 'var(--danger)',
-                            border: '1px solid rgba(239, 68, 68, 0.3)', cursor: stoppingRunId ? 'not-allowed' : 'pointer',
-                            opacity: stoppingRunId ? 0.6 : 1, flexShrink: 0, whiteSpace: 'nowrap',
-                        }}
-                    >
-                        {stoppingRunId ? (
-                            <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                        ) : (
-                            <Square size={13} />
-                        )}
-                        {stoppingRunId ? 'Cancelling...' : 'Cancel Test'}
-                    </button>
+                    {canEdit && (
+                        <button
+                            onClick={() => k6Status.active_run?.run_id
+                                ? handleStopRun(k6Status.active_run.run_id)
+                                : handleForceUnlock()
+                            }
+                            disabled={!!stoppingRunId}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '0.35rem',
+                                padding: '0.4rem 0.75rem', borderRadius: 'var(--radius)', fontSize: '0.8rem',
+                                fontWeight: 600, background: 'var(--danger-muted)', color: 'var(--danger)',
+                                border: '1px solid rgba(239, 68, 68, 0.3)', cursor: stoppingRunId ? 'not-allowed' : 'pointer',
+                                opacity: stoppingRunId ? 0.6 : 1, flexShrink: 0, whiteSpace: 'nowrap',
+                            }}
+                        >
+                            {stoppingRunId ? (
+                                <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                            ) : (
+                                <Square size={13} />
+                            )}
+                            {stoppingRunId ? 'Cancelling...' : 'Cancel Test'}
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -901,7 +915,7 @@ export default function LoadTestingPage() {
                                 key={job.job_id}
                                 job={job}
                                 projectId={projectId}
-                                onStop={() => handleStopRun(job.job_id)}
+                                onStop={canEdit ? () => handleStopRun(job.job_id) : undefined}
                             />
                         ))}
                 </div>
@@ -927,6 +941,7 @@ export default function LoadTestingPage() {
                     onLoadSpecContent={loadSpecContent}
                     specContents={specContents}
                     initialSpecName={searchParams.get('spec') || undefined}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -942,6 +957,7 @@ export default function LoadTestingPage() {
                     onLoadScriptContent={loadScriptContent}
                     scriptContents={scriptContents}
                     initialScriptPath={searchParams.get('script') || undefined}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -969,6 +985,7 @@ export default function LoadTestingPage() {
                     analyzingRunId={analyzingRunId}
                     ResultsView={ResultsView}
                     ComparisonView={ComparisonView}
+                    canEdit={canEdit}
                 />
             )}
         </PageLayout>

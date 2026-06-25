@@ -5,6 +5,7 @@ import { UploadCloud, FileText, X, Trash2, Loader2, ChevronRight, Layers } from 
 import type { ExistingProject } from './types';
 
 interface UploadPhaseProps {
+    canEdit: boolean;
     onUpload: (file: File) => void;
     onLoadProject: (projectId: string) => void;
     onDeleteProject: (projectId: string) => void;
@@ -21,6 +22,7 @@ function formatFileSize(bytes: number): string {
 }
 
 export function UploadPhase({
+    canEdit,
     onUpload,
     onLoadProject,
     onDeleteProject,
@@ -34,59 +36,66 @@ export function UploadPhase({
     const inputRef = useRef<HTMLInputElement>(null);
 
     const handleFile = useCallback((f: File | null) => {
+        if (!canEdit) return;
         if (f) {
             setFile(f);
         }
-    }, []);
+    }, [canEdit]);
 
     const handleDragOver = useCallback((e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!canEdit) return;
         setIsDragOver(true);
-    }, []);
+    }, [canEdit]);
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!canEdit) return;
         setIsDragOver(false);
-    }, []);
+    }, [canEdit]);
 
     const handleDrop = useCallback((e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!canEdit) return;
         setIsDragOver(false);
         const droppedFile = e.dataTransfer.files?.[0];
         if (droppedFile) {
             handleFile(droppedFile);
         }
-    }, [handleFile]);
+    }, [canEdit, handleFile]);
 
     const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!canEdit) return;
         const selected = e.target.files?.[0];
         if (selected) {
             handleFile(selected);
         }
-    }, [handleFile]);
+    }, [canEdit, handleFile]);
 
     const clearFile = useCallback(() => {
+        if (!canEdit) return;
         setFile(null);
         if (inputRef.current) {
             inputRef.current.value = '';
         }
-    }, []);
+    }, [canEdit]);
 
     const handleStartAnalysis = useCallback(() => {
-        if (file && !isUploading) {
+        if (canEdit && file && !isUploading) {
             onUpload(file);
         }
-    }, [file, isUploading, onUpload]);
+    }, [canEdit, file, isUploading, onUpload]);
 
-    const canStart = file !== null && !isUploading;
+    const canStart = canEdit && file !== null && !isUploading;
 
     return (
         <div style={{ maxWidth: 640, margin: '0 auto' }}>
             {/* Upload Card */}
-            <div className="card-elevated animate-in stagger-1" style={{ padding: '2rem' }}>
+            {canEdit ? (
+                <div className="card-elevated animate-in stagger-1" style={{ padding: '2rem' }}>
                 {/* Drop Zone */}
                 <div
                     onClick={() => inputRef.current?.click()}
@@ -110,11 +119,12 @@ export function UploadPhase({
                         position: 'relative',
                     }}
                 >
-                    <input
+                            <input
                         ref={inputRef}
                         type="file"
                         accept=".pdf,application/pdf"
                         onChange={handleInputChange}
+                        disabled={!canEdit}
                         style={{ display: 'none' }}
                     />
 
@@ -313,7 +323,22 @@ export function UploadPhase({
                         }} />
                     )}
                 </button>
-            </div>
+                </div>
+            ) : (
+                <div className="card-elevated animate-in stagger-1" style={{ padding: '1.25rem' }}>
+                    <div className="flex items-center gap-3">
+                        <FileText size={18} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} />
+                        <div>
+                            <div style={{ color: 'var(--text)', fontSize: '0.875rem', fontWeight: 600 }}>
+                                Read-only PRD access
+                            </div>
+                            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem', marginTop: 2 }}>
+                                Select an existing project to review features, requirements, generated plans, logs, and artifacts.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Recent Projects */}
             {existingProjects.length > 0 && (
@@ -344,6 +369,7 @@ export function UploadPhase({
                             <ProjectItem
                                 key={p.project}
                                 project={p}
+                                canEdit={canEdit}
                                 onLoad={() => onLoadProject(p.project)}
                                 onDelete={() => {
                                     if (window.confirm(`Delete "${p.project}"? This cannot be undone.`)) {
@@ -361,10 +387,12 @@ export function UploadPhase({
 
 function ProjectItem({
     project,
+    canEdit,
     onLoad,
     onDelete,
 }: {
     project: ExistingProject;
+    canEdit: boolean;
     onLoad: () => void;
     onDelete: () => void;
 }) {
@@ -430,34 +458,36 @@ function ProjectItem({
                 {isStale ? 'retry needed' : `${project.feature_count} feature${project.feature_count !== 1 ? 's' : ''}`}
             </span>
 
-            <button
-                onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete();
-                }}
-                style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: 'var(--radius-sm)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'var(--text-tertiary)',
-                    opacity: hovered ? 1 : 0,
-                    transition: 'all 0.2s',
-                    flexShrink: 0,
-                }}
-                onMouseEnter={(e) => {
-                    e.currentTarget.style.background = 'rgba(248,113,113,0.1)';
-                    e.currentTarget.style.color = '#f87171';
-                }}
-                onMouseLeave={(e) => {
-                    e.currentTarget.style.background = 'transparent';
-                    e.currentTarget.style.color = 'var(--text-tertiary)';
-                }}
-            >
-                <Trash2 size={14} />
-            </button>
+            {canEdit && (
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete();
+                    }}
+                    style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 'var(--radius-sm)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-tertiary)',
+                        opacity: hovered ? 1 : 0,
+                        transition: 'all 0.2s',
+                        flexShrink: 0,
+                    }}
+                    onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(248,113,113,0.1)';
+                        e.currentTarget.style.color = '#f87171';
+                    }}
+                    onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'transparent';
+                        e.currentTarget.style.color = 'var(--text-tertiary)';
+                    }}
+                >
+                    <Trash2 size={14} />
+                </button>
+            )}
 
             <ChevronRight size={14} style={{
                 color: 'var(--text-tertiary)',
