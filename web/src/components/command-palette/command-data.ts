@@ -16,6 +16,7 @@ export interface CommandItem {
     category: 'quick-action' | 'navigation' | 'admin';
     group?: string;
     adminOnly?: boolean;
+    editorOnly?: boolean;
 }
 
 interface RankedCommand<T extends CommandItem> {
@@ -32,6 +33,7 @@ export const quickActions: CommandItem[] = [
         href: '/autopilot',
         keywords: ['auto', 'autopilot', 'pilot', 'agent', 'automatic', 'start', 'mission', 'missions', 'agent runs'],
         category: 'quick-action',
+        editorOnly: true,
     },
     {
         id: 'create-spec',
@@ -40,6 +42,7 @@ export const quickActions: CommandItem[] = [
         href: '/specs/new',
         keywords: ['create', 'new', 'spec', 'test', 'write'],
         category: 'quick-action',
+        editorOnly: true,
     },
     {
         id: 'run-regression',
@@ -48,6 +51,7 @@ export const quickActions: CommandItem[] = [
         href: '/regression',
         keywords: ['regression', 'batch', 'batches', 'run', 'execute', 'suite'],
         category: 'quick-action',
+        editorOnly: true,
     },
     {
         id: 'import-openapi',
@@ -56,6 +60,7 @@ export const quickActions: CommandItem[] = [
         href: '/api-testing',
         keywords: ['import', 'openapi', 'open api', 'swagger', 'api', 'upload'],
         category: 'quick-action',
+        editorOnly: true,
     },
     {
         id: 'run-security-scan',
@@ -64,6 +69,7 @@ export const quickActions: CommandItem[] = [
         href: '/security-testing',
         keywords: ['security', 'scan', 'vulnerability', 'zap', 'nuclei'],
         category: 'quick-action',
+        editorOnly: true,
     },
     {
         id: 'open-ai-assistant',

@@ -10,9 +10,10 @@ import type { Spec, Provider, Run, SpecVersion, PromptIteration } from './types'
 
 interface PromptsTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
-export default function PromptsTab({ projectId }: PromptsTabProps) {
+export default function PromptsTab({ projectId, canEdit }: PromptsTabProps) {
     // State
     const [specs, setSpecs] = useState<Spec[]>([]);
     const [selectedSpec, setSelectedSpec] = useState('');
@@ -89,6 +90,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
 
     // Save version
     const handleSaveVersion = useCallback(async () => {
+        if (!canEdit) return;
         if (!selectedSpec) return;
         setSaving(true);
         try {
@@ -110,10 +112,11 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
         } finally {
             setSaving(false);
         }
-    }, [selectedSpec, changeSummary, projectId]);
+    }, [canEdit, selectedSpec, changeSummary, projectId]);
 
     // Restore version
     const handleRestore = useCallback(async (version: number) => {
+        if (!canEdit) return;
         if (!selectedSpec) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/specs/${selectedSpec}/versions/${version}/restore?project_id=${projectId}`, { method: 'POST' });
@@ -127,7 +130,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
         } catch {
             toast.error('Failed to restore version');
         }
-    }, [selectedSpec, projectId]);
+    }, [canEdit, selectedSpec, projectId]);
 
     // Show diff
     const handleDiff = useCallback(async (version: number) => {
@@ -150,6 +153,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
 
     // Start A/B test
     const handleStartAB = useCallback(async () => {
+        if (!canEdit) return;
         if (!selectedSpec || versionA === '' || versionB === '' || !abProvider || versionA === versionB) return;
         setStartingAB(true);
         try {
@@ -177,10 +181,11 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
         } finally {
             setStartingAB(false);
         }
-    }, [selectedSpec, versionA, versionB, abProvider, abName, projectId]);
+    }, [canEdit, selectedSpec, versionA, versionB, abProvider, abName, projectId]);
 
     // Suggest improvements
     const handleAnalyze = useCallback(async () => {
+        if (!canEdit) return;
         if (!selectedSpec) return;
         setAnalyzing(true);
         setSuggestions(null);
@@ -201,7 +206,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
         } finally {
             setAnalyzing(false);
         }
-    }, [selectedSpec, selectedRunForSuggest, projectId]);
+    }, [canEdit, selectedSpec, selectedRunForSuggest, projectId]);
 
     // Filter failed runs
     const failedRuns = runs.filter(r => r.failed_cases > 0 && r.status === 'completed');
@@ -231,17 +236,19 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
                             </div>
 
                             {/* Save new version */}
-                            <div style={{ marginBottom: '0.75rem', display: 'flex', gap: '0.5rem' }}>
-                                <input
-                                    value={changeSummary}
-                                    onChange={e => setChangeSummary(e.target.value)}
-                                    placeholder="Change summary..."
-                                    style={{ ...inputStyle, flex: 1 }}
-                                />
-                                <button onClick={handleSaveVersion} disabled={saving} style={{ ...btnSmall, whiteSpace: 'nowrap' }}>
-                                    {saving ? '...' : 'Save'}
-                                </button>
-                            </div>
+                            {canEdit && (
+                                <div style={{ marginBottom: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+                                    <input
+                                        value={changeSummary}
+                                        onChange={e => setChangeSummary(e.target.value)}
+                                        placeholder="Change summary..."
+                                        style={{ ...inputStyle, flex: 1 }}
+                                    />
+                                    <button onClick={handleSaveVersion} disabled={saving} style={{ ...btnSmall, whiteSpace: 'nowrap' }}>
+                                        {saving ? '...' : 'Save'}
+                                    </button>
+                                </div>
+                            )}
 
                             {loading && <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Loading...</div>}
 
@@ -249,7 +256,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
                             <div style={{ maxHeight: 500, overflowY: 'auto' }}>
                                 {versions.length === 0 && !loading && (
                                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center', padding: '1rem' }}>
-                                        No versions yet. Save one to start tracking.
+                                        {canEdit ? 'No versions yet. Save one to start tracking.' : 'No versions yet.'}
                                     </div>
                                 )}
                                 {versions.map(v => (
@@ -276,7 +283,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
                                             </div>
                                         )}
                                         <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
-                                            <button onClick={() => setRestoreConfirm({ open: true, version: v.version })} style={btnSmall}>Restore</button>
+                                            {canEdit && <button onClick={() => setRestoreConfirm({ open: true, version: v.version })} style={btnSmall}>Restore</button>}
                                             <button onClick={() => handleDiff(v.version)} style={btnSmall}>Diff</button>
                                         </div>
                                     </div>
@@ -288,6 +295,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
                     {/* Right: A/B Iteration Panel + Suggestions */}
                     <div style={{ flex: 1, minWidth: 0 }}>
                         {/* A/B Iteration Panel */}
+                        {canEdit && (
                         <div style={{ ...cardStyle, marginBottom: '1rem' }}>
                             <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>A/B Iteration Test</h3>
 
@@ -415,6 +423,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
                                 </div>
                             )}
                         </div>
+                        )}
 
                         {/* AI Suggestions Panel */}
                         <div style={{ ...cardStyle }}>
@@ -430,6 +439,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
 
                             {suggestionsOpen && (
                                 <div style={{ marginTop: '0.75rem' }}>
+                                    {canEdit && (
                                     <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', marginBottom: '0.75rem' }}>
                                         <div style={{ flex: 1 }}>
                                             <label style={labelStyle}>Select a failed run</label>
@@ -450,6 +460,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
                                             {analyzing ? 'Analyzing...' : 'Analyze'}
                                         </button>
                                     </div>
+                                    )}
 
                                     {suggestions && (
                                         <div style={{ marginTop: '0.5rem' }}>
@@ -522,7 +533,7 @@ export default function PromptsTab({ projectId }: PromptsTabProps) {
 
             {/* Confirm Dialog for Restore */}
             <ConfirmDialog
-                open={restoreConfirm.open}
+                open={canEdit && restoreConfirm.open}
                 onOpenChange={open => setRestoreConfirm(prev => ({ ...prev, open }))}
                 title="Restore Version"
                 description={`Restore version v${restoreConfirm.version}? This will overwrite current spec content.`}

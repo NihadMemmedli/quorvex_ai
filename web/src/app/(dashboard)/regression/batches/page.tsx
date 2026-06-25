@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Clock, CheckCircle2, XCircle, PlayCircle, ChevronRight, Calendar, Tag, Percent, Layers, RefreshCw, AlertTriangle, Edit3, Check, X, TrendingUp } from 'lucide-react';
 import Link from 'next/link';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
@@ -62,6 +63,7 @@ const PAGE_SIZE = 15;
 
 export default function BatchListPage() {
     const { projectId, isLoading: projectLoading } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const [batches, setBatches] = useState<RegressionBatch[]>([]);
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
@@ -158,6 +160,7 @@ export default function BatchListPage() {
 
     // D3: save name
     const saveName = async (batchId: string) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/regression/batches/${batchId}`, {
                 method: 'PATCH',
@@ -361,7 +364,7 @@ export default function BatchListPage() {
                                     </div>
                                     <div style={{ flex: 1 }}>
                                         {/* D3: inline edit name */}
-                                        {editingId === batch.id ? (
+                                        {canEdit && editingId === batch.id ? (
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}
                                                 onClick={(e) => e.preventDefault()}
                                             >
@@ -395,18 +398,20 @@ export default function BatchListPage() {
                                         ) : (
                                             <h3 style={{ fontWeight: 600, fontSize: '1.05rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                 {batch.name || batch.id}
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.preventDefault();
-                                                        e.stopPropagation();
-                                                        setEditingId(batch.id);
-                                                        setEditName(batch.name || batch.id);
-                                                    }}
-                                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem', opacity: 0.5, display: 'flex' }}
-                                                    title="Rename batch"
-                                                >
-                                                    <Edit3 size={14} color="var(--text-secondary)" />
-                                                </button>
+                                                {canEdit && (
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.preventDefault();
+                                                            e.stopPropagation();
+                                                            setEditingId(batch.id);
+                                                            setEditName(batch.name || batch.id);
+                                                        }}
+                                                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0.2rem', opacity: 0.5, display: 'flex' }}
+                                                        title="Rename batch"
+                                                    >
+                                                        <Edit3 size={14} color="var(--text-secondary)" />
+                                                    </button>
+                                                )}
                                             </h3>
                                         )}
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.875rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>

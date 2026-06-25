@@ -5,6 +5,7 @@ import { ShieldAlert, Play, FileCode, Clock, Bug } from 'lucide-react';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
 import { createTabStyle, getAuthHeaders, cardStyle } from '@/lib/styles';
@@ -26,6 +27,7 @@ import FindingsTab from './components/FindingsTab';
 
 export default function SecurityTestingPage() {
     const { currentProject, projectId } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const router = useRouter();
     const searchParams = useSearchParams();
     const projectDefaultUrl = getProjectDefaultUrl(currentProject);
@@ -222,6 +224,7 @@ export default function SecurityTestingPage() {
     // ========== Actions ==========
 
     const startScan = useCallback(async () => {
+        if (!canEdit) return;
         const targetUrl = trimUrlInput(scanUrl);
         if (!targetUrl) return;
         setIsScanning(true);
@@ -258,9 +261,10 @@ export default function SecurityTestingPage() {
             setJobStatus({ job_id: '', status: 'failed', message: String(e) });
             setIsScanning(false);
         }
-    }, [scanUrl, scanType, projectId, activeScanLevel, excludedPaths, authEnabled, loginUrl, usernameKey, passwordKey]);
+    }, [canEdit, scanUrl, scanType, projectId, activeScanLevel, excludedPaths, authEnabled, loginUrl, usernameKey, passwordKey]);
 
     const updateFindingStatus = useCallback(async (findingId: number, newStatus: string, notes?: string) => {
+        if (!canEdit) return;
         try {
             await fetch(`${API_BASE}${withProjectQuery(`/security-testing/findings/${findingId}/status`, projectId)}`, {
                 method: 'PATCH',
@@ -269,9 +273,10 @@ export default function SecurityTestingPage() {
             });
             fetchFindingSummary();
         } catch (e) { console.error('Update finding status failed:', e); }
-    }, [fetchFindingSummary, projectId]);
+    }, [canEdit, fetchFindingSummary, projectId]);
 
     const stopScan = useCallback(async (runId: string) => {
+        if (!canEdit) return;
         try {
             await fetch(`${API_BASE}${withProjectQuery(`/security-testing/runs/${runId}/stop`, projectId)}`, {
                 method: 'POST',
@@ -279,7 +284,7 @@ export default function SecurityTestingPage() {
             });
             fetchRuns();
         } catch (e) { console.error('Stop security scan failed:', e); }
-    }, [fetchRuns, projectId]);
+    }, [canEdit, fetchRuns, projectId]);
 
     // ========== Render ==========
 
@@ -368,6 +373,7 @@ export default function SecurityTestingPage() {
                     setExcludedPaths={setExcludedPaths}
                     onRefreshCapabilities={fetchCapabilities}
                     onStartScan={startScan}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -377,6 +383,7 @@ export default function SecurityTestingPage() {
                     specs={specs}
                     fetchSpecs={fetchSpecs}
                     initialSpecName={searchParams.get('specName') || undefined}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -388,6 +395,7 @@ export default function SecurityTestingPage() {
                     onStatusChange={updateFindingStatus}
                     onStopScan={stopScan}
                     initialRunId={searchParams.get('runId') || undefined}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -398,6 +406,7 @@ export default function SecurityTestingPage() {
                     onStatusChange={updateFindingStatus}
                     initialRunId={searchParams.get('runId') || undefined}
                     initialFindingId={searchParams.get('findingId') || undefined}
+                    canEdit={canEdit}
                 />
             )}
         </PageLayout>

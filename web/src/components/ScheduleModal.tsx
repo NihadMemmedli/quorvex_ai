@@ -11,6 +11,7 @@ interface ScheduleModalProps {
     onSave: (schedule: any) => void;
     schedule?: any;
     projectId: string;
+    canEdit?: boolean;
 }
 
 const COMMON_TIMEZONES = [
@@ -32,7 +33,7 @@ const COMMON_TIMEZONES = [
     'Pacific/Auckland',
 ];
 
-export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: ScheduleModalProps) {
+export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId, canEdit = true }: ScheduleModalProps) {
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [cronExpression, setCronExpression] = useState('0 8 * * *');
@@ -72,6 +73,7 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
     }, [schedule, isOpen]);
 
     const handleSave = async () => {
+        if (!canEdit) return;
         if (!name.trim()) {
             setError('Schedule name is required');
             return;
@@ -209,6 +211,7 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
                             onChange={e => setName(e.target.value)}
                             placeholder="e.g., Nightly Regression"
                             style={inputStyle}
+                            disabled={!canEdit}
                         />
                     </div>
 
@@ -221,19 +224,20 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
                             placeholder="Optional description of what this schedule runs..."
                             rows={2}
                             style={{ ...inputStyle, resize: 'vertical' }}
+                            disabled={!canEdit}
                         />
                     </div>
 
                     {/* Cron Expression */}
                     <div>
                         <label style={labelStyle}>Schedule</label>
-                        <CronExpressionBuilder value={cronExpression} onChange={setCronExpression} />
+                        <CronExpressionBuilder value={cronExpression} onChange={canEdit ? setCronExpression : () => {}} />
                     </div>
 
                     {/* Timezone */}
                     <div>
                         <label style={labelStyle}>Timezone</label>
-                        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={inputStyle}>
+                        <select value={timezone} onChange={e => setTimezone(e.target.value)} style={inputStyle} disabled={!canEdit}>
                             {COMMON_TIMEZONES.map(tz => (
                                 <option key={tz} value={tz}>{tz}</option>
                             ))}
@@ -249,6 +253,7 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
                             onChange={e => setTagFilter(e.target.value)}
                             placeholder="e.g., smoke, login, checkout (comma-separated)"
                             style={inputStyle}
+                            disabled={!canEdit}
                         />
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
                             Only run specs matching these tags. Leave empty to run all specs.
@@ -258,15 +263,15 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
                     {/* Toggles row */}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
-                            <input type="checkbox" checked={automatedOnly} onChange={e => setAutomatedOnly(e.target.checked)} style={{ width: '16px', height: '16px' }} />
+                            <input type="checkbox" checked={automatedOnly} onChange={e => setAutomatedOnly(e.target.checked)} disabled={!canEdit} style={{ width: '16px', height: '16px' }} />
                             Automated only
                         </label>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
-                            <input type="checkbox" checked={hybridMode} onChange={e => setHybridMode(e.target.checked)} style={{ width: '16px', height: '16px' }} />
+                            <input type="checkbox" checked={hybridMode} onChange={e => setHybridMode(e.target.checked)} disabled={!canEdit} style={{ width: '16px', height: '16px' }} />
                             Hybrid mode
                         </label>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
-                            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} style={{ width: '16px', height: '16px' }} />
+                            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} disabled={!canEdit} style={{ width: '16px', height: '16px' }} />
                             Enabled
                         </label>
                     </div>
@@ -274,7 +279,7 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
                     {/* Browser */}
                     <div>
                         <label style={labelStyle}>Browser</label>
-                        <select value={browser} onChange={e => setBrowser(e.target.value)} style={inputStyle}>
+                        <select value={browser} onChange={e => setBrowser(e.target.value)} style={inputStyle} disabled={!canEdit}>
                             <option value="chromium">Chromium</option>
                             <option value="firefox">Firefox</option>
                             <option value="webkit">WebKit</option>
@@ -306,37 +311,39 @@ export function ScheduleModal({ isOpen, onClose, onSave, schedule, projectId }: 
                     >
                         Cancel
                     </button>
-                    <button
-                        type="button"
-                        onClick={handleSave}
-                        disabled={saving}
-                        style={{
-                            padding: '0.5rem 1.25rem',
-                            background: 'var(--primary)',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: 'var(--radius)',
-                            cursor: saving ? 'not-allowed' : 'pointer',
-                            fontWeight: 600,
-                            fontSize: '0.9rem',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.5rem',
-                            opacity: saving ? 0.7 : 1,
-                        }}
-                    >
-                        {saving ? (
-                            <>
-                                <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                                Saving...
-                            </>
-                        ) : (
-                            <>
-                                <Save size={16} />
-                                {schedule ? 'Update' : 'Create'} Schedule
-                            </>
-                        )}
-                    </button>
+                    {canEdit && (
+                        <button
+                            type="button"
+                            onClick={handleSave}
+                            disabled={saving}
+                            style={{
+                                padding: '0.5rem 1.25rem',
+                                background: 'var(--primary)',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: 'var(--radius)',
+                                cursor: saving ? 'not-allowed' : 'pointer',
+                                fontWeight: 600,
+                                fontSize: '0.9rem',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                opacity: saving ? 0.7 : 1,
+                            }}
+                        >
+                            {saving ? (
+                                <>
+                                    <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                                    Saving...
+                                </>
+                            ) : (
+                                <>
+                                    <Save size={16} />
+                                    {schedule ? 'Update' : 'Create'} Schedule
+                                </>
+                            )}
+                        </button>
+                    )}
                 </div>
 
                 <style jsx>{`

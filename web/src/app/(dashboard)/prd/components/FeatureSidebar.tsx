@@ -8,6 +8,7 @@ import type { Feature, GenerationResult } from './types';
 import { getFeatureStatus } from './types';
 
 interface FeatureSidebarProps {
+    canEdit: boolean;
     features: Feature[];
     selectedFeature: Feature | null;
     onSelect: (f: Feature) => void;
@@ -41,6 +42,7 @@ const statusIconBg: Record<StatusKey, string> = {
 };
 
 export function FeatureSidebar({
+    canEdit,
     features,
     selectedFeature,
     onSelect,
@@ -71,7 +73,7 @@ export function FeatureSidebar({
         [testableFeatures, generationResults]
     );
 
-    const isDisabled = Boolean(generationBlockedReason) || isGenerating || pendingCount === 0;
+    const isDisabled = !canEdit || Boolean(generationBlockedReason) || isGenerating || pendingCount === 0;
 
     return (
         <div className="prd-feature-sidebar flex flex-col">
@@ -190,20 +192,22 @@ export function FeatureSidebar({
                     </h3>
 
                     {/* Batch Generate Button */}
-                    <button
-                        type="button"
-                        onClick={onBatchGenerate}
-                        disabled={isDisabled}
-                        className={`prd-sidebar-batch ${isDisabled ? '' : 'btn-primary'}`}
-                        style={isDisabled ? { background: 'rgba(255,255,255,0.06)', color: 'var(--text-tertiary)' } : undefined}
-                        title={generationBlockedReason || undefined}
-                    >
-                        <Play size={13} fill="currentColor" className="shrink-0" />
-                        <span>Generate All</span>
-                        <span className="text-[11px] font-mono opacity-70">
-                            {pendingCount}
-                        </span>
-                    </button>
+                    {canEdit && (
+                        <button
+                            type="button"
+                            onClick={onBatchGenerate}
+                            disabled={isDisabled}
+                            className={`prd-sidebar-batch ${isDisabled ? '' : 'btn-primary'}`}
+                            style={isDisabled ? { background: 'rgba(255,255,255,0.06)', color: 'var(--text-tertiary)' } : undefined}
+                            title={generationBlockedReason || undefined}
+                        >
+                            <Play size={13} fill="currentColor" className="shrink-0" />
+                            <span>Generate All</span>
+                            <span className="text-[11px] font-mono opacity-70">
+                                {pendingCount}
+                            </span>
+                        </button>
+                    )}
                 </div>
 
                 {/* Search Input */}

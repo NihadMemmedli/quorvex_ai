@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { API_BASE } from '@/lib/api';
 import { getAuthHeaders } from '@/lib/styles';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import type { FlakeDetectionResponse, FlakySpec } from './types';
 
 interface FlakeDetectionTabProps {
@@ -9,6 +10,7 @@ interface FlakeDetectionTabProps {
 }
 
 export function FlakeDetectionTab({ projectId }: FlakeDetectionTabProps) {
+    const { canEdit } = useProjectRole(projectId ?? null);
     const [data, setData] = useState<FlakeDetectionResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -32,6 +34,7 @@ export function FlakeDetectionTab({ projectId }: FlakeDetectionTabProps) {
     useEffect(() => { fetchData(); }, [fetchData]);
 
     const toggleQuarantine = async (spec: FlakySpec) => {
+        if (!canEdit) return;
         setTogglingSpec(spec.spec_name);
         try {
             const encodedName = encodeURIComponent(spec.spec_name);
@@ -91,7 +94,7 @@ export function FlakeDetectionTab({ projectId }: FlakeDetectionTabProps) {
                             <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Flakiness Score</th>
                             <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Results</th>
                             <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Recent Results</th>
-                            <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Action</th>
+                            {canEdit && <th style={{ padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Action</th>}
                         </tr>
                     </thead>
                     <tbody>
@@ -148,25 +151,27 @@ export function FlakeDetectionTab({ projectId }: FlakeDetectionTabProps) {
                                             ))}
                                         </div>
                                     </td>
-                                    <td style={{ padding: '0.75rem', borderBottom: '1px solid var(--border)' }}>
-                                        <button
-                                            onClick={() => toggleQuarantine(spec)}
-                                            disabled={togglingSpec === spec.spec_name}
-                                            style={{
-                                                padding: '0.3rem 0.75rem',
-                                                fontSize: '0.8rem',
-                                                borderRadius: 'var(--radius)',
-                                                border: '1px solid var(--border)',
-                                                background: spec.is_quarantined ? 'var(--surface)' : 'rgba(245,158,11,0.1)',
-                                                color: spec.is_quarantined ? 'var(--text-secondary)' : 'var(--warning)',
-                                                cursor: togglingSpec === spec.spec_name ? 'wait' : 'pointer',
-                                                fontWeight: 500,
-                                                opacity: togglingSpec === spec.spec_name ? 0.5 : 1,
-                                            }}
-                                        >
-                                            {spec.is_quarantined ? 'Unquarantine' : 'Quarantine'}
-                                        </button>
-                                    </td>
+                                    {canEdit && (
+                                        <td style={{ padding: '0.75rem', borderBottom: '1px solid var(--border)' }}>
+                                            <button
+                                                onClick={() => toggleQuarantine(spec)}
+                                                disabled={togglingSpec === spec.spec_name}
+                                                style={{
+                                                    padding: '0.3rem 0.75rem',
+                                                    fontSize: '0.8rem',
+                                                    borderRadius: 'var(--radius)',
+                                                    border: '1px solid var(--border)',
+                                                    background: spec.is_quarantined ? 'var(--surface)' : 'rgba(245,158,11,0.1)',
+                                                    color: spec.is_quarantined ? 'var(--text-secondary)' : 'var(--warning)',
+                                                    cursor: togglingSpec === spec.spec_name ? 'wait' : 'pointer',
+                                                    fontWeight: 500,
+                                                    opacity: togglingSpec === spec.spec_name ? 0.5 : 1,
+                                                }}
+                                            >
+                                                {spec.is_quarantined ? 'Unquarantine' : 'Quarantine'}
+                                            </button>
+                                        </td>
+                                    )}
                                 </tr>
                             );
                         })}

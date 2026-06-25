@@ -6,6 +6,7 @@ import {
     CheckCircle, XCircle, AlertCircle, Calendar, RotateCw,
 } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { ScheduleModal } from '@/components/ScheduleModal';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -113,6 +114,7 @@ function getStatusBadge(status: string) {
 export default function SchedulesPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || (typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null) || 'default';
+    const { canEdit } = useProjectRole(projectId);
 
     const [schedules, setSchedules] = useState<Schedule[]>([]);
     const [executions, setExecutions] = useState<Execution[]>([]);
@@ -180,6 +182,7 @@ export default function SchedulesPage() {
     }, [schedules, fetchUpcoming]);
 
     const handleToggle = async (sched: Schedule) => {
+        if (!canEdit) return;
         setActionLoading(sched.id);
         try {
             const res = await fetch(`${API_BASE}/scheduling/${pid}/schedules/${sched.id}/toggle`, {
@@ -194,6 +197,7 @@ export default function SchedulesPage() {
     };
 
     const handleRunNow = async (sched: Schedule) => {
+        if (!canEdit) return;
         setActionLoading(sched.id);
         try {
             await fetch(`${API_BASE}/scheduling/${pid}/schedules/${sched.id}/run-now`, { method: 'POST' });
@@ -204,6 +208,7 @@ export default function SchedulesPage() {
     };
 
     const handleDelete = async (sched: Schedule) => {
+        if (!canEdit) return;
         if (!confirm(`Delete schedule "${sched.name}"?`)) return;
         setActionLoading(sched.id);
         try {
@@ -257,25 +262,27 @@ export default function SchedulesPage() {
                             <RotateCw size={14} />
                             Refresh
                         </button>
-                        <button
-                            onClick={() => { setEditingSchedule(undefined); setModalOpen(true); }}
-                            style={{
-                                padding: '0.5rem 1rem',
-                                background: 'var(--primary)',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: 'var(--radius)',
-                                cursor: 'pointer',
-                                fontWeight: 600,
-                                fontSize: '0.85rem',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.5rem',
-                            }}
-                        >
-                            <Plus size={16} />
-                            New Schedule
-                        </button>
+                        {canEdit && (
+                            <button
+                                onClick={() => { setEditingSchedule(undefined); setModalOpen(true); }}
+                                style={{
+                                    padding: '0.5rem 1rem',
+                                    background: 'var(--primary)',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: 'var(--radius)',
+                                    cursor: 'pointer',
+                                    fontWeight: 600,
+                                    fontSize: '0.85rem',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem',
+                                }}
+                            >
+                                <Plus size={16} />
+                                New Schedule
+                            </button>
+                        )}
                     </div>
                 }
             />
@@ -286,14 +293,14 @@ export default function SchedulesPage() {
                     icon={<Clock size={32} />}
                     title="No schedules yet"
                     description="Create a schedule to automate recurring test executions."
-                    action={
+                    action={canEdit ? (
                         <button
                             onClick={() => { setEditingSchedule(undefined); setModalOpen(true); }}
                             className="btn btn-primary"
                         >
                             <Plus size={16} /> New Schedule
                         </button>
-                    }
+                    ) : undefined}
                 />
             ) : (
                 <div style={{
@@ -382,95 +389,97 @@ export default function SchedulesPage() {
                                 )}
 
                                 {/* Actions */}
-                                <div style={{
-                                    display: 'flex',
-                                    gap: '0.5rem',
-                                    paddingTop: '0.5rem',
-                                    borderTop: '1px solid var(--border)',
-                                }}>
-                                    <button
-                                        onClick={() => { setEditingSchedule(sched); setModalOpen(true); }}
-                                        disabled={actionLoading === sched.id}
-                                        style={{
-                                            padding: '0.3rem 0.5rem',
-                                            background: 'none',
-                                            border: '1px solid var(--border)',
-                                            borderRadius: 'var(--radius)',
-                                            cursor: 'pointer',
-                                            color: 'var(--text-secondary)',
-                                            fontSize: '0.8rem',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '0.3rem',
-                                        }}
-                                        title="Edit"
-                                    >
-                                        <Edit3 size={13} />
-                                    </button>
-                                    <button
-                                        onClick={() => handleToggle(sched)}
-                                        disabled={actionLoading === sched.id}
-                                        style={{
-                                            padding: '0.3rem 0.5rem',
-                                            background: 'none',
-                                            border: '1px solid var(--border)',
-                                            borderRadius: 'var(--radius)',
-                                            cursor: 'pointer',
-                                            color: sched.enabled ? 'var(--warning)' : 'var(--success)',
-                                            fontSize: '0.8rem',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '0.3rem',
-                                        }}
-                                        title={sched.enabled ? 'Pause' : 'Enable'}
-                                    >
-                                        {sched.enabled ? <Pause size={13} /> : <Play size={13} />}
-                                        {sched.enabled ? 'Pause' : 'Enable'}
-                                    </button>
-                                    <button
-                                        onClick={() => handleRunNow(sched)}
-                                        disabled={actionLoading === sched.id}
-                                        style={{
-                                            padding: '0.3rem 0.5rem',
-                                            background: 'none',
-                                            border: '1px solid var(--border)',
-                                            borderRadius: 'var(--radius)',
-                                            cursor: 'pointer',
-                                            color: 'var(--primary)',
-                                            fontSize: '0.8rem',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '0.3rem',
-                                        }}
-                                        title="Run now"
-                                    >
-                                        {actionLoading === sched.id
-                                            ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                                            : <Play size={13} />
-                                        }
-                                        Run Now
-                                    </button>
-                                    <button
-                                        onClick={() => handleDelete(sched)}
-                                        disabled={actionLoading === sched.id}
-                                        style={{
-                                            padding: '0.3rem 0.5rem',
-                                            background: 'none',
-                                            border: '1px solid var(--border)',
-                                            borderRadius: 'var(--radius)',
-                                            cursor: 'pointer',
-                                            color: 'var(--danger)',
-                                            fontSize: '0.8rem',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '0.3rem',
-                                            marginLeft: 'auto',
-                                        }}
-                                        title="Delete"
-                                    >
-                                        <Trash2 size={13} />
-                                    </button>
-                                </div>
+                                {canEdit && (
+                                    <div style={{
+                                        display: 'flex',
+                                        gap: '0.5rem',
+                                        paddingTop: '0.5rem',
+                                        borderTop: '1px solid var(--border)',
+                                    }}>
+                                        <button
+                                            onClick={() => { setEditingSchedule(sched); setModalOpen(true); }}
+                                            disabled={actionLoading === sched.id}
+                                            style={{
+                                                padding: '0.3rem 0.5rem',
+                                                background: 'none',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius)',
+                                                cursor: 'pointer',
+                                                color: 'var(--text-secondary)',
+                                                fontSize: '0.8rem',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.3rem',
+                                            }}
+                                            title="Edit"
+                                        >
+                                            <Edit3 size={13} />
+                                        </button>
+                                        <button
+                                            onClick={() => handleToggle(sched)}
+                                            disabled={actionLoading === sched.id}
+                                            style={{
+                                                padding: '0.3rem 0.5rem',
+                                                background: 'none',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius)',
+                                                cursor: 'pointer',
+                                                color: sched.enabled ? 'var(--warning)' : 'var(--success)',
+                                                fontSize: '0.8rem',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.3rem',
+                                            }}
+                                            title={sched.enabled ? 'Pause' : 'Enable'}
+                                        >
+                                            {sched.enabled ? <Pause size={13} /> : <Play size={13} />}
+                                            {sched.enabled ? 'Pause' : 'Enable'}
+                                        </button>
+                                        <button
+                                            onClick={() => handleRunNow(sched)}
+                                            disabled={actionLoading === sched.id}
+                                            style={{
+                                                padding: '0.3rem 0.5rem',
+                                                background: 'none',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius)',
+                                                cursor: 'pointer',
+                                                color: 'var(--primary)',
+                                                fontSize: '0.8rem',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.3rem',
+                                            }}
+                                            title="Run now"
+                                        >
+                                            {actionLoading === sched.id
+                                                ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                                                : <Play size={13} />
+                                            }
+                                            Run Now
+                                        </button>
+                                        <button
+                                            onClick={() => handleDelete(sched)}
+                                            disabled={actionLoading === sched.id}
+                                            style={{
+                                                padding: '0.3rem 0.5rem',
+                                                background: 'none',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius)',
+                                                cursor: 'pointer',
+                                                color: 'var(--danger)',
+                                                fontSize: '0.8rem',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.3rem',
+                                                marginLeft: 'auto',
+                                            }}
+                                            title="Delete"
+                                        >
+                                            <Trash2 size={13} />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         );
                     })}
@@ -669,11 +678,12 @@ export default function SchedulesPage() {
 
             {/* Modal */}
             <ScheduleModal
-                isOpen={modalOpen}
+                isOpen={canEdit && modalOpen}
                 onClose={() => { setModalOpen(false); setEditingSchedule(undefined); }}
                 onSave={handleSave}
                 schedule={editingSchedule}
                 projectId={projectId}
+                canEdit={canEdit}
             />
 
             <style jsx>{`

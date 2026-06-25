@@ -38,6 +38,7 @@ interface SpecsPanelProps {
     folders: string[];
     summary: ApiSpecsSummary | null;
     initialSearch?: string;
+    canEdit: boolean;
 }
 
 const PAGE_SIZE_DEFAULT = 50;
@@ -63,6 +64,7 @@ export default function SpecsPanel({
     folders,
     summary,
     initialSearch,
+    canEdit,
 }: SpecsPanelProps) {
     // Local filter/sort state
     const [search, setSearch] = useState(initialSearch || '');
@@ -193,6 +195,7 @@ export default function SpecsPanel({
     const hasRunningJobs = Object.values(activeJobs).some(j => j.status === 'running');
 
     const handleBulkRun = useCallback(async () => {
+        if (!canEdit) return;
         const specPaths = apiSpecs.filter(s => selectedSpecs.has(s.path)).map(s => s.path);
         if (specPaths.length === 0) return;
         try {
@@ -259,9 +262,11 @@ export default function SpecsPanel({
         currentPage,
         fetchLatestRuns,
         fetchGeneratedTests,
+        canEdit,
     ]);
 
     const handleBulkGenerate = useCallback(async () => {
+        if (!canEdit) return;
         const specNames = apiSpecs.filter(s => selectedSpecs.has(s.path)).map(s => s.name);
         if (specNames.length === 0) return;
         try {
@@ -284,9 +289,10 @@ export default function SpecsPanel({
         } catch {
             setMessage({ type: 'error', text: 'Failed to start bulk generate' });
         }
-    }, [apiSpecs, selectedSpecs, projectId, setActiveJobs, pollJob, setMessage]);
+    }, [apiSpecs, selectedSpecs, projectId, setActiveJobs, pollJob, setMessage, canEdit]);
 
     const handleBulkDelete = useCallback(async () => {
+        if (!canEdit) return;
         const toDelete = apiSpecs.filter(s => selectedSpecs.has(s.path));
         if (toDelete.length === 0) return;
         if (!confirm(`Delete ${toDelete.length} spec(s)? This cannot be undone.`)) return;
@@ -300,7 +306,7 @@ export default function SpecsPanel({
         setMessage({ type: 'success', text: `Deleted ${deleted} spec(s)` });
         setSelectedSpecs(new Set());
         refresh(1);
-    }, [apiSpecs, selectedSpecs, projectId, setMessage, refresh]);
+    }, [apiSpecs, selectedSpecs, projectId, setMessage, refresh, canEdit]);
 
     const totalPages = Math.max(1, Math.ceil(specsTotal / pageSize));
 
@@ -327,10 +333,11 @@ export default function SpecsPanel({
                 tags={allTags}
                 selectedTags={selectedTags}
                 onTagsChange={setSelectedTags}
-                onCreateClick={() => setShowCreateModal(true)}
+                onCreateClick={() => { if (canEdit) setShowCreateModal(true); }}
                 onRefresh={handleRefresh}
                 totalShowing={apiSpecs.length}
                 totalSpecs={specsTotal}
+                canEdit={canEdit}
             />
 
             {/* Main content: optional folder tree + table */}
@@ -345,6 +352,7 @@ export default function SpecsPanel({
                         totalCount={specsTotal}
                         projectId={projectId}
                         setMessage={setMessage}
+                        canEdit={canEdit}
                     />
                 )}
 
@@ -367,6 +375,7 @@ export default function SpecsPanel({
                         fetchApiSpecs={() => refresh(currentPage)}
                         fetchGeneratedTests={() => fetchGeneratedTests(0)}
                         fetchLatestRuns={fetchLatestRuns}
+                        canEdit={canEdit}
                     />
 
                     {/* Pagination */}
@@ -382,17 +391,19 @@ export default function SpecsPanel({
             </div>
 
             {/* Bulk action bar */}
-            <ApiSpecsBulkBar
-                selectedCount={selectedSpecs.size}
-                onClear={() => setSelectedSpecs(new Set())}
-                onBulkRun={handleBulkRun}
-                onBulkGenerate={handleBulkGenerate}
-                onBulkDelete={handleBulkDelete}
-                isRunning={hasRunningJobs}
-            />
+            {canEdit && (
+                <ApiSpecsBulkBar
+                    selectedCount={selectedSpecs.size}
+                    onClear={() => setSelectedSpecs(new Set())}
+                    onBulkRun={handleBulkRun}
+                    onBulkGenerate={handleBulkGenerate}
+                    onBulkDelete={handleBulkDelete}
+                    isRunning={hasRunningJobs}
+                />
+            )}
 
             {/* Create modal */}
-            {showCreateModal && (
+            {canEdit && showCreateModal && (
                 <ApiSpecsCreateModal
                     projectId={projectId}
                     onClose={() => setShowCreateModal(false)}
@@ -401,6 +412,7 @@ export default function SpecsPanel({
                         refresh(1);
                     }}
                     setMessage={setMessage}
+                    canEdit={canEdit}
                 />
             )}
         </>

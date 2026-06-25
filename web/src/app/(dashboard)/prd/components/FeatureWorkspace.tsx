@@ -29,6 +29,7 @@ import type { Feature, GenerationResult } from './types';
 import { formatTimeAgo, getFeatureStatus, getStageDisplay } from './types';
 
 interface FeatureWorkspaceProps {
+    canEdit: boolean;
     feature: Feature | null;
     generationResult: GenerationResult | undefined;
     onGenerate: (name: string) => Promise<boolean>;
@@ -89,6 +90,7 @@ const iconButtonClass =
     'prd-icon-action focus:outline-none';
 
 export function FeatureWorkspace({
+    canEdit,
     feature,
     generationResult,
     onGenerate,
@@ -124,6 +126,16 @@ export function FeatureWorkspace({
             : null;
     const specName = useMemo(() => specNameFromPath(generationResult?.specPath), [generationResult?.specPath]);
     const statusStyle = statusStyles(status, wasCancelled);
+
+    useEffect(() => {
+        if (!canEdit) {
+            setEditingIndex(null);
+            setEditText('');
+            setIsAdding(false);
+            setNewReqText('');
+        }
+    }, [canEdit]);
+
     useEffect(() => {
         setLoadedSpec(null);
         setSpecLoadError(null);
@@ -162,7 +174,7 @@ export function FeatureWorkspace({
     }, [specName, status]);
 
     const handleGenerate = async () => {
-        if (!feature) return;
+        if (!canEdit || !feature) return;
         await onGenerate(feature.name);
     };
 
@@ -174,6 +186,7 @@ export function FeatureWorkspace({
     }, []);
 
     const handleStartEdit = (index: number, text: string) => {
+        if (!canEdit) return;
         setEditingIndex(index);
         setEditText(text);
         setIsAdding(false);
@@ -185,7 +198,7 @@ export function FeatureWorkspace({
     };
 
     const handleSaveEdit = async () => {
-        if (!feature || editingIndex === null || !editText.trim()) return;
+        if (!canEdit || !feature || editingIndex === null || !editText.trim()) return;
         setIsSaving(true);
         try {
             await onEditRequirement(feature.slug, editingIndex, editText.trim());
@@ -197,20 +210,21 @@ export function FeatureWorkspace({
     };
 
     const handleDelete = async (index: number) => {
-        if (!feature) return;
+        if (!canEdit || !feature) return;
         if (!window.confirm(`Delete requirement REQ-${index + 1}?`)) return;
         await onDeleteRequirement(feature.slug, index);
         if (editingIndex === index) handleCancelEdit();
     };
 
     const handleStartAdd = () => {
+        if (!canEdit) return;
         setIsAdding(true);
         setNewReqText('');
         handleCancelEdit();
     };
 
     const handleSaveAdd = async () => {
-        if (!feature || !newReqText.trim()) return;
+        if (!canEdit || !feature || !newReqText.trim()) return;
         setIsSaving(true);
         try {
             await onAddRequirement(feature.slug, newReqText.trim());
@@ -222,6 +236,8 @@ export function FeatureWorkspace({
     };
 
     const renderPrimaryAction = () => {
+        if (!canEdit) return null;
+
         if (!hasRequirements) {
             return (
                 <button
@@ -662,9 +678,12 @@ export function FeatureWorkspace({
 
                     <div className="prd-detail-actions">
 	                        <div className="prd-detail-action-row">
-	                            {isRunning && generationResult?.generationId && (
+	                            {canEdit && isRunning && generationResult?.generationId && (
 	                                <button
-	                                    onClick={() => onStop(generationResult.generationId!)}
+	                                    onClick={() => {
+                                            if (!canEdit) return;
+                                            onStop(generationResult.generationId!);
+                                        }}
 	                                    className={`${primaryActionClass} text-white`}
 	                                    style={{ background: '#dc2626', color: '#fff' }}
 	                                >
@@ -698,7 +717,7 @@ export function FeatureWorkspace({
                                     {feature.requirements?.length || 0}
                                 </span>
                             </div>
-                            {!isAdding && (
+                            {canEdit && !isAdding && (
                                 <button
                                     onClick={handleStartAdd}
                                     className={`${secondaryActionClass} prd-secondary-outline`}
@@ -729,7 +748,8 @@ export function FeatureWorkspace({
                                                         autoFocus
                                                         disabled={isSaving}
                                                     />
-                                                    <div className="flex gap-1.5">
+	                                                    {canEdit && (
+                                                        <div className="flex gap-1.5">
                                                         <button
                                                             onClick={handleSaveEdit}
                                                             disabled={isSaving || !editText.trim()}
@@ -745,31 +765,34 @@ export function FeatureWorkspace({
                                                         >
                                                             <X className="h-3 w-3" /> Cancel
                                                         </button>
-                                                    </div>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             ) : (
 	                                                <>
 	                                                    <span className="prd-req-text">
 	                                                        {req}
 	                                                    </span>
-	                                                    <div className="prd-req-actions">
-	                                                        <button
-	                                                            onClick={() => handleStartEdit(i, req)}
-	                                                            className={iconButtonClass}
-	                                                            style={{ color: 'var(--text-secondary)' }}
-	                                                            aria-label={`Edit requirement ${i + 1}`}
-	                                                        >
-                                                            <Pencil size={14} />
-                                                        </button>
-	                                                        <button
-	                                                            onClick={() => handleDelete(i)}
-	                                                            className={iconButtonClass}
-	                                                            style={{ color: 'var(--danger)' }}
-	                                                            aria-label={`Delete requirement ${i + 1}`}
-	                                                        >
-                                                            <Trash2 size={14} />
-                                                        </button>
-                                                    </div>
+	                                                    {canEdit && (
+                                                        <div className="prd-req-actions">
+                                                            <button
+                                                                onClick={() => handleStartEdit(i, req)}
+                                                                className={iconButtonClass}
+                                                                style={{ color: 'var(--text-secondary)' }}
+                                                                aria-label={`Edit requirement ${i + 1}`}
+                                                            >
+                                                                <Pencil size={14} />
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleDelete(i)}
+                                                                className={iconButtonClass}
+                                                                style={{ color: 'var(--danger)' }}
+                                                                aria-label={`Delete requirement ${i + 1}`}
+                                                            >
+                                                                <Trash2 size={14} />
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                 </>
                                             )}
                                         </li>
@@ -781,7 +804,7 @@ export function FeatureWorkspace({
                                 </div>
                             )}
 
-	                            {isAdding && (
+	                            {canEdit && isAdding && (
 	                                <div className="m-3 rounded-md border p-3" style={{ borderColor: 'var(--border-bright)', background: 'var(--surface)' }}>
 	                                    <textarea
 	                                        className="prd-requirement-textarea"

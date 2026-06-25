@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Unknown assistant action: ${payload.toolName}` }, { status: 400 });
   }
 
-  const roleError = await validateActionRole(config.requiredRole, authToken);
+  const roleError = await validateActionRole(config.requiredRole, authToken, payload.projectId);
   if (roleError) {
     return NextResponse.json({ error: roleError }, { status: 403 });
   }
@@ -197,19 +197,46 @@ async function executeSplitSpecAction({
   );
 }
 
-async function validateActionRole(requiredRole: string, authToken?: string) {
-  if (requiredRole !== 'admin') return null;
+type ProjectRoleInfo = {
+  role?: 'admin' | 'editor' | 'viewer' | null;
+  is_superuser?: boolean;
+};
+
+export async function validateActionRole(requiredRole: string, authToken?: string, projectId?: string) {
+  if (requiredRole !== 'admin' && requiredRole !== 'editor') return null;
 
   // Preserve unauthenticated local/dev deployments where REQUIRE_AUTH=false.
   if (!authToken) return null;
 
-  const userRes = await backendFetch<{ is_superuser?: boolean }>('/auth/me', {
+  if (!projectId) {
+    const userRes = await backendFetch<{ is_superuser?: boolean }>('/auth/me', {
+      authToken,
+      timeoutMs: 5000,
+    });
+
+    if (!userRes.ok) return 'Could not verify user permissions for this assistant action';
+    if (userRes.data?.is_superuser) return null;
+    return requiredRole === 'admin'
+      ? 'This assistant action requires an administrator'
+      : 'This assistant action requires an editor or administrator';
+  }
+
+  const roleRes = await backendFetch<ProjectRoleInfo>(`/projects/${encodeURIComponent(projectId)}/my-role`, {
     authToken,
+    projectId,
     timeoutMs: 5000,
   });
 
-  if (!userRes.ok) return 'Could not verify user permissions for this assistant action';
-  if (!userRes.data?.is_superuser) return 'This assistant action requires an administrator';
+  if (!roleRes.ok) return 'Could not verify user permissions for this assistant action';
+  if (roleRes.data?.is_superuser) return null;
+
+  const role = roleRes.data?.role;
+  if (requiredRole === 'admin' && role !== 'admin') {
+    return 'This assistant action requires an administrator';
+  }
+  if (requiredRole === 'editor' && role !== 'admin' && role !== 'editor') {
+    return 'This assistant action requires an editor or administrator';
+  }
   return null;
 }
 

@@ -10,6 +10,7 @@ import { useParams } from 'next/navigation';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -92,6 +93,7 @@ export default function RunDetailPage() {
     const params = useParams();
     const id = params?.id as string;
     const { currentProject, projectId, isLoading: projectLoading } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [copied, setCopied] = useState(false);
@@ -621,6 +623,7 @@ export default function RunDetailPage() {
     };
 
     const handleStop = async () => {
+        if (!canEdit) return;
         if (!confirm('Are you sure you want to stop this run?')) return;
 
         try {
@@ -641,6 +644,7 @@ export default function RunDetailPage() {
     };
 
     const handleGenerateBugReport = async () => {
+        if (!canEdit) return;
         if (!currentProject?.id) return;
         setBugReportLoading(true);
 
@@ -694,6 +698,7 @@ export default function RunDetailPage() {
     };
 
     const handleCreateJiraIssue = async () => {
+        if (!canEdit) return;
         if (!currentProject?.id || !jiraConfig?.project_key || !jiraConfig?.issue_type_id) return;
         setCreatingIssue(true);
 
@@ -750,7 +755,7 @@ export default function RunDetailPage() {
                 }
                 actions={
                     <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                        {isRunActive && (
+                        {canEdit && isRunActive && (
                             <button
                                 onClick={handleStop}
                                 className="btn btn-danger"
@@ -770,7 +775,7 @@ export default function RunDetailPage() {
                                 >
                                     <ExternalLink size={16} /> {jiraIssue.jira_issue_key}
                                 </a>
-                            ) : (
+                            ) : canEdit ? (
                                 <button
                                     onClick={handleGenerateBugReport}
                                     disabled={bugReportLoading}
@@ -783,7 +788,7 @@ export default function RunDetailPage() {
                                         <><Bug size={16} /> Create Bug Report</>
                                     )}
                                 </button>
-                            )
+                            ) : null
                         )}
                         <div className={`badge badge-${runStatus === 'passed' ? 'success' : runStatus === 'failed' ? 'danger' : 'secondary'}`} style={{ fontSize: '1rem', padding: '0.5rem 1rem' }}>
                             {runStatus === 'passed' ? 'Passed' :
@@ -1445,7 +1450,7 @@ export default function RunDetailPage() {
             </div>
 
             {/* Bug Report Modal */}
-            {bugReportModal && (
+            {canEdit && bugReportModal && (
                 <div style={{
                     position: 'fixed',
                     top: 0,

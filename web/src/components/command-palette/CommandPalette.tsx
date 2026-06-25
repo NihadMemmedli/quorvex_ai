@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { Command } from 'cmdk';
 import { Search, Clock, Zap, ArrowRight, FileText, Play, CheckSquare, Loader2, Layers, Compass } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { useCommandPalette } from './CommandPaletteProvider';
 import { useRecentPages } from './useRecentPages';
 import { useCommandSearch, SearchResult } from './useCommandSearch';
@@ -29,6 +31,9 @@ const typeLabels: Record<SearchResult['type'], string> = {
 export function CommandPalette() {
     const { isOpen, close } = useCommandPalette();
     const { user } = useAuth();
+    const { currentProject } = useProject();
+    const { canEdit: canEditProject } = useProjectRole(currentProject?.id ?? null);
+    const canEdit = !currentProject?.id || canEditProject;
     const router = useRouter();
     const [query, setQuery] = useState('');
     const trimmedQuery = query.trim();
@@ -61,6 +66,10 @@ export function CommandPalette() {
     }, [isOpen, close]);
 
     const handleSelect = (item: CommandItem | SearchResult | { href: string }) => {
+        if ('editorOnly' in item && item.editorOnly && !canEdit) {
+            close();
+            return;
+        }
         if ('action' in item && item.action) {
             window.dispatchEvent(new CustomEvent(item.action));
             close();
@@ -72,10 +81,15 @@ export function CommandPalette() {
         }
     };
 
+    const visibleQuickActions = useMemo(
+        () => quickActions.filter(item => !item.editorOnly || canEdit),
+        [canEdit],
+    );
+
     // Filter static commands
     const filteredQuickActions = useMemo(() =>
-        rankCommandItems(quickActions, query),
-    [query]);
+        rankCommandItems(visibleQuickActions, query),
+    [query, visibleQuickActions]);
 
     const filteredNavigation = useMemo(() =>
         rankCommandItems(navigationItems, query),

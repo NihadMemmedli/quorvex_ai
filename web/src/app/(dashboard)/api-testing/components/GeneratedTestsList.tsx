@@ -26,6 +26,7 @@ interface GeneratedTestsListProps {
     setActiveJobs: React.Dispatch<React.SetStateAction<Record<string, JobStatus>>>;
     pollJob: (jobId: string, onComplete?: () => void) => void;
     fetchApiRuns: (offset?: number) => void;
+    canEdit: boolean;
 }
 
 type SortOption = 'modified' | 'name' | 'status' | 'last_run' | 'size';
@@ -74,6 +75,7 @@ export default React.memo(function GeneratedTestsList({
     setActiveJobs,
     pollJob,
     fetchApiRuns,
+    canEdit,
 }: GeneratedTestsListProps) {
     // Existing state
     const [testContents, setTestContents] = useState<Record<string, string>>({});
@@ -157,13 +159,15 @@ export default React.memo(function GeneratedTestsList({
     }, [projectId, testContents]);
 
     const handleStartEdit = useCallback(async (testName: string) => {
+        if (!canEdit) return;
         const content = testContents[testName] || await loadTestContent(testName) || '';
         setEditingTest(testName);
         setEditTestContent(content);
         setMenuOpen(null);
-    }, [loadTestContent, testContents]);
+    }, [loadTestContent, testContents, canEdit]);
 
     const handleSaveTest = async (testName: string) => {
+        if (!canEdit) return;
         setSavingTest(true);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/generated-tests/${testName}`, projectId)}`, {
@@ -185,6 +189,7 @@ export default React.memo(function GeneratedTestsList({
 
     // Run a single test
     const handleRunTest = useCallback(async (test: GeneratedTest, healOnFailure = false) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/run-direct', projectId)}`, {
                 method: 'POST',
@@ -217,10 +222,11 @@ export default React.memo(function GeneratedTestsList({
                 setMessage({ type: 'error', text: err.detail || 'Failed to start test' });
             }
         } catch { setMessage({ type: 'error', text: 'Failed to start test run' }); }
-    }, [projectId, setActiveJobs, pollJob, refreshTests, fetchApiRuns, setMessage]);
+    }, [projectId, setActiveJobs, pollJob, refreshTests, fetchApiRuns, setMessage, canEdit]);
 
     // Run selected tests
     const handleRunSelected = useCallback(async () => {
+        if (!canEdit) return;
         const testsToRun = generatedTests.filter(t => selectedTests.has(t.path));
         if (testsToRun.length === 0) return;
         setMessage({ type: 'success', text: `Starting ${testsToRun.length} test run(s)...` });
@@ -228,19 +234,21 @@ export default React.memo(function GeneratedTestsList({
             await handleRunTest(test);
         }
         setSelectedTests(new Set());
-    }, [generatedTests, selectedTests, handleRunTest, setMessage]);
+    }, [generatedTests, selectedTests, handleRunTest, setMessage, canEdit]);
 
     // Run all visible tests
     const handleRunAll = useCallback(async () => {
+        if (!canEdit) return;
         if (generatedTests.length === 0) return;
         setMessage({ type: 'success', text: `Starting ${generatedTests.length} test run(s)...` });
         for (const test of generatedTests) {
             await handleRunTest(test);
         }
-    }, [generatedTests, handleRunTest, setMessage]);
+    }, [generatedTests, handleRunTest, setMessage, canEdit]);
 
     // Delete test
     const handleDeleteTest = useCallback(async (test: GeneratedTest) => {
+        if (!canEdit) return;
         if (!confirm(`Delete ${test.name}? This cannot be undone.`)) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/generated-tests/${test.name}`, projectId)}`, { method: 'DELETE' });
@@ -252,7 +260,7 @@ export default React.memo(function GeneratedTestsList({
                 setMessage({ type: 'error', text: err.detail || 'Failed to delete' });
             }
         } catch { setMessage({ type: 'error', text: 'Failed to delete test' }); }
-    }, [projectId, refreshTests, setMessage]);
+    }, [projectId, refreshTests, setMessage, canEdit]);
 
     // Copy path
     const handleCopyPath = useCallback((test: GeneratedTest) => {
@@ -263,21 +271,23 @@ export default React.memo(function GeneratedTestsList({
 
     // Selection helpers
     const toggleSelect = useCallback((path: string) => {
+        if (!canEdit) return;
         setSelectedTests(prev => {
             const next = new Set(prev);
             if (next.has(path)) next.delete(path);
             else next.add(path);
             return next;
         });
-    }, []);
+    }, [canEdit]);
 
     const toggleSelectAll = useCallback(() => {
+        if (!canEdit) return;
         if (selectedTests.size === generatedTests.length) {
             setSelectedTests(new Set());
         } else {
             setSelectedTests(new Set(generatedTests.map(t => t.path)));
         }
-    }, [generatedTests, selectedTests.size]);
+    }, [generatedTests, selectedTests.size, canEdit]);
 
     // Determine effective status for a test (running state overrides DB status)
     const getEffectiveStatus = useCallback((test: GeneratedTest): 'passed' | 'failed' | 'running' | null => {
@@ -373,20 +383,22 @@ export default React.memo(function GeneratedTestsList({
                         Refreshing
                     </span>
                 )}
-                <button
-                    onClick={handleRunAll}
-                    disabled={generatedTests.length === 0 || hasRunning}
-                    style={{
-                        display: 'flex', alignItems: 'center', gap: '0.4rem',
-                        padding: '0.5rem 0.85rem', background: 'var(--success)',
-                        border: 'none', borderRadius: 'var(--radius)',
-                        cursor: generatedTests.length === 0 || hasRunning ? 'not-allowed' : 'pointer',
-                        color: '#fff', fontSize: '0.875rem', fontWeight: 600,
-                        opacity: generatedTests.length === 0 || hasRunning ? 0.5 : 1,
-                    }}
-                >
-                    <Play size={14} /> Run All
-                </button>
+                {canEdit && (
+                    <button
+                        onClick={handleRunAll}
+                        disabled={generatedTests.length === 0 || hasRunning}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '0.4rem',
+                            padding: '0.5rem 0.85rem', background: 'var(--success)',
+                            border: 'none', borderRadius: 'var(--radius)',
+                            cursor: generatedTests.length === 0 || hasRunning ? 'not-allowed' : 'pointer',
+                            color: '#fff', fontSize: '0.875rem', fontWeight: 600,
+                            opacity: generatedTests.length === 0 || hasRunning ? 0.5 : 1,
+                        }}
+                    >
+                        <Play size={14} /> Run All
+                    </button>
+                )}
                 <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginLeft: 'auto' }}>
                     {generatedTests.length} of {testsTotal} file{testsTotal !== 1 ? 's' : ''}
                 </span>
@@ -429,12 +441,14 @@ export default React.memo(function GeneratedTestsList({
                         letterSpacing: '0.03em',
                     }}>
                         <div>
-                            <input
-                                type="checkbox"
-                                checked={allSelected}
-                                onChange={toggleSelectAll}
-                                style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
-                            />
+                            {canEdit && (
+                                <input
+                                    type="checkbox"
+                                    checked={allSelected}
+                                    onChange={toggleSelectAll}
+                                    style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
+                                />
+                            )}
                         </div>
                         <div></div>
                         <div>Test Name</div>
@@ -471,12 +485,14 @@ export default React.memo(function GeneratedTestsList({
                                     }}
                                 >
                                     <div onClick={e => e.stopPropagation()}>
-                                        <input
-                                            type="checkbox"
-                                            checked={isSelected}
-                                            onChange={() => toggleSelect(test.path)}
-                                            style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
-                                        />
+                                        {canEdit && (
+                                            <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={() => toggleSelect(test.path)}
+                                                style={{ cursor: 'pointer', accentColor: 'var(--primary)' }}
+                                            />
+                                        )}
                                     </div>
                                     <div><StatusDot status={effectiveStatus} /></div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
@@ -510,23 +526,25 @@ export default React.memo(function GeneratedTestsList({
                                         {relativeTime(test.last_run_at)}
                                     </div>
                                     <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }} onClick={e => e.stopPropagation()}>
-                                        <button
-                                            onClick={() => handleRunTest(test)}
-                                            disabled={isRunning}
-                                            title="Run test"
-                                            style={{
-                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                width: '28px', height: '28px', borderRadius: 'var(--radius)',
-                                                background: isRunning ? 'var(--warning-muted)' : 'var(--success-muted)',
-                                                border: `1px solid ${isRunning ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.2)'}`,
-                                                cursor: isRunning ? 'wait' : 'pointer',
-                                                color: isRunning ? 'var(--warning)' : 'var(--success)',
-                                            }}
-                                        >
-                                            {isRunning
-                                                ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                                                : <Play size={13} />}
-                                        </button>
+                                        {canEdit && (
+                                            <button
+                                                onClick={() => handleRunTest(test)}
+                                                disabled={isRunning}
+                                                title="Run test"
+                                                style={{
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                    width: '28px', height: '28px', borderRadius: 'var(--radius)',
+                                                    background: isRunning ? 'var(--warning-muted)' : 'var(--success-muted)',
+                                                    border: `1px solid ${isRunning ? 'rgba(245, 158, 11, 0.2)' : 'rgba(16, 185, 129, 0.2)'}`,
+                                                    cursor: isRunning ? 'wait' : 'pointer',
+                                                    color: isRunning ? 'var(--warning)' : 'var(--success)',
+                                                }}
+                                            >
+                                                {isRunning
+                                                    ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                                                    : <Play size={13} />}
+                                            </button>
+                                        )}
                                         <div style={{ position: 'relative' }} ref={isMenuOpen ? menuRef : undefined}>
                                             <button
                                                 onClick={() => setMenuOpen(isMenuOpen ? null : test.name)}
@@ -546,26 +564,30 @@ export default React.memo(function GeneratedTestsList({
                                                     border: '1px solid var(--border)', borderRadius: 'var(--radius)',
                                                     boxShadow: '0 4px 12px rgba(0,0,0,0.3)', overflow: 'hidden',
                                                 }}>
-                                                    <button
-                                                        onClick={() => { setMenuOpen(null); void handleRunTest(test, true); }}
-                                                        style={menuItemStyle}
-                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                                    >
-                                                        <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
-                                                    </button>
-                                                    <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
-                                                    <button
-                                                        onClick={() => {
-                                                            setExpandedTest(test.name);
-                                                            void handleStartEdit(test.name);
-                                                        }}
-                                                        style={menuItemStyle}
-                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                                    >
-                                                        <Edit2 size={13} /> Edit Code
-                                                    </button>
+                                                    {canEdit && (
+                                                        <>
+                                                            <button
+                                                                onClick={() => { setMenuOpen(null); void handleRunTest(test, true); }}
+                                                                style={menuItemStyle}
+                                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                            >
+                                                                <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
+                                                            </button>
+                                                            <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
+                                                            <button
+                                                                onClick={() => {
+                                                                    setExpandedTest(test.name);
+                                                                    void handleStartEdit(test.name);
+                                                                }}
+                                                                style={menuItemStyle}
+                                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                            >
+                                                                <Edit2 size={13} /> Edit Code
+                                                            </button>
+                                                        </>
+                                                    )}
                                                     <button
                                                         onClick={() => handleCopyPath(test)}
                                                         style={menuItemStyle}
@@ -574,15 +596,19 @@ export default React.memo(function GeneratedTestsList({
                                                     >
                                                         <Copy size={13} /> Copy Path
                                                     </button>
-                                                    <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
-                                                    <button
-                                                        onClick={() => { setMenuOpen(null); handleDeleteTest(test); }}
-                                                        style={{ ...menuItemStyle, color: 'var(--danger)' }}
-                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(239, 68, 68, 0.05)')}
-                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                                    >
-                                                        <Trash2 size={13} /> Delete
-                                                    </button>
+                                                    {canEdit && (
+                                                        <>
+                                                            <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
+                                                            <button
+                                                                onClick={() => { setMenuOpen(null); handleDeleteTest(test); }}
+                                                                style={{ ...menuItemStyle, color: 'var(--danger)' }}
+                                                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(239, 68, 68, 0.05)')}
+                                                                onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                            >
+                                                                <Trash2 size={13} /> Delete
+                                                            </button>
+                                                        </>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -600,6 +626,7 @@ export default React.memo(function GeneratedTestsList({
                                             <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
                                                 {test.path}
                                             </span>
+                                            {canEdit && (
                                             <div style={{ display: 'flex', gap: '0.4rem' }}>
                                                 <button
                                                     onClick={() => handleRunTest(test)}
@@ -665,14 +692,15 @@ export default React.memo(function GeneratedTestsList({
                                                     </button>
                                                 )}
                                             </div>
+                                            )}
                                         </div>
                                         <div style={{ height: '500px', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
-                                            {editingTest === test.name && testContents[test.name] ? (
+                                            {editingTest === test.name && canEdit && testContents[test.name] ? (
                                                 <CodeEditor
                                                     value={editTestContent}
                                                     onChange={(val: string) => setEditTestContent(val)}
                                                     language="typescript"
-                                                    readOnly={false}
+                                                    readOnly={!canEdit}
                                                 />
                                             ) : testContents[test.name] ? (
                                                 <pre style={{
@@ -725,7 +753,7 @@ export default React.memo(function GeneratedTestsList({
             )}
 
             {/* Floating Selection Bar */}
-            {selectedTests.size > 0 && (
+            {canEdit && selectedTests.size > 0 && (
                 <div style={{
                     position: 'fixed', bottom: '1.5rem', left: '50%', transform: 'translateX(-50%)',
                     display: 'flex', alignItems: 'center', gap: '1rem',

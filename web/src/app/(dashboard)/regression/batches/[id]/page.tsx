@@ -11,6 +11,7 @@ import {
 import Link from 'next/link';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
@@ -134,6 +135,7 @@ export default function BatchDetailPage() {
     const router = useRouter();
     const batchId = params.id as string;
     const { projectId, isLoading: projectLoading } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
 
     const [batch, setBatch] = useState<BatchDetail | null>(null);
     const [loading, setLoading] = useState(true);
@@ -239,6 +241,7 @@ export default function BatchDetailPage() {
 
     // D2: Re-run failed handler
     const handleRerunFailed = async () => {
+        if (!canEdit) return;
         setRerunning(true);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/rerun-failed`, projectId)}`, { method: 'POST' });
@@ -259,6 +262,7 @@ export default function BatchDetailPage() {
     };
 
     const handleCancelBatch = async () => {
+        if (!canEdit) return;
         if (!batch) return;
         setCancelling(true);
         try {
@@ -319,6 +323,7 @@ export default function BatchDetailPage() {
     };
 
     const handleOpenSyncModal = async () => {
+        if (!canEdit) return;
         const pid = projectId || batch?.project_id;
         if (!pid) return;
         setSyncResult(null);
@@ -339,6 +344,7 @@ export default function BatchDetailPage() {
     };
 
     const handleSyncToTestrail = async () => {
+        if (!canEdit) return;
         const pid = projectId || batch?.project_id;
         if (!pid || !trConfig?.project_id || !trConfig?.suite_id) return;
         setSyncing(true);
@@ -465,7 +471,7 @@ export default function BatchDetailPage() {
     };
 
     const trConfigured = trConfig?.configured && trConfig?.project_id && trConfig?.suite_id;
-    const showSyncButton = batch?.status === 'completed' && trConfigured;
+    const showSyncButton = canEdit && batch?.status === 'completed' && trConfigured;
 
     if (loading) return <PageLayout tier="standard"><ListPageSkeleton rows={5} /></PageLayout>;
 
@@ -524,7 +530,7 @@ export default function BatchDetailPage() {
                 actions={
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                         {/* D2: Re-run Failed */}
-                        {batch.status === 'completed' && batch.failed > 0 && (
+                        {canEdit && batch.status === 'completed' && batch.failed > 0 && (
                             <button
                                 className="btn"
                                 onClick={handleRerunFailed}
@@ -547,7 +553,7 @@ export default function BatchDetailPage() {
                                 <Upload size={16} /> Sync to TestRail
                             </button>
                         )}
-                        {activeRunCount > 0 && (
+                        {canEdit && activeRunCount > 0 && (
                             <button
                                 className="btn"
                                 onClick={handleCancelBatch}
@@ -876,7 +882,7 @@ export default function BatchDetailPage() {
             )}
 
             {/* TestRail Sync Modal */}
-            {syncModalOpen && (
+            {canEdit && syncModalOpen && (
                 <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setSyncModalOpen(false)}>
                     <div className="card" style={{ width: '500px', maxWidth: '90vw', padding: '1.5rem' }} onClick={e => e.stopPropagation()}>
                         <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Upload size={18} /> Sync to TestRail</h3>

@@ -19,6 +19,7 @@ interface HistoryPanelProps {
     runsTotal: number;
     onViewDetail?: (runId: string) => void;
     onRetry?: (runId: string) => void;
+    canEdit: boolean;
 }
 
 export default function HistoryPanel({
@@ -34,6 +35,7 @@ export default function HistoryPanel({
     runsTotal,
     onViewDetail,
     onRetry,
+    canEdit,
 }: HistoryPanelProps) {
     return (
         <div>
@@ -199,7 +201,7 @@ export default function HistoryPanel({
                                         >
                                             View Full Details
                                         </button>
-                                        {run.status === 'failed' && (
+                                        {canEdit && run.status === 'failed' && onRetry && (
                                             <button
                                                 onClick={() => onRetry?.(run.id)}
                                                 style={{

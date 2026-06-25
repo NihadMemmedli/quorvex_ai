@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { CheckCircle2, Code2, ExternalLink, FileText, Loader2, MousePointerClick, Play, Square, Upload, XCircle } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { PageHeader } from '@/components/ui/page-header';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -134,6 +135,7 @@ export default function RecordingsPage() {
     const [error, setError] = useState<string | null>(null);
 
     const projectId = currentProject?.id || 'default';
+    const { canEdit, isLoading: roleLoading } = useProjectRole(projectId);
     const isRecording = activeSession?.status === 'starting' || activeSession?.status === 'recording';
     const activeRecorderUrl = activeSession ? recorderBrowserUrl(activeSession) : null;
 
@@ -164,6 +166,7 @@ export default function RecordingsPage() {
     }, [isRecording, loadSessions]);
 
     const startRecording = async () => {
+        if (!canEdit) return;
         setError(null);
         setImportResult(null);
         setIsStarting(true);
@@ -193,6 +196,7 @@ export default function RecordingsPage() {
     };
 
     const stopRecording = async (sessionId: string) => {
+        if (!canEdit) return;
         setError(null);
         setIsStopping(true);
         try {
@@ -207,6 +211,7 @@ export default function RecordingsPage() {
     };
 
     const importSession = async (session: RecordingSession) => {
+        if (!canEdit) return;
         setError(null);
         setImportResult(null);
         setImportingId(session.id);
@@ -233,96 +238,104 @@ export default function RecordingsPage() {
                 icon={<MousePointerClick size={22} />}
             />
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 420px) 1fr', gap: '1rem', alignItems: 'start' }}>
-                <section className="card-elevated">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-                        <Play size={18} color="var(--primary)" />
-                        <h2 style={{ margin: 0, fontSize: '1rem' }}>New Recording</h2>
-                    </div>
+            <div style={{ display: 'grid', gridTemplateColumns: canEdit ? 'minmax(320px, 420px) 1fr' : '1fr', gap: '1rem', alignItems: 'start' }}>
+                {canEdit && (
+                    <section className="card-elevated">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                            <Play size={18} color="var(--primary)" />
+                            <h2 style={{ margin: 0, fontSize: '1rem' }}>New Recording</h2>
+                        </div>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
-                        <label className="form-group">
-                            <span className="label">Target URL</span>
-                            <input
-                                className="input"
-                                value={targetUrl}
-                                onChange={event => setTargetUrl(event.target.value)}
-                                placeholder="https://example.com/login"
-                                disabled={isRecording || isStarting}
-                            />
-                        </label>
-
-                        <label className="form-group">
-                            <span className="label">Spec Name</span>
-                            <input
-                                className="input"
-                                value={name}
-                                onChange={event => setName(event.target.value)}
-                                placeholder="Login happy path"
-                                disabled={isRecording || isStarting}
-                            />
-                        </label>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
                             <label className="form-group">
-                                <span className="label">Viewport</span>
+                                <span className="label">Target URL</span>
                                 <input
                                     className="input"
-                                    value={viewportSize}
-                                    onChange={event => setViewportSize(event.target.value)}
-                                    placeholder="1280,720"
+                                    value={targetUrl}
+                                    onChange={event => setTargetUrl(event.target.value)}
+                                    placeholder="https://example.com/login"
                                     disabled={isRecording || isStarting}
                                 />
                             </label>
+
                             <label className="form-group">
-                                <span className="label">Device</span>
+                                <span className="label">Spec Name</span>
                                 <input
                                     className="input"
-                                    value={device}
-                                    onChange={event => setDevice(event.target.value)}
-                                    placeholder="Optional preset"
+                                    value={name}
+                                    onChange={event => setName(event.target.value)}
+                                    placeholder="Login happy path"
                                     disabled={isRecording || isStarting}
                                 />
                             </label>
-                        </div>
 
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                                <input type="checkbox" checked={saveHar} onChange={event => setSaveHar(event.target.checked)} disabled={isRecording || isStarting} />
-                                Save HAR
-                            </label>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                                <input type="checkbox" checked={saveStorage} onChange={event => setSaveStorage(event.target.checked)} disabled={isRecording || isStarting} />
-                                Save storage state
-                            </label>
-                        </div>
-
-                        {error && (
-                            <div style={{
-                                padding: '0.75rem',
-                                borderRadius: 'var(--radius-sm)',
-                                border: '1px solid rgba(239, 68, 68, 0.35)',
-                                background: 'rgba(239, 68, 68, 0.08)',
-                                color: 'var(--danger)',
-                                fontSize: '0.85rem',
-                            }}>
-                                {error}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                                <label className="form-group">
+                                    <span className="label">Viewport</span>
+                                    <input
+                                        className="input"
+                                        value={viewportSize}
+                                        onChange={event => setViewportSize(event.target.value)}
+                                        placeholder="1280,720"
+                                        disabled={isRecording || isStarting}
+                                    />
+                                </label>
+                                <label className="form-group">
+                                    <span className="label">Device</span>
+                                    <input
+                                        className="input"
+                                        value={device}
+                                        onChange={event => setDevice(event.target.value)}
+                                        placeholder="Optional preset"
+                                        disabled={isRecording || isStarting}
+                                    />
+                                </label>
                             </div>
-                        )}
 
-                        <button
-                            className="btn btn-primary"
-                            onClick={startRecording}
-                            disabled={isStarting || isRecording || !targetUrl.trim()}
-                            style={{ justifyContent: 'center', cursor: isStarting || isRecording ? 'not-allowed' : 'pointer' }}
-                        >
-                            {isStarting ? <Loader2 size={16} className="spin" /> : <MousePointerClick size={16} />}
-                            Start Recording
-                        </button>
-                    </div>
-                </section>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                                    <input type="checkbox" checked={saveHar} onChange={event => setSaveHar(event.target.checked)} disabled={isRecording || isStarting} />
+                                    Save HAR
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                                    <input type="checkbox" checked={saveStorage} onChange={event => setSaveStorage(event.target.checked)} disabled={isRecording || isStarting} />
+                                    Save storage state
+                                </label>
+                            </div>
+
+                            {error && (
+                                <div style={{
+                                    padding: '0.75rem',
+                                    borderRadius: 'var(--radius-sm)',
+                                    border: '1px solid rgba(239, 68, 68, 0.35)',
+                                    background: 'rgba(239, 68, 68, 0.08)',
+                                    color: 'var(--danger)',
+                                    fontSize: '0.85rem',
+                                }}>
+                                    {error}
+                                </div>
+                            )}
+
+                            <button
+                                className="btn btn-primary"
+                                onClick={startRecording}
+                                disabled={isStarting || isRecording || !targetUrl.trim()}
+                                style={{ justifyContent: 'center', cursor: isStarting || isRecording ? 'not-allowed' : 'pointer' }}
+                            >
+                                {isStarting ? <Loader2 size={16} className="spin" /> : <MousePointerClick size={16} />}
+                                Start Recording
+                            </button>
+                        </div>
+                    </section>
+                )}
 
                 <section style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    {!roleLoading && !canEdit && (
+                        <div className="card-elevated" style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                            You have read-only access to this project. Recording sessions and generated artifacts are visible, but recorder controls are disabled.
+                        </div>
+                    )}
+
                     {activeSession && (
                         <div className="card-elevated" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
                             <div>
@@ -332,7 +345,7 @@ export default function RecordingsPage() {
                                 </div>
                                 <div style={{ fontWeight: 700 }}>{activeSession.name || 'Recording session'}</div>
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>{activeSession.target_url}</div>
-                                {activeRecorderUrl && (
+                                {canEdit && activeRecorderUrl && (
                                     <div style={{ marginTop: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem' }}>
                                             The recorder browser is running in the backend display.
@@ -350,15 +363,17 @@ export default function RecordingsPage() {
                                     </div>
                                 )}
                             </div>
-                            <button
-                                className="btn btn-secondary"
-                                onClick={() => stopRecording(activeSession.id)}
-                                disabled={isStopping}
-                                style={{ cursor: isStopping ? 'not-allowed' : 'pointer' }}
-                            >
-                                {isStopping ? <Loader2 size={16} className="spin" /> : <Square size={16} />}
-                                Stop
-                            </button>
+                            {canEdit && (
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={() => stopRecording(activeSession.id)}
+                                    disabled={isStopping}
+                                    style={{ cursor: isStopping ? 'not-allowed' : 'pointer' }}
+                                >
+                                    {isStopping ? <Loader2 size={16} className="spin" /> : <Square size={16} />}
+                                    Stop
+                                </button>
+                            )}
                         </div>
                     )}
 
@@ -437,7 +452,7 @@ export default function RecordingsPage() {
                                                 {session.error && <div style={{ color: 'var(--danger)', fontSize: '0.8rem', marginTop: '0.35rem' }}>{session.error}</div>}
                                             </div>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                                                {rowRecorderUrl && (
+                                                {canEdit && rowRecorderUrl && (
                                                     <a className="btn btn-secondary" href={rowRecorderUrl} target="_blank" rel="noreferrer" style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}>
                                                         <ExternalLink size={14} /> Open Recorder
                                                     </a>
@@ -452,7 +467,7 @@ export default function RecordingsPage() {
                                                         <Code2 size={14} /> Code <ExternalLink size={12} />
                                                     </a>
                                                 )}
-                                                {(session.status === 'completed' || session.status === 'stopped') && (
+                                                {canEdit && (session.status === 'completed' || session.status === 'stopped') && (
                                                     <button
                                                         className="btn btn-primary"
                                                         onClick={() => importSession(session)}

@@ -12,6 +12,7 @@ interface ApiSpecsCreateModalProps {
     onClose: () => void;
     onCreated: () => void;
     setMessage: (msg: { type: 'success' | 'error'; text: string } | null) => void;
+    canEdit: boolean;
 }
 
 export default function ApiSpecsCreateModal({
@@ -19,6 +20,7 @@ export default function ApiSpecsCreateModal({
     onClose,
     onCreated,
     setMessage,
+    canEdit,
 }: ApiSpecsCreateModalProps) {
     const [newSpecName, setNewSpecName] = useState('');
     const [newSpecContent, setNewSpecContent] = useState(API_SPEC_TEMPLATE);
@@ -26,7 +28,7 @@ export default function ApiSpecsCreateModal({
     const [createMode, setCreateMode] = useState<'code' | 'visual'>('visual');
 
     const handleCreateSpec = async () => {
-        if (!newSpecName.trim()) return;
+        if (!canEdit || !newSpecName.trim()) return;
         setCreating(true);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/specs', projectId)}`, {
@@ -48,6 +50,8 @@ export default function ApiSpecsCreateModal({
             setCreating(false);
         }
     };
+
+    if (!canEdit) return null;
 
     return (
         <div

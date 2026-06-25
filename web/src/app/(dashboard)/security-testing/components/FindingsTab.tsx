@@ -12,9 +12,10 @@ interface FindingsTabProps {
     onStatusChange: (id: number, status: string, notes?: string) => void;
     initialRunId?: string;
     initialFindingId?: string;
+    canEdit: boolean;
 }
 
-export default function FindingsTab({ projectId, runs, onStatusChange, initialRunId, initialFindingId }: FindingsTabProps) {
+export default function FindingsTab({ projectId, runs, onStatusChange, initialRunId, initialFindingId, canEdit }: FindingsTabProps) {
     const [severityFilter, setSeverityFilter] = useState<string>('all');
     const [statusFilter, setStatusFilter] = useState<string>('all');
     const [scannerFilter, setScannerFilter] = useState<string>('all');
@@ -123,6 +124,7 @@ export default function FindingsTab({ projectId, runs, onStatusChange, initialRu
                             onStatusChange={onStatusChange}
                             expanded={expandedFinding === finding.id}
                             onToggle={() => setExpandedFinding(expandedFinding === finding.id ? null : finding.id)}
+                            canEdit={canEdit}
                         />
                     ))}
                 </div>

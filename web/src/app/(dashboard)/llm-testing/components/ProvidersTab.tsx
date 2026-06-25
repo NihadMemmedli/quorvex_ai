@@ -10,6 +10,7 @@ import type { Provider } from './types';
 
 interface ProvidersTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
 const defaultForm = {
@@ -37,7 +38,7 @@ function pricePerMillion(value?: string | null): string {
     return `$${(n * 1_000_000).toFixed(n * 1_000_000 < 1 ? 3 : 2)}/1M`;
 }
 
-export default function ProvidersTab({ projectId }: ProvidersTabProps) {
+export default function ProvidersTab({ projectId, canEdit }: ProvidersTabProps) {
     const [providers, setProviders] = useState<Provider[]>([]);
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
@@ -100,6 +101,7 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
     const selectedOpenRouterSet = useMemo(() => new Set(selectedOpenRouterModels), [selectedOpenRouterModels]);
 
     const toggleOpenRouterModel = useCallback((modelId: string) => {
+        if (!canEdit) return;
         setOpenRouterResult(null);
         setSelectedOpenRouterModels(prev => {
             if (prev.includes(modelId)) return prev.filter(id => id !== modelId);
@@ -109,9 +111,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
             }
             return [...prev, modelId];
         });
-    }, []);
+    }, [canEdit]);
 
     const setupOpenRouterDemo = useCallback(async () => {
+        if (!canEdit) return;
         if (!openRouterKey.trim()) {
             toast.error('Enter an OpenRouter API key');
             return;
@@ -150,9 +153,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
             toast.error(e instanceof Error ? e.message : 'Failed to create OpenRouter demo');
         }
         setOpenRouterSetupLoading(false);
-    }, [openRouterKey, selectedOpenRouterModels, projectId, fetchProviders]);
+    }, [openRouterKey, selectedOpenRouterModels, projectId, fetchProviders, canEdit]);
 
     const setupDemoContent = useCallback(async () => {
+        if (!canEdit) return;
         setOpenRouterSetupLoading(true);
         setOpenRouterResult(null);
         try {
@@ -177,9 +181,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
             toast.error(e instanceof Error ? e.message : 'Failed to create demo content');
         }
         setOpenRouterSetupLoading(false);
-    }, [projectId]);
+    }, [projectId, canEdit]);
 
     const createProvider = useCallback(async () => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/providers`, {
                 method: 'POST',
@@ -199,10 +204,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
                 toast.error('Failed to create provider');
             }
         } catch (e) { toast.error('Failed to create provider'); }
-    }, [form, projectId, fetchProviders]);
+    }, [form, projectId, fetchProviders, canEdit]);
 
     const updateProvider = useCallback(async () => {
-        if (editingId === null) return;
+        if (!canEdit || editingId === null) return;
         try {
             const body: Record<string, any> = {
                 name: form.name,
@@ -227,9 +232,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
                 toast.error('Failed to update provider');
             }
         } catch (e) { toast.error('Failed to update provider'); }
-    }, [editingId, form, fetchProviders]);
+    }, [editingId, form, fetchProviders, canEdit]);
 
     const deleteProvider = useCallback(async (id: string) => {
+        if (!canEdit) return;
         try {
             await fetch(`${API_BASE}/llm-testing/providers/${id}`, { method: 'DELETE' });
             fetchProviders();
@@ -237,9 +243,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
         } catch (e) {
             toast.error('Failed to delete provider');
         }
-    }, [fetchProviders]);
+    }, [fetchProviders, canEdit]);
 
     const toggleActive = useCallback(async (id: string, checked: boolean) => {
+        if (!canEdit) return;
         try {
             const res = await fetch(`${API_BASE}/llm-testing/providers/${id}`, {
                 method: 'PUT',
@@ -253,9 +260,10 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
                 toast.error('Failed to toggle provider');
             }
         } catch (e) { toast.error('Failed to toggle provider'); }
-    }, [fetchProviders]);
+    }, [fetchProviders, canEdit]);
 
     const startEditing = useCallback((p: Provider) => {
+        if (!canEdit) return;
         setForm({
             name: p.name,
             base_url: p.base_url,
@@ -266,7 +274,7 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
         });
         setEditingId(Number(p.id));
         setShowForm(true);
-    }, []);
+    }, [canEdit]);
 
     const cancelForm = useCallback(() => {
         setShowForm(false);
@@ -275,6 +283,7 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
     }, []);
 
     const healthCheck = useCallback(async (id: string) => {
+        if (!canEdit) return;
         setHealthResults(prev => ({ ...prev, [id]: { checking: true } }));
         try {
             const res = await fetch(`${API_BASE}/llm-testing/providers/${id}/health-check`, { method: 'POST' });
@@ -283,27 +292,29 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
         } catch (e) {
             setHealthResults(prev => ({ ...prev, [id]: { healthy: false, error: String(e) } }));
         }
-    }, []);
+    }, [canEdit]);
 
     return (
         <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1rem' }}>
                 <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>LLM Providers</h2>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                        onClick={() => setShowOpenRouterDemo(prev => !prev)}
-                        style={showOpenRouterDemo ? btnSecondary : btnPrimary}
-                    >
-                        <Sparkles size={14} />
-                        OpenRouter Demo
-                    </button>
-                    <button onClick={() => showForm ? cancelForm() : setShowForm(true)} style={btnPrimary}>
-                        {showForm ? 'Cancel' : '+ Add Provider'}
-                    </button>
-                </div>
+                {canEdit && (
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                            onClick={() => setShowOpenRouterDemo(prev => !prev)}
+                            style={showOpenRouterDemo ? btnSecondary : btnPrimary}
+                        >
+                            <Sparkles size={14} />
+                            OpenRouter Demo
+                        </button>
+                        <button onClick={() => showForm ? cancelForm() : setShowForm(true)} style={btnPrimary}>
+                            {showForm ? 'Cancel' : '+ Add Provider'}
+                        </button>
+                    </div>
+                )}
             </div>
 
-            {showOpenRouterDemo && (
+            {canEdit && showOpenRouterDemo && (
                 <div style={{ ...cardStyleCompact, marginBottom: '1rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
                         <div>
@@ -448,7 +459,7 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
                 </div>
             )}
 
-            {showForm && (
+            {canEdit && showForm && (
                 <div style={cardStyleCompact}>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
                         <div>
@@ -488,7 +499,7 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
 
             {loading ? <p>Loading...</p> : providers.length === 0 ? (
                 <div style={{ ...cardStyleCompact, textAlign: 'center', color: 'var(--text-secondary)' }}>
-                    <p>No providers configured. Add one to get started.</p>
+                    <p>{canEdit ? 'No providers configured. Add one to get started.' : 'No providers configured.'}</p>
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -499,11 +510,13 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
                             <div key={p.id} style={{ ...cardStyleCompact, opacity: isActive ? 1 : 0.5, transition: 'all 0.2s var(--ease-smooth)' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                        <Switch
-                                            checked={isActive}
-                                            onCheckedChange={(checked) => toggleActive(p.id, checked)}
-                                            style={{ background: isActive ? 'var(--primary)' : 'var(--surface-active)' }}
-                                        />
+                                        {canEdit && (
+                                            <Switch
+                                                checked={isActive}
+                                                onCheckedChange={(checked) => toggleActive(p.id, checked)}
+                                                style={{ background: isActive ? 'var(--primary)' : 'var(--surface-active)' }}
+                                            />
+                                        )}
                                         <div>
                                             <strong>{p.name}</strong>
                                             <span style={{ marginLeft: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{p.model_id}</span>
@@ -516,11 +529,15 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
                                             </span>
                                         )}
                                         {health?.checking && <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Checking...</span>}
-                                        <button onClick={() => healthCheck(p.id)} style={btnSmall}>Health Check</button>
-                                        <button onClick={() => startEditing(p)} style={btnSmall} title="Edit provider">
-                                            <Pencil size={14} />
-                                        </button>
-                                        <button onClick={() => setConfirmState({ open: true, id: p.id })} style={{ ...btnSmall, color: 'var(--danger)' }}>Delete</button>
+                                        {canEdit && (
+                                            <>
+                                                <button onClick={() => healthCheck(p.id)} style={btnSmall}>Health Check</button>
+                                                <button onClick={() => startEditing(p)} style={btnSmall} title="Edit provider">
+                                                    <Pencil size={14} />
+                                                </button>
+                                                <button onClick={() => setConfirmState({ open: true, id: p.id })} style={{ ...btnSmall, color: 'var(--danger)' }}>Delete</button>
+                                            </>
+                                        )}
                                     </div>
                                 </div>
                                 <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>{p.base_url}</p>
@@ -531,7 +548,7 @@ export default function ProvidersTab({ projectId }: ProvidersTabProps) {
             )}
 
             <ConfirmDialog
-                open={confirmState.open}
+                open={canEdit && confirmState.open}
                 onOpenChange={(open) => setConfirmState({ open, id: open ? confirmState.id : null })}
                 title="Delete Provider"
                 description="This will permanently delete this provider. Any runs referencing it will lose their provider association."

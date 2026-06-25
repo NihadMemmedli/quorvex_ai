@@ -16,9 +16,10 @@ interface HistoryTabProps {
     onStatusChange: (id: number, status: string, notes?: string) => void;
     onStopScan: (runId: string) => void;
     initialRunId?: string;
+    canEdit: boolean;
 }
 
-export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange, onStopScan, initialRunId }: HistoryTabProps) {
+export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange, onStopScan, initialRunId, canEdit }: HistoryTabProps) {
     const [selectedRun, setSelectedRun] = useState<SecurityScanRun | null>(null);
     const [runFindings, setRunFindings] = useState<SecurityFinding[]>([]);
     const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
@@ -123,7 +124,7 @@ export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange,
                                     {formatDate(run.created_at)}
                                 </td>
                                 <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>
-                                    {run.status === 'running' && (
+                                    {canEdit && run.status === 'running' && (
                                         <button
                                             onClick={(e) => { e.stopPropagation(); onStopScan(run.id); }}
                                             style={{
@@ -159,6 +160,7 @@ export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange,
                                 <FindingCard key={finding.id} finding={finding} onStatusChange={onStatusChange}
                                     expanded={expandedFinding === finding.id}
                                     onToggle={() => setExpandedFinding(expandedFinding === finding.id ? null : finding.id)}
+                                    canEdit={canEdit}
                                 />
                             ))}
                         </div>

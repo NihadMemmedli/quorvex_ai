@@ -31,6 +31,7 @@ interface ScenariosTabProps {
     latestRunsBySpec?: Record<string, LoadTestRun>;
     projectId?: string;
     initialSpecName?: string;
+    canEdit: boolean;
 }
 
 export default function ScenariosTab({
@@ -49,6 +50,7 @@ export default function ScenariosTab({
     latestRunsBySpec,
     projectId,
     initialSpecName,
+    canEdit,
 }: ScenariosTabProps) {
     const [specsSearch, setSpecsSearch] = useState('');
     const [showCreateModal, setShowCreateModal] = useState(false);
@@ -111,6 +113,7 @@ export default function ScenariosTab({
     }, [initialSpecName, onLoadSpecContent, specs]);
 
     const handleCreate = async () => {
+        if (!canEdit) return;
         if (!newSpecName.trim()) return;
         setCreating(true);
         try {
@@ -127,11 +130,13 @@ export default function ScenariosTab({
     };
 
     const handleSave = async (name: string) => {
+        if (!canEdit) return;
         await onUpdateSpec(name, editContent);
         setEditingSpec(null);
     };
 
     const handleOpenCreateModal = () => {
+        if (!canEdit) return;
         setTemplateStep('pick');
         setNewSpecName('');
         setNewSpecContent(LOAD_SPEC_TEMPLATE);
@@ -139,11 +144,13 @@ export default function ScenariosTab({
     };
 
     const handleSelectTemplate = (template: ScenarioTemplate) => {
+        if (!canEdit) return;
         setNewSpecContent(template.content);
         setTemplateStep('edit');
     };
 
     const handleStartFromScratch = () => {
+        if (!canEdit) return;
         setNewSpecContent(LOAD_SPEC_TEMPLATE);
         setTemplateStep('edit');
     };
@@ -160,17 +167,19 @@ export default function ScenariosTab({
     return (
         <div>
             <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', alignItems: 'center' }}>
-                <button
-                    onClick={handleOpenCreateModal}
-                    style={{
-                        display: 'flex', alignItems: 'center', gap: '0.5rem',
-                        padding: '0.5rem 1rem', background: 'var(--primary)', color: 'white',
-                        border: 'none', borderRadius: 'var(--radius)', cursor: 'pointer',
-                        fontWeight: 500, fontSize: '0.875rem',
-                    }}
-                >
-                    <Plus size={16} /> Create Scenario
-                </button>
+                {canEdit && (
+                    <button
+                        onClick={handleOpenCreateModal}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '0.5rem',
+                            padding: '0.5rem 1rem', background: 'var(--primary)', color: 'white',
+                            border: 'none', borderRadius: 'var(--radius)', cursor: 'pointer',
+                            fontWeight: 500, fontSize: '0.875rem',
+                        }}
+                    >
+                        <Plus size={16} /> Create Scenario
+                    </button>
+                )}
                 <div style={{ position: 'relative', flex: 1, maxWidth: '300px' }}>
                     <Search size={16} style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
                     <input
@@ -211,15 +220,17 @@ export default function ScenariosTab({
                 }}>
                     <Activity size={40} style={{ color: 'var(--text-secondary)', margin: '0 auto 1rem' }} />
                     <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>No load test scenarios found</p>
-                    <button
-                        onClick={handleOpenCreateModal}
-                        style={{
-                            padding: '0.5rem 1rem', background: 'var(--primary)', color: 'white',
-                            border: 'none', borderRadius: 'var(--radius)', cursor: 'pointer',
-                        }}
-                    >
-                        Create your first scenario
-                    </button>
+                    {canEdit && (
+                        <button
+                            onClick={handleOpenCreateModal}
+                            style={{
+                                padding: '0.5rem 1rem', background: 'var(--primary)', color: 'white',
+                                border: 'none', borderRadius: 'var(--radius)', cursor: 'pointer',
+                            }}
+                        >
+                            Create your first scenario
+                        </button>
+                    )}
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -314,42 +325,46 @@ export default function ScenariosTab({
                                         >
                                             <TrendingUp size={12} /> Trends
                                         </button>
-                                        <button
-                                            onClick={() => onRunFromSpec(spec.name)}
-                                            disabled={!!k6Status?.load_test_active}
-                                            title={k6Status?.load_test_active ? 'Load test in progress' : ''}
-                                            style={{
-                                                display: 'flex', alignItems: 'center', gap: '0.25rem',
-                                                padding: '0.3rem 0.6rem', background: 'var(--primary-glow)',
-                                                color: 'var(--primary)', border: '1px solid rgba(59, 130, 246, 0.2)',
-                                                borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
-                                                opacity: k6Status?.load_test_active ? 0.5 : 1,
-                                            }}
-                                        >
-                                            <Play size={12} /> Run
-                                        </button>
-                                        <button
-                                            onClick={() => onGenerateScript(spec.name)}
-                                            style={{
-                                                display: 'flex', alignItems: 'center', gap: '0.25rem',
-                                                padding: '0.3rem 0.6rem', background: 'rgba(192, 132, 252, 0.12)',
-                                                color: 'var(--accent)', border: '1px solid rgba(139, 92, 246, 0.2)',
-                                                borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
-                                            }}
-                                        >
-                                            <BarChart3 size={12} /> Generate Script
-                                        </button>
-                                        <button
-                                            onClick={() => onDeleteSpec(spec.name)}
-                                            style={{
-                                                display: 'flex', alignItems: 'center', gap: '0.25rem',
-                                                padding: '0.3rem 0.6rem', background: 'var(--danger-muted)',
-                                                color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.2)',
-                                                borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
-                                            }}
-                                        >
-                                            <Trash2 size={12} />
-                                        </button>
+                                        {canEdit && (
+                                            <>
+                                                <button
+                                                    onClick={() => onRunFromSpec(spec.name)}
+                                                    disabled={!!k6Status?.load_test_active}
+                                                    title={k6Status?.load_test_active ? 'Load test in progress' : ''}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '0.25rem',
+                                                        padding: '0.3rem 0.6rem', background: 'var(--primary-glow)',
+                                                        color: 'var(--primary)', border: '1px solid rgba(59, 130, 246, 0.2)',
+                                                        borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
+                                                        opacity: k6Status?.load_test_active ? 0.5 : 1,
+                                                    }}
+                                                >
+                                                    <Play size={12} /> Run
+                                                </button>
+                                                <button
+                                                    onClick={() => onGenerateScript(spec.name)}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '0.25rem',
+                                                        padding: '0.3rem 0.6rem', background: 'rgba(192, 132, 252, 0.12)',
+                                                        color: 'var(--accent)', border: '1px solid rgba(139, 92, 246, 0.2)',
+                                                        borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
+                                                    }}
+                                                >
+                                                    <BarChart3 size={12} /> Generate Script
+                                                </button>
+                                                <button
+                                                    onClick={() => onDeleteSpec(spec.name)}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '0.25rem',
+                                                        padding: '0.3rem 0.6rem', background: 'var(--danger-muted)',
+                                                        color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.2)',
+                                                        borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: '0.75rem',
+                                                    }}
+                                                >
+                                                    <Trash2 size={12} />
+                                                </button>
+                                            </>
+                                        )}
                                     </div>
                                 </div>
 
@@ -386,6 +401,7 @@ export default function ScenariosTab({
                                 {isExpanded && (
                                     <div style={{ borderTop: '1px solid var(--border)', padding: '1rem' }}>
                                         {/* VU/Duration overrides */}
+                                        {canEdit && (
                                         <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '0.75rem', alignItems: 'flex-start' }}>
                                             <div>
                                                 <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>VUs Override</label>
@@ -459,8 +475,9 @@ export default function ScenariosTab({
                                                 <Play size={14} /> Run with Overrides
                                             </button>
                                         </div>
+                                        )}
 
-                                        {isEditing ? (
+                                        {canEdit && isEditing ? (
                                             <div>
                                                 <div style={{ height: '400px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
                                                     <CodeEditor
@@ -504,21 +521,23 @@ export default function ScenariosTab({
                                                 >
                                                     {specContents[spec.name] || 'Loading...'}
                                                 </SyntaxHighlighter>
-                                                <button
-                                                    onClick={() => {
-                                                        setEditingSpec(spec.name);
-                                                        setEditContent(specContents[spec.name] || '');
-                                                    }}
-                                                    style={{
-                                                        display: 'flex', alignItems: 'center', gap: '0.3rem',
-                                                        marginTop: '0.75rem', padding: '0.4rem 0.8rem',
-                                                        background: 'var(--surface)', color: 'var(--text-secondary)',
-                                                        border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-                                                        cursor: 'pointer', fontSize: '0.8rem',
-                                                    }}
-                                                >
-                                                    <Edit2 size={14} /> Edit Spec
-                                                </button>
+                                                {canEdit && (
+                                                    <button
+                                                        onClick={() => {
+                                                            setEditingSpec(spec.name);
+                                                            setEditContent(specContents[spec.name] || '');
+                                                        }}
+                                                        style={{
+                                                            display: 'flex', alignItems: 'center', gap: '0.3rem',
+                                                            marginTop: '0.75rem', padding: '0.4rem 0.8rem',
+                                                            background: 'var(--surface)', color: 'var(--text-secondary)',
+                                                            border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+                                                            cursor: 'pointer', fontSize: '0.8rem',
+                                                        }}
+                                                    >
+                                                        <Edit2 size={14} /> Edit Spec
+                                                    </button>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -530,7 +549,7 @@ export default function ScenariosTab({
             )}
 
             {/* Create Modal */}
-            {showCreateModal && (
+            {canEdit && showCreateModal && (
                 <div style={{
                     position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
                     background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center',

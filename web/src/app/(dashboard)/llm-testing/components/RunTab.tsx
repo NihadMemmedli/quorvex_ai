@@ -18,9 +18,10 @@ import type { Provider, Spec, Run } from './types';
 
 interface RunTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
-export default function RunTab({ projectId }: RunTabProps) {
+export default function RunTab({ projectId, canEdit }: RunTabProps) {
     const [providers, setProviders] = useState<Provider[]>([]);
     const [specs, setSpecs] = useState<Spec[]>([]);
     const [selectedSpec, setSelectedSpec] = useState('');
@@ -107,6 +108,7 @@ export default function RunTab({ projectId }: RunTabProps) {
     }, [jobId, stopRunPoll]);
 
     const startRun = useCallback(async () => {
+        if (!canEdit) return;
         if (!selectedSpec || !selectedProvider) {
             setHighlightMissing(true);
             setTimeout(() => setHighlightMissing(false), 1000);
@@ -134,24 +136,26 @@ export default function RunTab({ projectId }: RunTabProps) {
             setRunning(false);
             setStartTime(null);
         }
-    }, [selectedSpec, selectedProvider, projectId]);
+    }, [canEdit, selectedSpec, selectedProvider, projectId]);
 
     const cancelRun = useCallback(() => {
+        if (!canEdit) return;
         stopRunPoll();
         setRunning(false);
         setJobId(null);
         setProgress(null);
         setStartTime(null);
         toast.info('Run cancelled');
-    }, [stopRunPoll]);
+    }, [canEdit, stopRunPoll]);
 
     const resetForm = useCallback(() => {
+        if (!canEdit) return;
         setProgress(null);
         setSelectedSpec('');
         setSelectedProvider('');
         setStartTime(null);
         setTimeout(() => runButtonRef.current?.focus(), 100);
-    }, []);
+    }, [canEdit]);
 
     const pct = progress && progress.progress_total > 0
         ? Math.round((progress.progress_current / progress.progress_total) * 100) : 0;
@@ -222,79 +226,81 @@ export default function RunTab({ projectId }: RunTabProps) {
             </div>
 
             {/* Section 1: Configuration Panel */}
-            <div className="card-elevated animate-in stagger-1" style={{ padding: '1rem', marginBottom: '1rem' }}>
-                <div style={{
-                    display: 'flex',
-                    gap: '1rem',
-                    alignItems: 'flex-end',
-                    flexWrap: 'wrap',
-                }}>
-                    <div style={{ flex: '1 1 200px' }}>
-                        <label htmlFor="run-spec-select" style={labelStyle}>
-                            Test Spec ({specs.length} available)
-                        </label>
-                        <select
-                            id="run-spec-select"
-                            value={selectedSpec}
-                            onChange={e => setSelectedSpec(e.target.value)}
-                            disabled={running}
-                            style={{
-                                ...inputStyle,
-                                ...(running ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
-                                ...(highlightMissing && !selectedSpec ? {
-                                    borderColor: 'var(--danger)',
-                                    boxShadow: '0 0 0 1px var(--danger)',
-                                } : {}),
-                                transition: 'all 0.3s var(--ease-smooth)',
-                            }}
-                        >
-                            <option value="">Select a spec...</option>
-                            {specs.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-                        </select>
-                    </div>
-                    <div style={{ flex: '1 1 200px' }}>
-                        <label htmlFor="run-provider-select" style={labelStyle}>
-                            Provider ({providers.length} configured)
-                        </label>
-                        <select
-                            id="run-provider-select"
-                            value={selectedProvider}
-                            onChange={e => setSelectedProvider(e.target.value)}
-                            disabled={running}
-                            style={{
-                                ...inputStyle,
-                                ...(running ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
-                                ...(highlightMissing && !selectedProvider ? {
-                                    borderColor: 'var(--danger)',
-                                    boxShadow: '0 0 0 1px var(--danger)',
-                                } : {}),
-                                transition: 'all 0.3s var(--ease-smooth)',
-                            }}
-                        >
-                            <option value="">Select a provider...</option>
-                            {providers.map(p => <option key={p.id} value={p.id}>{p.name} ({p.model_id})</option>)}
-                        </select>
-                    </div>
-                    <div style={{ flexShrink: 0 }}>
-                        <button
-                            ref={runButtonRef}
-                            onClick={startRun}
-                            disabled={running || !selectedSpec || !selectedProvider}
-                            aria-busy={running}
-                            aria-disabled={running || !selectedSpec || !selectedProvider}
-                            style={{
-                                ...btnPrimary,
-                                ...(running || !selectedSpec || !selectedProvider ? {
-                                    opacity: 0.5, cursor: 'not-allowed', pointerEvents: 'none' as const,
-                                } : {}),
-                            }}
-                        >
-                            {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-                            {running ? 'Running...' : 'Run Suite'}
-                        </button>
+            {canEdit && (
+                <div className="card-elevated animate-in stagger-1" style={{ padding: '1rem', marginBottom: '1rem' }}>
+                    <div style={{
+                        display: 'flex',
+                        gap: '1rem',
+                        alignItems: 'flex-end',
+                        flexWrap: 'wrap',
+                    }}>
+                        <div style={{ flex: '1 1 200px' }}>
+                            <label htmlFor="run-spec-select" style={labelStyle}>
+                                Test Spec ({specs.length} available)
+                            </label>
+                            <select
+                                id="run-spec-select"
+                                value={selectedSpec}
+                                onChange={e => setSelectedSpec(e.target.value)}
+                                disabled={running}
+                                style={{
+                                    ...inputStyle,
+                                    ...(running ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+                                    ...(highlightMissing && !selectedSpec ? {
+                                        borderColor: 'var(--danger)',
+                                        boxShadow: '0 0 0 1px var(--danger)',
+                                    } : {}),
+                                    transition: 'all 0.3s var(--ease-smooth)',
+                                }}
+                            >
+                                <option value="">Select a spec...</option>
+                                {specs.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                            </select>
+                        </div>
+                        <div style={{ flex: '1 1 200px' }}>
+                            <label htmlFor="run-provider-select" style={labelStyle}>
+                                Provider ({providers.length} configured)
+                            </label>
+                            <select
+                                id="run-provider-select"
+                                value={selectedProvider}
+                                onChange={e => setSelectedProvider(e.target.value)}
+                                disabled={running}
+                                style={{
+                                    ...inputStyle,
+                                    ...(running ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+                                    ...(highlightMissing && !selectedProvider ? {
+                                        borderColor: 'var(--danger)',
+                                        boxShadow: '0 0 0 1px var(--danger)',
+                                    } : {}),
+                                    transition: 'all 0.3s var(--ease-smooth)',
+                                }}
+                            >
+                                <option value="">Select a provider...</option>
+                                {providers.map(p => <option key={p.id} value={p.id}>{p.name} ({p.model_id})</option>)}
+                            </select>
+                        </div>
+                        <div style={{ flexShrink: 0 }}>
+                            <button
+                                ref={runButtonRef}
+                                onClick={startRun}
+                                disabled={running || !selectedSpec || !selectedProvider}
+                                aria-busy={running}
+                                aria-disabled={running || !selectedSpec || !selectedProvider}
+                                style={{
+                                    ...btnPrimary,
+                                    ...(running || !selectedSpec || !selectedProvider ? {
+                                        opacity: 0.5, cursor: 'not-allowed', pointerEvents: 'none' as const,
+                                    } : {}),
+                                }}
+                            >
+                                {running ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                                {running ? 'Running...' : 'Run Suite'}
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </div>
+            )}
 
             {/* Section 2: Live Execution Area */}
             {(running || progress) && (
@@ -319,7 +325,7 @@ export default function RunTab({ projectId }: RunTabProps) {
                                 </span>
                             )}
                         </div>
-                        {running && (
+                        {canEdit && running && (
                             <button
                                 onClick={cancelRun}
                                 style={{ ...btnSecondary, color: 'var(--danger)', borderColor: 'var(--danger)', padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
@@ -391,9 +397,11 @@ export default function RunTab({ projectId }: RunTabProps) {
                                 </span>
                             </div>
                             <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                <button onClick={resetForm} style={btnSecondary}>
-                                    <RotateCcw size={14} /> Run Again
-                                </button>
+                                {canEdit && (
+                                    <button onClick={resetForm} style={btnSecondary}>
+                                        <RotateCcw size={14} /> Run Again
+                                    </button>
+                                )}
                                 <button
                                     onClick={() => toast.info('Check the History tab for detailed results')}
                                     style={btnSecondary}
@@ -407,16 +415,20 @@ export default function RunTab({ projectId }: RunTabProps) {
                     {/* Post-failure CTA */}
                     {!running && progress?.status === 'failed' && !progress?.error && (
                         <div style={{ marginTop: '0.75rem' }}>
-                            <button onClick={resetForm} style={btnSecondary}>
-                                <RotateCcw size={14} /> Try Again
-                            </button>
+                            {canEdit && (
+                                <button onClick={resetForm} style={btnSecondary}>
+                                    <RotateCcw size={14} /> Try Again
+                                </button>
+                            )}
                         </div>
                     )}
                     {!running && progress?.status === 'failed' && progress?.error && (
                         <div style={{ marginTop: '0.5rem' }}>
-                            <button onClick={resetForm} style={btnSecondary}>
-                                <RotateCcw size={14} /> Try Again
-                            </button>
+                            {canEdit && (
+                                <button onClick={resetForm} style={btnSecondary}>
+                                    <RotateCcw size={14} /> Try Again
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>
@@ -442,24 +454,24 @@ export default function RunTab({ projectId }: RunTabProps) {
                     </div>
                 ) : recentRuns.length === 0 ? (
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0.5rem 0 0', textAlign: 'center' }}>
-                        No runs yet. Configure and run your first test above.
+                        {canEdit ? 'No runs yet. Configure and run your first test above.' : 'No runs yet.'}
                     </p>
                 ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto auto', columnGap: '0.75rem' }}>
                         {recentRuns.map((run, i) => (
                             <div
                                 key={run.id}
-                                role="button"
-                                tabIndex={0}
-                                onClick={() => loadRunConfig(run)}
-                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); loadRunConfig(run); } }}
+                                role={canEdit ? 'button' : undefined}
+                                tabIndex={canEdit ? 0 : undefined}
+                                onClick={() => { if (canEdit) loadRunConfig(run); }}
+                                onKeyDown={e => { if (canEdit && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); loadRunConfig(run); } }}
                                 style={{
                                     display: 'grid',
                                     gridColumn: '1 / -1',
                                     gridTemplateColumns: 'subgrid',
                                     alignItems: 'center',
                                     padding: '0.5rem 0.25rem',
-                                    cursor: 'pointer',
+                                    cursor: canEdit ? 'pointer' : 'default',
                                     borderBottom: i < recentRuns.length - 1 ? '1px solid var(--border-subtle)' : 'none',
                                     borderRadius: 'var(--radius-sm)',
                                     transition: 'background 0.2s var(--ease-smooth)',

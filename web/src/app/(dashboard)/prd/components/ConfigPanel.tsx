@@ -10,11 +10,12 @@ import { useProject } from '@/contexts/ProjectContext';
 import type { PrdSettings } from './types';
 
 interface ConfigPanelProps {
+    canEdit: boolean;
     settings: PrdSettings;
     onUpdate: <K extends keyof PrdSettings>(key: K, value: PrdSettings[K]) => void;
 }
 
-export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
+export function ConfigPanel({ canEdit, settings, onUpdate }: ConfigPanelProps) {
     const { currentProject } = useProject();
     const [isExpanded, setIsExpanded] = useState(false);
     const targetUrl = settings.targetUrl.trim();
@@ -80,6 +81,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                 <Input
                                     value={settings.targetUrl}
                                     onChange={(e) => onUpdate('targetUrl', e.target.value)}
+                                    disabled={!canEdit}
                                     placeholder="https://your-app.com"
                                     className="h-9 text-sm"
                                 />
@@ -92,6 +94,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                 <Input
                                     value={settings.loginUrl}
                                     onChange={(e) => onUpdate('loginUrl', e.target.value)}
+                                    disabled={!canEdit}
                                     placeholder="Leave empty if no login required"
                                     className="h-9 text-sm"
                                 />
@@ -115,6 +118,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                         <Input
                                             value={settings.username}
                                             onChange={(e) => onUpdate('username', e.target.value)}
+                                            disabled={!canEdit}
                                             placeholder="user@example.com"
                                             className="h-9 text-sm pl-10"
                                         />
@@ -132,6 +136,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                             type="password"
                                             value={settings.password}
                                             onChange={(e) => onUpdate('password', e.target.value)}
+                                            disabled={!canEdit}
                                             placeholder="••••••••"
                                             className="h-9 text-sm pl-10"
                                         />
@@ -199,6 +204,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                             <Switch
                                 checked={settings.useNativeAgents}
                                 onCheckedChange={(val) => onUpdate('useNativeAgents', val)}
+                                disabled={!canEdit}
                             />
                         </div>
 
@@ -223,6 +229,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                 min={5}
                                 max={50}
                                 value={settings.targetFeatures}
+                                disabled={!canEdit}
                                 onChange={(e) =>
                                     onUpdate('targetFeatures', Math.max(5, Math.min(50, parseInt(e.target.value) || 15)))
                                 }
@@ -247,14 +254,17 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                         <Input
                             value={settings.testDataRefs}
                             onChange={(e) => onUpdate('testDataRefs', e.target.value)}
+                            disabled={!canEdit}
                             placeholder="login-users.valid-admin"
                             className="mb-2 h-9 text-sm"
                         />
-                        <TestDataPicker
-                            projectId={currentProject?.id}
-                            mode="ref"
-                            onInsert={(value) => onUpdate('testDataRefs', settings.testDataRefs ? `${settings.testDataRefs}, ${value}` : value)}
-                        />
+                        {canEdit && (
+                            <TestDataPicker
+                                projectId={currentProject?.id}
+                                mode="ref"
+                                onInsert={(value) => onUpdate('testDataRefs', settings.testDataRefs ? `${settings.testDataRefs}, ${value}` : value)}
+                            />
+                        )}
                     </div>
                 </div>
             </div>

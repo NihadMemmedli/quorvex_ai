@@ -30,6 +30,7 @@ interface ScannerTabProps {
     setExcludedPaths: (v: string) => void;
     onRefreshCapabilities: () => void;
     onStartScan: () => void;
+    canEdit: boolean;
 }
 
 export default function ScannerTab({
@@ -39,13 +40,14 @@ export default function ScannerTab({
     authEnabled, setAuthEnabled, loginUrl, setLoginUrl,
     usernameKey, setUsernameKey, passwordKey, setPasswordKey,
     excludedPaths, setExcludedPaths, onRefreshCapabilities, onStartScan,
+    canEdit,
 }: ScannerTabProps) {
     const modeAvailable = Boolean(scanType === 'quick'
         || (scanType === 'nuclei' && capabilities?.nuclei.available)
         || (scanType === 'zap' && capabilities?.zap.available)
         || (scanType === 'full' && (capabilities?.quick.available || capabilities?.nuclei.available || capabilities?.zap.available)));
     const authReady = !authEnabled || Boolean(loginUrl.trim() && usernameKey && passwordKey);
-    const canStart = Boolean(!isScanning && scanUrl.trim() && modeAvailable && authReady);
+    const canStart = Boolean(canEdit && !isScanning && scanUrl.trim() && modeAvailable && authReady);
 
     return (
         <div style={cardStyle}>
@@ -85,6 +87,7 @@ export default function ScannerTab({
                     placeholder="https://example.com"
                     value={scanUrl}
                     onChange={e => setScanUrl(e.target.value)}
+                    readOnly={!canEdit}
                     style={{
                         flex: 1, padding: '0.75rem', borderRadius: 'var(--radius)',
                         border: '1px solid var(--border)', background: 'var(--bg)',
@@ -94,6 +97,7 @@ export default function ScannerTab({
                 <select
                     value={scanType}
                     onChange={e => setScanType(e.target.value)}
+                    disabled={!canEdit}
                     style={{
                         padding: '0.75rem', borderRadius: 'var(--radius)',
                         border: '1px solid var(--border)', background: 'var(--bg)',
@@ -108,6 +112,7 @@ export default function ScannerTab({
                 <select
                     value={activeScanLevel}
                     onChange={e => setActiveScanLevel(e.target.value)}
+                    disabled={!canEdit}
                     style={{
                         padding: '0.75rem', borderRadius: 'var(--radius)',
                         border: '1px solid var(--border)', background: 'var(--bg)',
@@ -118,20 +123,22 @@ export default function ScannerTab({
                     <option value="safe">Safe</option>
                     <option value="full">Full active</option>
                 </select>
-                <button
-                    onClick={onStartScan}
-                    disabled={!canStart}
-                    style={{
-                        display: 'flex', alignItems: 'center', gap: '0.5rem',
-                        padding: '0.75rem 1.5rem', borderRadius: 'var(--radius)',
-                        background: canStart ? 'var(--primary)' : 'var(--border)',
-                        color: 'white', border: 'none', cursor: canStart ? 'pointer' : 'not-allowed',
-                        fontWeight: 600,
-                    }}
-                >
-                    {isScanning ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-                    {isScanning ? 'Scanning...' : 'Start Scan'}
-                </button>
+                {canEdit && (
+                    <button
+                        onClick={onStartScan}
+                        disabled={!canStart}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '0.5rem',
+                            padding: '0.75rem 1.5rem', borderRadius: 'var(--radius)',
+                            background: canStart ? 'var(--primary)' : 'var(--border)',
+                            color: 'white', border: 'none', cursor: canStart ? 'pointer' : 'not-allowed',
+                            fontWeight: 600,
+                        }}
+                    >
+                        {isScanning ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                        {isScanning ? 'Scanning...' : 'Start Scan'}
+                    </button>
+                )}
             </div>
 
             {targets.length > 0 && (
@@ -139,10 +146,10 @@ export default function ScannerTab({
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Suggested targets</div>
                     <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                         {targets.slice(0, 8).map(target => (
-                            <button key={target.url} onClick={() => setScanUrl(target.url)} style={{
+                            <button key={target.url} onClick={() => { if (canEdit) setScanUrl(target.url); }} disabled={!canEdit} style={{
                                 border: '1px solid var(--border)', background: scanUrl === target.url ? 'var(--primary-glow)' : 'transparent',
                                 color: 'var(--text)', borderRadius: 'var(--radius)', padding: '4px 8px',
-                                fontSize: '0.78rem', cursor: 'pointer',
+                                fontSize: '0.78rem', cursor: canEdit ? 'pointer' : 'default',
                             }}>
                                 {target.host} {target.endpoint_count > 0 ? `(${target.endpoint_count})` : ''}
                             </button>
@@ -153,7 +160,7 @@ export default function ScannerTab({
 
             <div style={{ display: 'grid', gridTemplateColumns: authEnabled ? '180px 1fr 180px 180px' : '180px 1fr', gap: '1rem', marginBottom: '1rem', alignItems: 'start' }}>
                 <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                    <input type="checkbox" checked={authEnabled} onChange={e => setAuthEnabled(e.target.checked)} />
+                    <input type="checkbox" checked={authEnabled} onChange={e => setAuthEnabled(e.target.checked)} disabled={!canEdit} />
                     Authenticated
                 </label>
                 {authEnabled ? (
@@ -163,14 +170,17 @@ export default function ScannerTab({
                             placeholder="Login URL"
                             value={loginUrl}
                             onChange={e => setLoginUrl(e.target.value)}
+                            readOnly={!canEdit}
                             style={{ padding: '0.65rem', borderRadius: 'var(--radius)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
                         />
                         <select value={usernameKey} onChange={e => setUsernameKey(e.target.value)}
+                            disabled={!canEdit}
                             style={{ padding: '0.65rem', borderRadius: 'var(--radius)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}>
                             <option value="">Username key</option>
                             {credentials.map(c => <option key={c.key} value={c.key}>{c.key} ({c.source})</option>)}
                         </select>
                         <select value={passwordKey} onChange={e => setPasswordKey(e.target.value)}
+                            disabled={!canEdit}
                             style={{ padding: '0.65rem', borderRadius: 'var(--radius)', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}>
                             <option value="">Password key</option>
                             {credentials.map(c => <option key={c.key} value={c.key}>{c.key} ({c.source})</option>)}
@@ -184,6 +194,7 @@ export default function ScannerTab({
             <textarea
                 value={excludedPaths}
                 onChange={e => setExcludedPaths(e.target.value)}
+                readOnly={!canEdit}
                 placeholder="Excluded paths, one per line (optional)"
                 rows={3}
                 style={{

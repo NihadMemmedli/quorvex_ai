@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { Clock, CheckCircle2, XCircle, PlayCircle, AlertCircle, FileText, ChevronRight, Timer, Globe, Chrome, Compass, StopCircle, Layers, Hourglass, Trash2, AlertTriangle, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectQuery } from '@/lib/api';
 import { toast } from 'sonner';
 import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
@@ -54,6 +55,7 @@ const PAGE_SIZE = 20;
 
 export default function RunsPage() {
     const { projectId, isLoading: projectLoading } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const [runs, setRuns] = useState<Run[]>([]);
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
@@ -192,11 +194,12 @@ export default function RunsPage() {
     const handleStopRun = async (runId: string, e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!canEdit) return;
         setConfirmStop(runId);
     };
 
     const confirmStopRun = async () => {
-        if (!confirmStop) return;
+        if (!canEdit || !confirmStop) return;
 
         setStoppingRuns(prev => new Set(prev).add(confirmStop));
 
@@ -224,6 +227,7 @@ export default function RunsPage() {
     };
 
     const handleStopAll = async () => {
+        if (!canEdit) return;
         setStoppingAll(true);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/stop-all', projectId)}`, {
@@ -248,6 +252,7 @@ export default function RunsPage() {
     };
 
     const handleClearQueue = async () => {
+        if (!canEdit) return;
         setClearingQueue(true);
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/queue/clear', projectId)}`, {
@@ -278,11 +283,12 @@ export default function RunsPage() {
     const handleDeleteRun = async (runId: string, e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!canEdit) return;
         setConfirmDelete(runId);
     };
 
     const confirmDeleteRun = async () => {
-        if (!confirmDelete) return;
+        if (!canEdit || !confirmDelete) return;
 
         setDeletingRuns(prev => new Set(prev).add(confirmDelete));
 
@@ -610,7 +616,7 @@ export default function RunsPage() {
                         </div>
                     )}
                     {/* Stop All + Clear Queue buttons */}
-                    <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
+                    {canEdit && <div style={{ marginLeft: 'auto', display: 'flex', gap: '0.5rem' }}>
                         <button
                             onClick={() => setConfirmStopAll(true)}
                             style={{
@@ -663,7 +669,7 @@ export default function RunsPage() {
                             <Trash2 size={14} />
                             Clear Queue
                         </button>
-                    </div>
+                    </div>}
                 </div>
             )}
 
@@ -862,7 +868,7 @@ export default function RunsPage() {
                                     })()}
 
                                     {/* Stop button for running tests */}
-                                    {run.canStop && (
+                                    {canEdit && run.canStop && (
                                         <button
                                             onClick={(e) => handleStopRun(run.id, e)}
                                             disabled={stoppingRuns.has(run.id)}
@@ -895,7 +901,7 @@ export default function RunsPage() {
                                     )}
 
                                     {/* Delete button for non-active runs */}
-                                    {!['running', 'in_progress', 'queued', 'pending'].includes(run.status) && (
+                                    {canEdit && !['running', 'in_progress', 'queued', 'pending'].includes(run.status) && (
                                         <button
                                             onClick={(e) => handleDeleteRun(run.id, e)}
                                             disabled={deletingRuns.has(run.id)}
@@ -965,7 +971,7 @@ export default function RunsPage() {
             )}
 
             {/* Stop Run Confirmation Modal */}
-            {confirmStop && (
+            {canEdit && confirmStop && (
                 <div style={{
                     position: 'fixed',
                     top: 0,
@@ -1028,7 +1034,7 @@ export default function RunsPage() {
             )}
 
             {/* Clear Queue Confirmation Modal */}
-            {confirmClearQueue && (
+            {canEdit && confirmClearQueue && (
                 <div style={{
                     position: 'fixed',
                     top: 0,
@@ -1130,7 +1136,7 @@ export default function RunsPage() {
             )}
 
             {/* Stop All Jobs Confirmation Modal */}
-            {confirmStopAll && (
+            {canEdit && confirmStopAll && (
                 <div style={{
                     position: 'fixed',
                     inset: 0,
@@ -1190,7 +1196,7 @@ export default function RunsPage() {
             )}
 
             {/* Delete Run Confirmation Modal */}
-            {confirmDelete && (
+            {canEdit && confirmDelete && (
                 <div style={{
                     position: 'fixed',
                     top: 0,

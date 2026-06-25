@@ -13,6 +13,7 @@ interface ConnectionsTabProps {
     connections: DbConnection[];
     projectId: string;
     onRefresh: () => void;
+    canEdit: boolean;
 }
 
 const INITIAL_FORM = {
@@ -20,13 +21,14 @@ const INITIAL_FORM = {
     password: '', ssl_mode: 'prefer', schema_name: 'public', is_read_only: true,
 };
 
-export default function ConnectionsTab({ connections, projectId, onRefresh }: ConnectionsTabProps) {
+export default function ConnectionsTab({ connections, projectId, onRefresh, canEdit }: ConnectionsTabProps) {
     const [showConnForm, setShowConnForm] = useState(false);
     const [connForm, setConnForm] = useState(INITIAL_FORM);
     const [testingConnId, setTestingConnId] = useState<string | null>(null);
     const [connTestResult, setConnTestResult] = useState<{ id: string; success: boolean; error?: string } | null>(null);
 
     const createConnection = async () => {
+        if (!canEdit) return;
         if (!connForm.name.trim() || !connForm.host.trim() || !connForm.database.trim()) return;
         try {
             const res = await fetch(`${API_BASE}/database-testing/connections`, {
@@ -46,6 +48,7 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
     };
 
     const testConnection = async (connId: string) => {
+        if (!canEdit) return;
         setTestingConnId(connId);
         setConnTestResult(null);
         try {
@@ -63,6 +66,7 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
     };
 
     const deleteConnection = async (connId: string) => {
+        if (!canEdit) return;
         if (!confirm('Delete this connection?')) return;
         try {
             await fetch(`${API_BASE}${withProjectQuery(`/database-testing/connections/${connId}`, projectId)}`, {
@@ -76,13 +80,15 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
         <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                 <h3 style={{ fontWeight: 600 }}>Database Connections</h3>
-                <button onClick={() => setShowConnForm(true)} style={btnPrimary}>
-                    <Plus size={16} /> Add Connection
-                </button>
+                {canEdit && (
+                    <button onClick={() => setShowConnForm(true)} style={btnPrimary}>
+                        <Plus size={16} /> Add Connection
+                    </button>
+                )}
             </div>
 
             {/* Connection Form */}
-            {showConnForm && (
+            {canEdit && showConnForm && (
                 <div style={{ ...cardStyle, marginBottom: '1.5rem' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                         <h4 style={{ fontWeight: 600 }}>New Connection</h4>
@@ -158,7 +164,7 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
             {connections.length === 0 && !showConnForm ? (
                 <div style={{ ...cardStyle, textAlign: 'center', padding: '3rem' }}>
                     <Server size={40} style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }} />
-                    <p style={{ color: 'var(--text-secondary)' }}>No connections configured. Add your first database connection.</p>
+                    <p style={{ color: 'var(--text-secondary)' }}>{canEdit ? 'No connections configured. Add your first database connection.' : 'No connections configured.'}</p>
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -191,28 +197,30 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
                                     Last tested<br />{formatDate(conn.last_tested_at)}
                                 </div>
                             )}
-                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                <button
-                                    onClick={() => testConnection(conn.id)}
-                                    disabled={testingConnId === conn.id}
-                                    style={{
-                                        ...btnSecondary, padding: '0.4rem 0.75rem', fontSize: '0.8rem',
-                                        cursor: testingConnId === conn.id ? 'not-allowed' : 'pointer',
-                                    }}
-                                >
-                                    {testingConnId === conn.id
-                                        ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-                                        : <Link2 size={14} />}
-                                    Test
-                                </button>
-                                <button onClick={() => deleteConnection(conn.id)} style={{
-                                    background: 'none', border: '1px solid var(--border)',
-                                    borderRadius: 'var(--radius)', padding: '0.4rem 0.6rem',
-                                    cursor: 'pointer', color: 'var(--danger)',
-                                }}>
-                                    <Trash2 size={14} />
-                                </button>
-                            </div>
+                            {canEdit && (
+                                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                    <button
+                                        onClick={() => testConnection(conn.id)}
+                                        disabled={testingConnId === conn.id}
+                                        style={{
+                                            ...btnSecondary, padding: '0.4rem 0.75rem', fontSize: '0.8rem',
+                                            cursor: testingConnId === conn.id ? 'not-allowed' : 'pointer',
+                                        }}
+                                    >
+                                        {testingConnId === conn.id
+                                            ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                                            : <Link2 size={14} />}
+                                        Test
+                                    </button>
+                                    <button onClick={() => deleteConnection(conn.id)} style={{
+                                        background: 'none', border: '1px solid var(--border)',
+                                        borderRadius: 'var(--radius)', padding: '0.4rem 0.6rem',
+                                        cursor: 'pointer', color: 'var(--danger)',
+                                    }}>
+                                        <Trash2 size={14} />
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     ))}
                 </div>

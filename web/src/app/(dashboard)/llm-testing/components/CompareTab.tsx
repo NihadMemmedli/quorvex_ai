@@ -22,9 +22,10 @@ import type { Provider, Spec, Comparison } from './types';
 
 interface CompareTabProps {
     projectId: string;
+    canEdit: boolean;
 }
 
-export default function CompareTab({ projectId }: CompareTabProps) {
+export default function CompareTab({ projectId, canEdit }: CompareTabProps) {
     const [providers, setProviders] = useState<Provider[]>([]);
     const [specs, setSpecs] = useState<Spec[]>([]);
     const [comparisons, setComparisons] = useState<Comparison[]>([]);
@@ -88,10 +89,12 @@ export default function CompareTab({ projectId }: CompareTabProps) {
     }, [compareJobId, stopComparePoll]);
 
     const toggleProvider = useCallback((id: string) => {
+        if (!canEdit) return;
         setSelectedProviders(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
-    }, []);
+    }, [canEdit]);
 
     const startComparison = useCallback(async () => {
+        if (!canEdit) return;
         if (!selectedSpec || selectedProviders.length < 2) return;
         setRunning(true);
         try {
@@ -111,7 +114,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
                 setRunning(false);
             }
         } catch { toast.error('Failed to start comparison'); setRunning(false); }
-    }, [selectedSpec, selectedProviders, comparisonName, projectId]);
+    }, [canEdit, selectedSpec, selectedProviders, comparisonName, projectId]);
 
     const viewComparison = useCallback(async (id: string) => {
         // Toggle behavior: clicking same comparison deselects it
@@ -137,6 +140,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
     }, [selectedComparison]);
 
     const deleteComparison = useCallback(async (id: string) => {
+        if (!canEdit) return;
         setDeleteLoading(true);
         try {
             const res = await fetch(`${API_BASE}/llm-testing/comparisons/${id}`, { method: 'DELETE' });
@@ -154,7 +158,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
             toast.error('Failed to delete comparison');
         }
         setDeleteLoading(false);
-    }, [selectedComparison]);
+    }, [canEdit, selectedComparison]);
 
     const providerName = useCallback((id: string) => providers.find(p => p.id === id)?.name || id, [providers]);
 
@@ -190,6 +194,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
             <h2 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem' }}>Model Comparison</h2>
 
             {/* Section 1: New Comparison Form */}
+            {canEdit && (
             <div className="card-elevated animate-in stagger-1">
                 <h3 style={{ fontWeight: 600, marginBottom: '0.75rem', fontSize: '0.95rem' }}>New Comparison</h3>
 
@@ -347,6 +352,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
                     </button>
                 </div>
             </div>
+            )}
 
             {/* Section 2: Live Comparison Progress */}
             {running && compareProgress && (
@@ -504,22 +510,24 @@ export default function CompareTab({ projectId }: CompareTabProps) {
                                                     </span>
                                                 )}
                                                 <StatusBadge status={c.status} />
-                                                <button
-                                                    onClick={e => {
-                                                        e.stopPropagation();
-                                                        setConfirmDialog({ open: true, comparisonId: c.id });
-                                                    }}
-                                                    style={{
-                                                        ...btnSmall,
-                                                        color: 'var(--text-tertiary)',
-                                                        padding: '0.2rem 0.35rem',
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                    }}
-                                                    aria-label={`Delete comparison ${c.name || c.spec_name}`}
-                                                >
-                                                    <Trash2 size={13} />
-                                                </button>
+                                                {canEdit && (
+                                                    <button
+                                                        onClick={e => {
+                                                            e.stopPropagation();
+                                                            setConfirmDialog({ open: true, comparisonId: c.id });
+                                                        }}
+                                                        style={{
+                                                            ...btnSmall,
+                                                            color: 'var(--text-tertiary)',
+                                                            padding: '0.2rem 0.35rem',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                        }}
+                                                        aria-label={`Delete comparison ${c.name || c.spec_name}`}
+                                                    >
+                                                        <Trash2 size={13} />
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                         {/* Provider names in bottom row */}
@@ -537,7 +545,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
                     <EmptyState
                         icon={<Scale size={32} />}
                         title="No comparisons yet"
-                        description="Select a spec and providers above to run your first model comparison."
+                        description={canEdit ? 'Select a spec and providers above to run your first model comparison.' : 'Completed comparisons will appear here.'}
                     />
                 </div>
             )}
@@ -748,7 +756,7 @@ export default function CompareTab({ projectId }: CompareTabProps) {
 
             {/* Confirm Dialog for Delete */}
             <ConfirmDialog
-                open={confirmDialog.open}
+                open={canEdit && confirmDialog.open}
                 onOpenChange={open => setConfirmDialog(prev => ({ ...prev, open }))}
                 title="Delete Comparison"
                 description="Are you sure you want to delete this comparison? This action cannot be undone."

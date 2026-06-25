@@ -33,9 +33,10 @@ interface SpecsTabProps {
     onRefreshRuns: () => void;
     preferredConnectionId?: string;
     initialSpecName?: string;
+    canEdit: boolean;
 }
 
-export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs, onRefreshRuns, preferredConnectionId, initialSpecName }: SpecsTabProps) {
+export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs, onRefreshRuns, preferredConnectionId, initialSpecName, canEdit }: SpecsTabProps) {
     const [selectedSpec, setSelectedSpec] = useState<DbSpec | null>(null);
     const [specContent, setSpecContent] = useState('');
     const [isCreatingSpec, setIsCreatingSpec] = useState(false);
@@ -137,6 +138,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     }, [specJobId, aiGenJobId, projectId, onRefreshRuns, aiGenConnId]);
 
     const createSpec = async () => {
+        if (!canEdit) return;
         if (!newSpecName.trim() || !newSpecContent.trim()) return;
         try {
             const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/specs', projectId)}`, {
@@ -154,6 +156,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     };
 
     const deleteSpec = async (name: string) => {
+        if (!canEdit) return;
         if (!confirm(`Delete spec "${name}"?`)) return;
         try {
             await fetch(`${API_BASE}${withProjectQuery(`/database-testing/specs/${encodeURIComponent(name)}`, projectId)}`, {
@@ -165,6 +168,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     };
 
     const updateSpec = async () => {
+        if (!canEdit) return;
         if (!selectedSpec) return;
         try {
             await fetch(`${API_BASE}${withProjectQuery(`/database-testing/specs/${encodeURIComponent(selectedSpec.name)}`, projectId)}`, {
@@ -199,6 +203,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     }, [initialSpecName, selectedSpec?.name, specs]);
 
     const runSpec = async (specName: string) => {
+        if (!canEdit) return;
         if (!specConnId) { alert('Select a connection first'); return; }
         setRunningSpec(specName);
         try {
@@ -225,6 +230,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     };
 
     const generateSpecWithAi = async () => {
+        if (!canEdit) return;
         if (!aiGenConnId) { alert('Select a connection'); return; }
         if (!aiGenInstructions.trim()) { alert('Describe the checks you want to generate'); return; }
         setIsAiGenerating(true);
@@ -258,6 +264,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     };
 
     const saveGeneratedSpec = async (autoRun: boolean) => {
+        if (!canEdit) return;
         if (generatedChecks.length === 0) { alert('Generate checks first'); return; }
         setIsSavingGeneratedSpec(true);
         try {
@@ -292,43 +299,47 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     return (
         <div>
             {/* Connection selector for running specs */}
-            <div style={{ ...cardStyle, marginBottom: '1rem', padding: '0.75rem 1rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <label style={{ fontSize: '0.85rem', fontWeight: 500, whiteSpace: 'nowrap' }}>Run with connection:</label>
-                <select value={specConnId}
-                    onChange={e => setSpecConnId(e.target.value)}
-                    style={{ ...inputStyle, width: 'auto', flex: 1 }}>
-                    <option value="">Select a connection...</option>
-                    {connections.map(c => (
-                        <option key={c.id} value={c.id}>{c.name} ({c.host}:{c.port}/{c.database})</option>
-                    ))}
-                </select>
-            </div>
+            {canEdit && (
+                <div style={{ ...cardStyle, marginBottom: '1rem', padding: '0.75rem 1rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <label style={{ fontSize: '0.85rem', fontWeight: 500, whiteSpace: 'nowrap' }}>Run with connection:</label>
+                    <select value={specConnId}
+                        onChange={e => setSpecConnId(e.target.value)}
+                        style={{ ...inputStyle, width: 'auto', flex: 1 }}>
+                        <option value="">Select a connection...</option>
+                        {connections.map(c => (
+                            <option key={c.id} value={c.id}>{c.name} ({c.host}:{c.port}/{c.database})</option>
+                        ))}
+                    </select>
+                </div>
+            )}
 
             <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: '1rem' }}>
                 {/* Spec List */}
                 <div style={cardStyle}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                         <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Database Specs</h3>
-                        <div style={{ display: 'flex', gap: '4px' }}>
-                            <button onClick={() => { setShowAiGenerate(!showAiGenerate); setIsCreatingSpec(false); }} style={{
-                                background: showAiGenerate ? 'var(--accent)' : 'var(--accent)', color: 'white', border: 'none',
-                                borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
-                                display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
-                            }}>
-                                <Sparkles size={14} /> AI Generate
-                            </button>
-                            <button onClick={() => { setIsCreatingSpec(true); setShowAiGenerate(false); }} style={{
-                                background: 'var(--primary)', color: 'white', border: 'none',
-                                borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
-                                display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
-                            }}>
-                                <Plus size={14} /> New
-                            </button>
-                        </div>
+                        {canEdit && (
+                            <div style={{ display: 'flex', gap: '4px' }}>
+                                <button onClick={() => { setShowAiGenerate(!showAiGenerate); setIsCreatingSpec(false); }} style={{
+                                    background: showAiGenerate ? 'var(--accent)' : 'var(--accent)', color: 'white', border: 'none',
+                                    borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
+                                    display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
+                                }}>
+                                    <Sparkles size={14} /> AI Generate
+                                </button>
+                                <button onClick={() => { setIsCreatingSpec(true); setShowAiGenerate(false); }} style={{
+                                    background: 'var(--primary)', color: 'white', border: 'none',
+                                    borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
+                                    display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
+                                }}>
+                                    <Plus size={14} /> New
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     {/* AI Generate setup */}
-                    {showAiGenerate && (
+                    {canEdit && showAiGenerate && (
                         <div style={{
                             background: 'rgba(139, 92, 246, 0.08)', border: '1px solid rgba(139, 92, 246, 0.25)',
                             borderRadius: 'var(--radius)', padding: '0.75rem', marginBottom: '0.75rem',
@@ -400,31 +411,33 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                             marginBottom: '0.25rem',
                         }}>
                             <span style={{ fontSize: '0.85rem', flex: 1 }}>{spec.name}</span>
-                            <div style={{ display: 'flex', gap: '4px' }}>
-                                <button onClick={e => { e.stopPropagation(); runSpec(spec.name); }}
-                                    disabled={runningSpec === spec.name || !specConnId}
-                                    style={{
-                                        background: 'none', border: 'none', cursor: runningSpec === spec.name ? 'not-allowed' : 'pointer',
-                                        color: specConnId ? 'var(--primary)' : 'var(--text-secondary)', padding: '2px',
+                            {canEdit && (
+                                <div style={{ display: 'flex', gap: '4px' }}>
+                                    <button onClick={e => { e.stopPropagation(); runSpec(spec.name); }}
+                                        disabled={runningSpec === spec.name || !specConnId}
+                                        style={{
+                                            background: 'none', border: 'none', cursor: runningSpec === spec.name ? 'not-allowed' : 'pointer',
+                                            color: specConnId ? 'var(--primary)' : 'var(--text-secondary)', padding: '2px',
+                                        }}>
+                                        {runningSpec === spec.name
+                                            ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                                            : <Play size={14} />}
+                                    </button>
+                                    <button onClick={e => { e.stopPropagation(); deleteSpec(spec.name); }} style={{
+                                        background: 'none', border: 'none', cursor: 'pointer',
+                                        color: 'var(--text-secondary)', padding: '2px',
                                     }}>
-                                    {runningSpec === spec.name
-                                        ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-                                        : <Play size={14} />}
-                                </button>
-                                <button onClick={e => { e.stopPropagation(); deleteSpec(spec.name); }} style={{
-                                    background: 'none', border: 'none', cursor: 'pointer',
-                                    color: 'var(--text-secondary)', padding: '2px',
-                                }}>
-                                    <Trash2 size={14} />
-                                </button>
-                            </div>
+                                        <Trash2 size={14} />
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     ))}
                 </div>
 
                 {/* Spec Editor */}
                 <div style={cardStyle}>
-                    {isCreatingSpec ? (
+                    {canEdit && isCreatingSpec ? (
                         <>
                             <h3 style={{ fontWeight: 600, marginBottom: '1rem' }}>Create New Spec</h3>
                             <input
@@ -450,7 +463,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                                 </button>
                             </div>
                         </>
-                    ) : showAiGenerate ? (
+                    ) : canEdit && showAiGenerate ? (
                         <>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                                 <h3 style={{ fontWeight: 600 }}>Generated Spec Preview</h3>
@@ -515,6 +528,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                         <>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                                 <h3 style={{ fontWeight: 600 }}>{selectedSpec.name}</h3>
+                                {canEdit && (
                                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                                     {editingSpec ? (
                                         <>
@@ -551,13 +565,15 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                                         </>
                                     )}
                                 </div>
+                                )}
                             </div>
                             <div style={{ height: '500px' }}>
-                                {editingSpec ? (
+                                {editingSpec && canEdit ? (
                                     <CodeEditor
                                         value={specContent}
                                         onChange={(v: string) => setSpecContent(v)}
                                         language="markdown"
+                                        readOnly={!canEdit}
                                     />
                                 ) : (
                                     <SyntaxHighlighter

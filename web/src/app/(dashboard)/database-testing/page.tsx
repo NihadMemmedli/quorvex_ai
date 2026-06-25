@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { useRequiredProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { createTabStyle } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
 import { API_BASE, withProjectQuery } from '@/lib/api';
@@ -22,6 +23,7 @@ import type { DbConnection, DbSpec, DbTestRun, TabType } from './components/type
 
 export default function DatabaseTestingPage() {
     const { projectId } = useRequiredProject();
+    const { canEdit } = useProjectRole(projectId);
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -290,6 +292,7 @@ export default function DatabaseTestingPage() {
                     connections={connections}
                     projectId={projectId}
                     onRefresh={fetchConnections}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -302,6 +305,7 @@ export default function DatabaseTestingPage() {
                     selectedTableName={selectedTableName}
                     onSelectConnection={handleConnectionSelect}
                     onSelectTable={handleTableSelect}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -312,6 +316,7 @@ export default function DatabaseTestingPage() {
                     onSpecsSaved={fetchSpecs}
                     preferredConnectionId={preferredConnectionId}
                     initialRunId={searchParams.get('runId') || undefined}
+                    canEdit={canEdit}
                 />
             )}
 
@@ -324,6 +329,7 @@ export default function DatabaseTestingPage() {
                     onRefreshRuns={fetchRuns}
                     preferredConnectionId={preferredConnectionId}
                     initialSpecName={searchParams.get('specName') || undefined}
+                    canEdit={canEdit}
                 />
             )}
 

@@ -104,9 +104,10 @@ interface SpecsTabProps {
     specs: SecuritySpec[];
     fetchSpecs: () => Promise<void>;
     initialSpecName?: string;
+    canEdit: boolean;
 }
 
-export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName }: SpecsTabProps) {
+export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName, canEdit }: SpecsTabProps) {
     const [selectedSpec, setSelectedSpec] = useState<SecuritySpec | null>(null);
     const [specContent, setSpecContent] = useState('');
     const [isCreatingSpec, setIsCreatingSpec] = useState(false);
@@ -115,6 +116,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
     const [editingSpec, setEditingSpec] = useState(false);
 
     const startNewSpec = (template?: typeof SPEC_TEMPLATES[number]) => {
+        if (!canEdit) return;
         setSelectedSpec(null);
         setEditingSpec(false);
         setIsCreatingSpec(true);
@@ -144,6 +146,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
     }, [initialSpecName, selectedSpec?.name, specs]);
 
     const createSpec = async () => {
+        if (!canEdit) return;
         if (!newSpecName.trim() || !newSpecContent.trim()) return;
         try {
             const res = await fetch(`${API_BASE}/security-testing/specs`, {
@@ -161,6 +164,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
     };
 
     const deleteSpec = async (name: string) => {
+        if (!canEdit) return;
         if (!confirm(`Delete spec "${name}"?`)) return;
         try {
             await fetch(`${API_BASE}/security-testing/specs/${encodeURIComponent(name)}?project_id=${projectId}`, {
@@ -172,6 +176,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
     };
 
     const updateSpec = async () => {
+        if (!canEdit) return;
         if (!selectedSpec) return;
         try {
             await fetch(`${API_BASE}/security-testing/specs/${encodeURIComponent(selectedSpec.name)}?project_id=${projectId}`, {
@@ -190,19 +195,21 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
             <div style={cardStyle}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                     <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Security Specs</h3>
-                    <button onClick={() => startNewSpec()} style={{
-                        background: 'var(--primary)', color: 'white', border: 'none',
-                        borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
-                        display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
-                    }}>
-                        <Plus size={14} /> New
-                    </button>
+                    {canEdit && (
+                        <button onClick={() => startNewSpec()} style={{
+                            background: 'var(--primary)', color: 'white', border: 'none',
+                            borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
+                        }}>
+                            <Plus size={14} /> New
+                        </button>
+                    )}
                 </div>
 
                 {specs.length === 0 && (
                     <div style={{ display: 'grid', gap: '0.5rem' }}>
                         <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No specs yet</p>
-                        {SPEC_TEMPLATES.map(template => (
+                        {canEdit && SPEC_TEMPLATES.map(template => (
                             <button key={template.name} onClick={() => startNewSpec(template)} style={{
                                 width: '100%',
                                 background: 'var(--bg)',
@@ -232,19 +239,21 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
                         marginBottom: '0.25rem',
                     }}>
                         <span style={{ fontSize: '0.85rem' }}>{spec.name}</span>
-                        <button onClick={e => { e.stopPropagation(); deleteSpec(spec.name); }} style={{
-                            background: 'none', border: 'none', cursor: 'pointer',
-                            color: 'var(--text-secondary)', padding: '2px',
-                        }}>
-                            <Trash2 size={14} />
-                        </button>
+                        {canEdit && (
+                            <button onClick={e => { e.stopPropagation(); deleteSpec(spec.name); }} style={{
+                                background: 'none', border: 'none', cursor: 'pointer',
+                                color: 'var(--text-secondary)', padding: '2px',
+                            }}>
+                                <Trash2 size={14} />
+                            </button>
+                        )}
                     </div>
                 ))}
             </div>
 
             {/* Spec Editor */}
             <div style={cardStyle}>
-                {isCreatingSpec ? (
+                {canEdit && isCreatingSpec ? (
                     <>
                         <h3 style={{ fontWeight: 600, marginBottom: '1rem' }}>Create New Spec</h3>
                         <input
@@ -282,6 +291,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
                                 value={newSpecContent}
                                 onChange={(v: string) => setNewSpecContent(v)}
                                 language="markdown"
+                                readOnly={!canEdit}
                             />
                         </div>
                         <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -304,7 +314,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
                     <>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                             <h3 style={{ fontWeight: 600 }}>{selectedSpec.name}</h3>
-                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            {canEdit && <div style={{ display: 'flex', gap: '0.5rem' }}>
                                 {editingSpec ? (
                                     <>
                                         <button onClick={updateSpec} style={{
@@ -331,14 +341,15 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
                                         <Edit2 size={14} /> Edit
                                     </button>
                                 )}
-                            </div>
+                            </div>}
                         </div>
                         <div style={{ height: '500px' }}>
-                            {editingSpec ? (
+                            {canEdit && editingSpec ? (
                                 <CodeEditor
                                     value={specContent}
                                     onChange={(v: string) => setSpecContent(v)}
                                     language="markdown"
+                                    readOnly={!canEdit}
                                 />
                             ) : (
                                 <SyntaxHighlighter
@@ -353,7 +364,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs, initialSpecName
                     </>
                 ) : (
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '300px', color: 'var(--text-secondary)' }}>
-                        Select a spec to view or create a new one
+                        {canEdit ? 'Select a spec to view or create a new one' : 'Select a spec to view'}
                     </div>
                 )}
             </div>

@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -33,6 +34,8 @@ const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
 export default function LlmTestingPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || 'default';
+    const { canEdit: canEditProject } = useProjectRole(currentProject?.id ?? null);
+    const canEdit = !currentProject?.id || canEditProject;
     const [tab, setTab] = useState<Tab>('providers');
     const [visited, setVisited] = useState<Set<Tab>>(new Set(['providers']));
 
@@ -86,15 +89,15 @@ export default function LlmTestingPage() {
                 </TabsList>
             </Tabs>
 
-            {visited.has('providers') && <div style={{ display: tab === 'providers' ? 'block' : 'none' }}><ProvidersTab projectId={projectId} /></div>}
-            {visited.has('specs') && <div style={{ display: tab === 'specs' ? 'block' : 'none' }}><SpecsTab projectId={projectId} /></div>}
-            {visited.has('datasets') && <div style={{ display: tab === 'datasets' ? 'block' : 'none' }}><DatasetsTab projectId={projectId} /></div>}
-            {visited.has('run') && <div style={{ display: tab === 'run' ? 'block' : 'none' }}><RunTab projectId={projectId} /></div>}
-            {visited.has('compare') && <div style={{ display: tab === 'compare' ? 'block' : 'none' }}><CompareTab projectId={projectId} /></div>}
+            {visited.has('providers') && <div style={{ display: tab === 'providers' ? 'block' : 'none' }}><ProvidersTab projectId={projectId} canEdit={canEdit} /></div>}
+            {visited.has('specs') && <div style={{ display: tab === 'specs' ? 'block' : 'none' }}><SpecsTab projectId={projectId} canEdit={canEdit} /></div>}
+            {visited.has('datasets') && <div style={{ display: tab === 'datasets' ? 'block' : 'none' }}><DatasetsTab projectId={projectId} canEdit={canEdit} /></div>}
+            {visited.has('run') && <div style={{ display: tab === 'run' ? 'block' : 'none' }}><RunTab projectId={projectId} canEdit={canEdit} /></div>}
+            {visited.has('compare') && <div style={{ display: tab === 'compare' ? 'block' : 'none' }}><CompareTab projectId={projectId} canEdit={canEdit} /></div>}
             {visited.has('history') && <div style={{ display: tab === 'history' ? 'block' : 'none' }}><HistoryTab projectId={projectId} /></div>}
             {visited.has('analytics') && <div style={{ display: tab === 'analytics' ? 'block' : 'none' }}><AnalyticsTab projectId={projectId} /></div>}
-            {visited.has('prompts') && <div style={{ display: tab === 'prompts' ? 'block' : 'none' }}><PromptsTab projectId={projectId} /></div>}
-            {visited.has('schedules') && <div style={{ display: tab === 'schedules' ? 'block' : 'none' }}><SchedulesTab projectId={projectId} /></div>}
+            {visited.has('prompts') && <div style={{ display: tab === 'prompts' ? 'block' : 'none' }}><PromptsTab projectId={projectId} canEdit={canEdit} /></div>}
+            {visited.has('schedules') && <div style={{ display: tab === 'schedules' ? 'block' : 'none' }}><SchedulesTab projectId={projectId} canEdit={canEdit} /></div>}
         </PageLayout>
     );
 }

@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
 import SpecBuilder from '@/components/SpecBuilder';
 import { useProject } from '@/contexts/ProjectContext';
+import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
@@ -13,6 +14,8 @@ import { PageHeader } from '@/components/ui/page-header';
 export default function NewTemplatePage() {
     const router = useRouter();
     const { currentProject } = useProject();
+    const { canEdit: canEditProject } = useProjectRole(currentProject?.id ?? null);
+    const canEdit = !currentProject?.id || canEditProject;
     const [name, setName] = useState('');
     const [content, setContent] = useState('');
     const [tags, setTags] = useState<string[]>([]);
@@ -50,6 +53,7 @@ export default function NewTemplatePage() {
     }, []);
 
     const handleSave = async () => {
+        if (!canEdit) return;
         if (!name || !content) {
             alert('Please fill in name and content');
             return;
@@ -102,7 +106,7 @@ export default function NewTemplatePage() {
                         <ArrowLeft size={16} /> Back to Templates
                     </Link>
                 }
-                actions={
+                actions={canEdit ? (
                     <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                         <div style={{ background: 'var(--surface)', borderRadius: 'var(--radius)', padding: '4px', display: 'flex', border: '1px solid var(--border)' }}>
                             <button
@@ -139,8 +143,13 @@ export default function NewTemplatePage() {
                             {loading ? 'Saving...' : 'Save Template'}
                         </button>
                     </div>
-                }
+                ) : null}
             />
+            {!canEdit && (
+                <div className="card" style={{ padding: '1rem', marginBottom: '1.5rem', color: 'var(--text-secondary)' }}>
+                    Viewers can inspect templates but cannot create new templates.
+                </div>
+            )}
 
             <div className="animate-in stagger-2" style={{ display: 'grid', gap: '2rem', maxWidth: '800px' }}>
                 <div className="card">

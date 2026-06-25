@@ -10,10 +10,11 @@ interface FindingCardProps {
     onStatusChange: (id: number, status: string, notes?: string) => void;
     expanded: boolean;
     onToggle: () => void;
+    canEdit: boolean;
 }
 
 export default React.memo(function FindingCard({
-    finding, onStatusChange, expanded, onToggle,
+    finding, onStatusChange, expanded, onToggle, canEdit,
 }: FindingCardProps) {
     let refUrls: string[] = [];
     if (Array.isArray(finding.reference_urls)) {
@@ -101,25 +102,27 @@ export default React.memo(function FindingCard({
                     )}
 
                     {/* Status Actions */}
-                    <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginRight: '0.5rem' }}>Mark as:</span>
-                        {['open', 'false_positive', 'fixed', 'accepted_risk'].map(status => (
-                            <button
-                                key={status}
-                                onClick={() => onStatusChange(finding.id, status)}
-                                disabled={finding.status === status}
-                                style={{
-                                    fontSize: '0.75rem', padding: '3px 8px', borderRadius: '4px',
-                                    border: '1px solid var(--border)', cursor: finding.status === status ? 'default' : 'pointer',
-                                    background: finding.status === status ? 'var(--primary)' : 'transparent',
-                                    color: finding.status === status ? 'white' : 'var(--text-secondary)',
-                                    opacity: finding.status === status ? 1 : 0.8,
-                                }}
-                            >
-                                {status.replace('_', ' ')}
-                            </button>
-                        ))}
-                    </div>
+                    {canEdit && (
+                        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginRight: '0.5rem' }}>Mark as:</span>
+                            {['open', 'false_positive', 'fixed', 'accepted_risk'].map(status => (
+                                <button
+                                    key={status}
+                                    onClick={() => onStatusChange(finding.id, status)}
+                                    disabled={finding.status === status}
+                                    style={{
+                                        fontSize: '0.75rem', padding: '3px 8px', borderRadius: '4px',
+                                        border: '1px solid var(--border)', cursor: finding.status === status ? 'default' : 'pointer',
+                                        background: finding.status === status ? 'var(--primary)' : 'transparent',
+                                        color: finding.status === status ? 'white' : 'var(--text-secondary)',
+                                        opacity: finding.status === status ? 1 : 0.8,
+                                    }}
+                                >
+                                    {status.replace('_', ' ')}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
         </div>

@@ -16,6 +16,7 @@ interface ImportRequirementsResult {
 }
 
 interface WorkingPhaseProps {
+    canEdit: boolean;
     projectName: string;
     currentProjectId: string | null;
     features: Feature[];
@@ -41,6 +42,7 @@ interface WorkingPhaseProps {
 }
 
 export function WorkingPhase({
+    canEdit,
     projectName,
     currentProjectId,
     features,
@@ -152,6 +154,7 @@ export function WorkingPhase({
             `}</style>
             {/* Project Info Bar — full width */}
             <ProjectInfoBar
+                canEdit={canEdit}
                 projectName={projectName}
                 currentProjectId={currentProjectId}
                 onReset={onReset}
@@ -163,6 +166,7 @@ export function WorkingPhase({
 
             {/* Config Panel — full width, collapsible */}
             <ConfigPanel
+                canEdit={canEdit}
                 settings={settings}
                 onUpdate={onUpdateSetting}
             />
@@ -173,6 +177,7 @@ export function WorkingPhase({
             {/* Sidebar + Workspace — two-column layout */}
             <div className="animate-in stagger-3 prd-workspace-shell">
                 <FeatureSidebar
+                    canEdit={canEdit}
                     features={features}
                     selectedFeature={selectedFeature}
                     onSelect={setSelectedFeature}
@@ -182,6 +187,7 @@ export function WorkingPhase({
                     generationBlockedReason={generationBlockedReason}
                 />
                 <FeatureWorkspace
+                    canEdit={canEdit}
                     feature={selectedFeature}
                     generationResult={selectedFeature ? generationResults[selectedFeature.name] : undefined}
                     onGenerate={onGenerate}
@@ -198,6 +204,7 @@ export function WorkingPhase({
             {/* Test Generation Panel — full width */}
             <div className="animate-in stagger-4">
                 <TestGenerationPanel
+                    canEdit={canEdit}
                     generatedSpecs={generatedSpecs}
                     onGenerateTests={onGenerateTests}
                     testResults={testResults}
