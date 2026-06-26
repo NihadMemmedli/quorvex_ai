@@ -919,10 +919,22 @@ async def start_test_run_temporal_or_fail(
     task_queue: str | None = None,
 ) -> None:
     from orchestrator.config import settings as app_settings
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_test_run_workflow
+    from orchestrator.services.temporal_client import (
+        TemporalUnavailableError,
+        describe_temporal_task_queue,
+        start_test_run_workflow,
+    )
 
     selected_task_queue = task_queue or app_settings.temporal_browser_workflow_task_queue
     try:
+        task_queue_status = await describe_temporal_task_queue(selected_task_queue)
+        workflow_pollers = int((task_queue_status.get("workflow") or {}).get("poller_count") or 0)
+        activity_pollers = int((task_queue_status.get("activity") or {}).get("poller_count") or 0)
+        if workflow_pollers <= 0 or activity_pollers <= 0:
+            raise TemporalUnavailableError(
+                f"No Temporal pollers for task queue {selected_task_queue} "
+                f"(workflow={workflow_pollers}, activity={activity_pollers})"
+            )
         temporal = await start_test_run_workflow(run.id, payload, task_queue=selected_task_queue)
     except TemporalUnavailableError as exc:
         run.status = "error"

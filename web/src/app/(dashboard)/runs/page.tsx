@@ -49,6 +49,23 @@ interface QueueStatus {
     orphaned_running_count?: number;
     active_process_count?: number;
     orphaned_queued_count?: number;
+    browser_pool_running_count?: number;
+    browser_pool_queued_count?: number;
+    test_run_running_count?: number;
+    test_run_queued_count?: number;
+    legacy_running_count?: number;
+    legacy_queued_count?: number;
+    browser_pool?: {
+        running_requests?: string[];
+        queued_requests?: string[];
+    };
+}
+
+interface BrowserPoolClearResult {
+    queued?: number;
+    running?: number;
+    request_ids?: string[];
+    error?: string;
 }
 
 const PAGE_SIZE = 20;
@@ -75,12 +92,19 @@ export default function RunsPage() {
     const [deletingRuns, setDeletingRuns] = useState<Set<string>>(new Set());
     const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-    const fetchQueueStatus = () => {
-        fetch(`${API_BASE}/queue-status`)
-            .then(res => res.json())
-            .then((data: QueueStatus) => setQueueStatus(data))
-            .catch(console.error);
+    const fetchQueueStatus = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/queue-status`);
+            if (!res.ok) throw new Error(`Queue status failed (${res.status})`);
+            const data: QueueStatus = await res.json();
+            setQueueStatus(data);
+        } catch (err) {
+            console.error(err);
+        }
     };
+
+    const browserPoolTotal = (result?: BrowserPoolClearResult | null) =>
+        (result?.queued || 0) + (result?.running || 0);
 
     // Debounce search input
     useEffect(() => {
@@ -108,7 +132,10 @@ export default function RunsPage() {
 
         Promise.all([
             fetch(runsUrl).then(res => res.json()),
-            fetch(`${API_BASE}/queue-status`).then(res => res.json())
+            fetch(`${API_BASE}/queue-status`).then(res => {
+                if (!res.ok) throw new Error(`Queue status failed (${res.status})`);
+                return res.json();
+            })
         ])
             .then(([runsData, queueData]: [PaginatedResponse, QueueStatus]) => {
                 if (append) {
@@ -146,6 +173,13 @@ export default function RunsPage() {
 
     useEffect(() => {
         if (!projectId) return;
+        fetchQueueStatus();
+        const interval = setInterval(fetchQueueStatus, 3000);
+        return () => clearInterval(interval);
+    }, [projectId]);
+
+    useEffect(() => {
+        if (!projectId) return;
         // Auto-refresh every 3 seconds if there are running or queued tests
         const interval = setInterval(() => {
             const hasRunning = runs.some(r =>
@@ -167,7 +201,10 @@ export default function RunsPage() {
                 // Refresh runs and queue status
                 Promise.all([
                     fetch(runsUrl).then(res => res.json()),
-                    fetch(`${API_BASE}/queue-status`).then(res => res.json())
+                    fetch(`${API_BASE}/queue-status`).then(res => {
+                        if (!res.ok) throw new Error(`Queue status failed (${res.status})`);
+                        return res.json();
+                    })
                 ])
                     .then(([runsData, queueData]: [PaginatedResponse, QueueStatus]) => {
                         // Update only the runs we have loaded, preserving order
@@ -236,12 +273,18 @@ export default function RunsPage() {
             });
             if (res.ok) {
                 const data = await res.json();
+                const agentQueueTotal = (data.agent_queue_flushed?.queued_cancelled || 0) +
+                                      (data.agent_queue_flushed?.running_failed || 0);
                 const total = (data.stopped_processes || 0) + (data.cancelled_autopilot || 0) +
-                             (data.cancelled_explorations || 0) + (data.cleaned_db_entries || 0);
+                             (data.cancelled_explorations || 0) + (data.cleaned_db_entries || 0) +
+                             (data.cleaned_runtime_entries || 0) + browserPoolTotal(data.browser_pool_cleared) +
+                             (data.legacy_queue_cleared || 0) + agentQueueTotal;
                 toast.success(`Stopped ${total} jobs/entries`);
                 fetchRuns();
+                fetchQueueStatus();
             } else {
-                toast.error('Failed to stop all jobs');
+                const data = await res.json().catch(() => ({}));
+                toast.error(data.detail || 'Failed to stop all jobs');
             }
         } catch (err) {
             toast.error('Error stopping all jobs');
@@ -266,10 +309,15 @@ export default function RunsPage() {
 
             if (res.ok) {
                 const data = await res.json();
-                toast.success(`Cleared ${data.cleared_count} queue entries`);
+                const poolCleared = browserPoolTotal(data.browser_pool_cleared);
+                const legacyCleared = data.legacy_queue_cleared || 0;
+                const totalCleared = (data.cleared_count || 0) + poolCleared + legacyCleared;
+                toast.success(`Cleared ${totalCleared} queue entries`);
                 fetchRuns(); // Refresh immediately
+                fetchQueueStatus();
             } else {
-                toast.error('Failed to clear queue');
+                const data = await res.json().catch(() => ({}));
+                toast.error(data.detail || 'Failed to clear queue');
             }
         } catch (err) {
             toast.error('Error clearing queue');
@@ -568,7 +616,14 @@ export default function RunsPage() {
             />
 
             {/* Queue Status Bar */}
-            {queueStatus && (queueStatus.running_count > 0 || queueStatus.queued_count > 0 || (queueStatus.orphaned_running_count ?? 0) > 0 || (queueStatus.orphaned_queued_count ?? 0) > 0) && (
+            {queueStatus && (
+                queueStatus.running_count > 0 ||
+                queueStatus.queued_count > 0 ||
+                (queueStatus.test_run_running_count ?? 0) > 0 ||
+                (queueStatus.test_run_queued_count ?? 0) > 0 ||
+                (queueStatus.orphaned_running_count ?? 0) > 0 ||
+                (queueStatus.orphaned_queued_count ?? 0) > 0
+            ) && (
                 <div className="animate-in stagger-2" style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -586,14 +641,22 @@ export default function RunsPage() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <PlayCircle size={16} color="var(--primary)" />
                         <span style={{ fontSize: '0.9rem' }}>
-                            <strong>{queueStatus.running_count}</strong> / {queueStatus.parallelism_limit} running
+                            Browser pool: <strong>{queueStatus.browser_pool_running_count ?? queueStatus.running_count}</strong> / {queueStatus.parallelism_limit} running
                         </span>
                     </div>
                     {queueStatus.queued_count > 0 && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Hourglass size={16} color="var(--warning)" />
                             <span style={{ fontSize: '0.9rem', color: 'var(--warning)' }}>
-                                <strong>{queueStatus.queued_count}</strong> queued
+                                <strong>{queueStatus.browser_pool_queued_count ?? queueStatus.queued_count}</strong> browser queued
+                            </span>
+                        </div>
+                    )}
+                    {((queueStatus.test_run_running_count ?? queueStatus.legacy_running_count ?? 0) > 0 || (queueStatus.test_run_queued_count ?? queueStatus.legacy_queued_count ?? 0) > 0) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <FileText size={16} color="var(--text-secondary)" />
+                            <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                Tests: <strong>{queueStatus.test_run_running_count ?? queueStatus.legacy_running_count ?? 0}</strong> running, <strong>{queueStatus.test_run_queued_count ?? queueStatus.legacy_queued_count ?? 0}</strong> queued
                             </span>
                         </div>
                     )}

@@ -272,11 +272,57 @@ async def _queue_watchdog(runtime: Any) -> None:
                 cutoff = runtime.datetime.utcnow() - runtime.timedelta(seconds=grace_period_seconds)
                 batch_ids_to_update = set()
                 cleaned = 0
+                temporal_queue_error: str | None = None
+                temporal_queue_has_pollers: bool | None = None
+
+                temporal_queued_runs = [run for run in queued_runs if run.temporal_workflow_id]
+                if temporal_queued_runs:
+                    try:
+                        from orchestrator.config import settings as app_settings
+                        from orchestrator.services.temporal_client import describe_temporal_task_queue
+
+                        task_queue_status = await describe_temporal_task_queue(
+                            app_settings.temporal_browser_workflow_task_queue
+                        )
+                        workflow_pollers = int((task_queue_status.get("workflow") or {}).get("poller_count") or 0)
+                        activity_pollers = int((task_queue_status.get("activity") or {}).get("poller_count") or 0)
+                        temporal_queue_has_pollers = workflow_pollers > 0 and activity_pollers > 0
+                        if not temporal_queue_has_pollers:
+                            temporal_queue_error = (
+                                "No Temporal pollers for browser workflow queue "
+                                f"(workflow={workflow_pollers}, activity={activity_pollers})"
+                            )
+                    except Exception as exc:
+                        temporal_queue_has_pollers = False
+                        temporal_queue_error = f"Temporal browser workflow queue health check failed: {exc}"
 
                 for run in queued_runs:
-                    if run.temporal_workflow_id:
-                        continue
                     if run.queued_at and run.queued_at > cutoff:
+                        continue
+
+                    if run.temporal_workflow_id:
+                        if temporal_queue_has_pollers is not False:
+                            continue
+
+                        runtime.logger.warning(
+                            "Queue watchdog: Temporal-backed run %s is queued but browser workflow queue has no pollers. "
+                            "Marking as error.",
+                            run.id,
+                        )
+                        run.status = "error"
+                        run.queue_position = None
+                        run.error_message = temporal_queue_error or "No Temporal pollers for browser workflow queue"
+                        run.stage_message = run.error_message
+                        run.completed_at = runtime.datetime.utcnow()
+                        session.add(run)
+
+                        run_dir = runtime.RUNS_DIR / run.id
+                        if run_dir.exists():
+                            (run_dir / "status.txt").write_text("error")
+
+                        if run.batch_id:
+                            batch_ids_to_update.add(run.batch_id)
+                        cleaned += 1
                         continue
 
                     has_task = (

@@ -78,6 +78,8 @@ services:
     image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
     build: !reset null
     pull_policy: always
+    environment:
+      TEMPORAL_WORKFLOW_TASK_QUEUES: ${TEMPORAL_WORKFLOW_TASK_QUEUES:-quorvex-custom-workflows,quorvex-browser-workflows}
     volumes:
       - ${QUORVEX_DATA_ROOT:-./data}/runs:/app/runs
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
