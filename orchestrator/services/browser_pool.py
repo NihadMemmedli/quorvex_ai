@@ -1219,6 +1219,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
             info = await r.hgetall(f"{self._key_prefix}:info:{request_id}")
             owner_active = await self._slot_owner_is_active(request_id, info or {})
             age_stale = False
+            corrupt_record = False
             queued_str = (info or {}).get("queued")
             if queued_str:
                 try:
@@ -1228,19 +1229,23 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
                     age_stale = (now - queued_at).total_seconds() > max_age_minutes * 60
                 except (ValueError, TypeError):
                     age_stale = True
+                    corrupt_record = True
             elif owner_active is not True:
                 age_stale = True
+                corrupt_record = True
 
-            if owner_active is False or (owner_active is None and age_stale) or (
-                age_stale and (info or {}).get("type") == OperationType.TEST_RUN.value
-            ):
+            if owner_active is True:
+                if age_stale:
+                    logger.info("[%s] Preserving queued browser slot because owner is still active", request_id)
+                continue
+
+            if owner_active is False or (owner_active is None and age_stale and corrupt_record):
                 stale_queued_ids.append(request_id)
 
         for request_id in stale_queued_ids:
             removed = await r.lrem(f"{self._key_prefix}:queue", 0, request_id)
             if removed:
                 await r.delete(f"{self._key_prefix}:info:{request_id}")
-                await self._mark_test_run_slot_error(request_id, "Stale queued browser slot cleaned up")
                 logger.warning("[%s] Removed stale queued Redis browser request", request_id)
 
         for request_id in stale_ids:

@@ -16,6 +16,41 @@ CONTROL_ACTIVITY_RETRY_POLICY = RetryPolicy(
 
 TEST_RUN_ACTIVITY_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 
+DEFAULT_AI_PIPELINE_TIMEOUT_SECONDS = 7200
+MIN_AI_PIPELINE_TIMEOUT_SECONDS = 900
+MAX_AI_PIPELINE_TIMEOUT_SECONDS = 86400
+DEFAULT_TEST_RUN_QUEUE_WAIT_TIMEOUT_SECONDS = 86400
+MAX_TEST_RUN_ACTIVITY_TIMEOUT_SECONDS = 129600
+TEST_RUN_CLEANUP_BUFFER_SECONDS = 1800
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _test_run_activity_timeout(payload: dict[str, Any]) -> timedelta:
+    execution_timeout = _bounded_int(
+        payload.get("ai_pipeline_timeout_seconds"),
+        default=DEFAULT_AI_PIPELINE_TIMEOUT_SECONDS,
+        minimum=MIN_AI_PIPELINE_TIMEOUT_SECONDS,
+        maximum=MAX_AI_PIPELINE_TIMEOUT_SECONDS,
+    )
+    queue_timeout = _bounded_int(
+        payload.get("browser_slot_wait_timeout_seconds"),
+        default=max(DEFAULT_TEST_RUN_QUEUE_WAIT_TIMEOUT_SECONDS, execution_timeout),
+        minimum=MIN_AI_PIPELINE_TIMEOUT_SECONDS,
+        maximum=MAX_TEST_RUN_ACTIVITY_TIMEOUT_SECONDS,
+    )
+    seconds = min(
+        MAX_TEST_RUN_ACTIVITY_TIMEOUT_SECONDS,
+        queue_timeout + execution_timeout + TEST_RUN_CLEANUP_BUFFER_SECONDS,
+    )
+    return timedelta(seconds=seconds)
+
 
 @workflow.defn(name="TestRunWorkflow")
 class TestRunWorkflow:
@@ -55,7 +90,7 @@ class TestRunWorkflow:
         execution = workflow.start_activity(
             "execute_test_run",
             payload,
-            start_to_close_timeout=timedelta(hours=12),
+            start_to_close_timeout=_test_run_activity_timeout(payload),
             retry_policy=TEST_RUN_ACTIVITY_RETRY_POLICY,
         )
         await workflow.wait_condition(lambda: self._stop_requested or execution.done())

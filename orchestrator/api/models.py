@@ -136,7 +136,7 @@ class UpdateExecutionSettingsRequest(BaseModel):
     parallel_mode_enabled: bool | None = None
     headless_in_parallel: bool | None = None
     memory_enabled: bool | None = None
-    ai_pipeline_timeout_seconds: int | None = Field(default=None, ge=900, le=14400)
+    ai_pipeline_timeout_seconds: int | None = Field(default=None, ge=900)
 
 
 class AgentWorkerHealth(BaseModel):

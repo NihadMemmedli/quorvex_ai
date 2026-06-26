@@ -3653,9 +3653,14 @@ class AgentRunner:
                 token_telemetry=token_telemetry,
             )
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             duration = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Agent timed out after {timeout} seconds (queue mode)"
+            queue_timeout_detail = str(e).strip()
+            error_msg = (
+                f"Agent timed out after {timeout} seconds (queue mode): {queue_timeout_detail}"
+                if queue_timeout_detail
+                else f"Agent timed out after {timeout} seconds (queue mode)"
+            )
             logger.warning(error_msg)
             self._console_print(f"⚠️ {error_msg}", level="warning")
 

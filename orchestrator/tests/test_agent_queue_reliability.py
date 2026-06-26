@@ -2324,7 +2324,7 @@ async def test_wait_for_result_keeps_queued_task_when_workers_are_busy():
     queue.queue_length = queue_length
     queue.running_count = running_count
 
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(asyncio.TimeoutError, match="while queued"):
         await queue.wait_for_result(
             task.id, timeout=0.05, poll_interval=0.001, queued_timeout=0.01
         )

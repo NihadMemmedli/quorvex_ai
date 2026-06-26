@@ -87,7 +87,7 @@ interface ClaudeTokenSetupState {
 
 const DEFAULT_AI_PIPELINE_TIMEOUT_MINUTES = 120;
 const MIN_AI_PIPELINE_TIMEOUT_MINUTES = 15;
-const MAX_AI_PIPELINE_TIMEOUT_MINUTES = 240;
+const MAX_AI_PIPELINE_TIMEOUT_MINUTES = 1440;
 
 const clampAiPipelineTimeoutMinutes = (minutes: number) => {
     if (!Number.isFinite(minutes)) {

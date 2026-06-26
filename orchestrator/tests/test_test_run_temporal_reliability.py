@@ -3,7 +3,39 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from orchestrator.api.models import UpdateExecutionSettingsRequest
 from orchestrator.api.test_run_runtime_support import start_test_run_temporal_or_fail
+from orchestrator.services.execution_timeouts import (
+    MAX_AI_PIPELINE_TIMEOUT_SECONDS,
+    clamp_ai_pipeline_timeout_seconds,
+    get_temporal_test_run_activity_timeout_seconds,
+    get_test_run_queue_wait_timeout_seconds,
+)
+from orchestrator.workflows.test_run_workflow import _test_run_activity_timeout
+
+
+def test_ai_pipeline_timeout_accepts_and_clamps_24_hour_values():
+    request = UpdateExecutionSettingsRequest(ai_pipeline_timeout_seconds=90000)
+
+    assert request.ai_pipeline_timeout_seconds == 90000
+    assert clamp_ai_pipeline_timeout_seconds(86400) == 86400
+    assert clamp_ai_pipeline_timeout_seconds(90000) == MAX_AI_PIPELINE_TIMEOUT_SECONDS
+    assert get_test_run_queue_wait_timeout_seconds(7200) == 86400
+
+
+def test_temporal_activity_timeout_includes_queue_execution_and_buffer():
+    timeout = get_temporal_test_run_activity_timeout_seconds(
+        queue_wait_timeout_seconds=86400,
+        execution_timeout_seconds=7200,
+    )
+
+    assert timeout > 86400 + 7200
+    assert _test_run_activity_timeout(
+        {
+            "browser_slot_wait_timeout_seconds": 86400,
+            "ai_pipeline_timeout_seconds": 7200,
+        }
+    ).total_seconds() == timeout
 
 
 class _Session:

@@ -10,13 +10,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_AI_PIPELINE_TIMEOUT_SECONDS = 7200
 MIN_AI_PIPELINE_TIMEOUT_SECONDS = 900
-MAX_AI_PIPELINE_TIMEOUT_SECONDS = 14400
+MAX_AI_PIPELINE_TIMEOUT_SECONDS = 86400
+DEFAULT_TEST_RUN_QUEUE_WAIT_TIMEOUT_SECONDS = 86400
+MAX_TEMPORAL_TEST_RUN_ACTIVITY_TIMEOUT_SECONDS = 129600
+TEMPORAL_TEST_RUN_CLEANUP_BUFFER_SECONDS = 1800
 
 AI_PIPELINE_TIMEOUT_ENV_KEYS = (
+    "AI_PIPELINE_TIMEOUT_SECONDS",
     "AGENT_TIMEOUT_SECONDS",
     "EXPLORATION_TIMEOUT_SECONDS",
     "PLANNER_TIMEOUT_SECONDS",
     "GENERATOR_TIMEOUT_SECONDS",
+    "HEALER_TIMEOUT_SECONDS",
+    "HEALER_ATTEMPT_TIMEOUT_SECONDS",
     "BROWSER_SLOT_TIMEOUT",
     "AGENT_BROWSER_SLOT_TIMEOUT_SECONDS",
 )
@@ -57,6 +63,34 @@ def ai_pipeline_timeout_env_vars(seconds: int | None = None) -> dict[str, str]:
         seconds if seconds is not None else get_persisted_ai_pipeline_timeout_seconds()
     )
     return {key: str(timeout) for key in AI_PIPELINE_TIMEOUT_ENV_KEYS}
+
+
+def get_test_run_queue_wait_timeout_seconds(seconds: int | None = None) -> int:
+    """Browser-slot queue budget for regression/test-run work."""
+    configured = clamp_ai_pipeline_timeout_seconds(
+        seconds if seconds is not None else get_persisted_ai_pipeline_timeout_seconds()
+    )
+    return max(DEFAULT_TEST_RUN_QUEUE_WAIT_TIMEOUT_SECONDS, configured)
+
+
+def get_temporal_test_run_activity_timeout_seconds(
+    *,
+    queue_wait_timeout_seconds: int | None = None,
+    execution_timeout_seconds: int | None = None,
+) -> int:
+    """Compute the durable activity budget for queue wait + execution + cleanup."""
+    queue_timeout = (
+        int(queue_wait_timeout_seconds)
+        if queue_wait_timeout_seconds is not None
+        else get_test_run_queue_wait_timeout_seconds()
+    )
+    execution_timeout = clamp_ai_pipeline_timeout_seconds(
+        execution_timeout_seconds
+        if execution_timeout_seconds is not None
+        else get_persisted_ai_pipeline_timeout_seconds()
+    )
+    budget = queue_timeout + execution_timeout + TEMPORAL_TEST_RUN_CLEANUP_BUFFER_SECONDS
+    return min(MAX_TEMPORAL_TEST_RUN_ACTIVITY_TIMEOUT_SECONDS, max(execution_timeout, budget))
 
 
 def merge_ai_pipeline_timeout_env_vars(env_vars: Mapping[str, object] | None = None) -> dict[str, str]:
