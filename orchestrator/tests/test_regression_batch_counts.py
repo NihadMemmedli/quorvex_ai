@@ -11,7 +11,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 from sqlmodel import Session, SQLModel, select
+
+
+def test_create_regression_batch_rejects_oversized_bulk_run(monkeypatch):
+    from orchestrator.services import batch_executor
+
+    monkeypatch.setenv("QUORVEX_MAX_BULK_RUN_SPECS", "2")
+    monkeypatch.setattr(
+        batch_executor,
+        "select_regression_specs",
+        lambda config, session: ["one.md", "two.md", "three.md"],
+    )
+
+    with pytest.raises(ValueError, match="limited to 2 spec files"):
+        batch_executor.create_regression_batch(
+            batch_executor.BatchConfig(project_id="default", automated_only=True),
+            session=None,
+        )
 
 
 def test_create_regression_batch_caches_actual_playwright_test_count(tmp_path, monkeypatch):
@@ -385,6 +403,8 @@ def test_automated_only_without_spec_names_selects_all_matching_project_specs(tm
     from orchestrator.api.models_db import Project, RegressionBatch, SpecMetadata
     from orchestrator.api.models_db import TestRun as DBTestRun
     from orchestrator.services import batch_executor
+
+    monkeypatch.setenv("QUORVEX_MAX_BULK_RUN_SPECS", "100")
 
     project_id = f"all-automated-{uuid4().hex}"
     other_project_id = f"other-{uuid4().hex}"
