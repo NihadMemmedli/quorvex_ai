@@ -214,6 +214,23 @@ def _positive_int(value: Any, *, default: int, maximum: int | None = None) -> in
     return parsed
 
 
+def resolve_ai_pipeline_timeout_seconds(value: Any | None = None) -> int:
+    from orchestrator.services.execution_timeouts import (
+        clamp_ai_pipeline_timeout_seconds,
+        get_persisted_ai_pipeline_timeout_seconds,
+    )
+
+    if value is not None:
+        return clamp_ai_pipeline_timeout_seconds(value)
+    return get_persisted_ai_pipeline_timeout_seconds()
+
+
+def resolve_test_run_queue_wait_timeout_seconds(value: Any | None = None) -> int:
+    from orchestrator.services.execution_timeouts import get_test_run_queue_wait_timeout_seconds
+
+    return get_test_run_queue_wait_timeout_seconds(resolve_ai_pipeline_timeout_seconds(value))
+
+
 def resolve_test_run_playwright_workers(
     *,
     env: dict[str, str] | None = None,
@@ -285,6 +302,7 @@ def execute_run_task(
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
     test_data_refs: list[str] | None = None,
+    ai_pipeline_timeout_seconds: int | None = None,
 ):
     """Execute the native pipeline with optional hybrid healing mode."""
     headless = display_aware_headless(headless, runtime.os.environ)
@@ -375,7 +393,11 @@ def execute_run_task(
     seed_dst = runtime._write_run_seed_spec(run_dir_path, target_url)
     runtime.logger.debug(f"Wrote run seed file: {seed_dst} (target_url={target_url or 'about:blank'})")
 
+    execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds(ai_pipeline_timeout_seconds)
     env = runtime.os.environ.copy()
+    from orchestrator.services.execution_timeouts import ai_pipeline_timeout_env_vars
+
+    env.update(ai_pipeline_timeout_env_vars(execution_timeout_seconds))
     env["HEADLESS"] = "true" if headless else "false"
     env["PLAYWRIGHT_HEADLESS"] = "true" if headless else "false"
     env["PLAYWRIGHT_WORKERS"] = str(resolve_test_run_playwright_workers(env=env, headless=headless))
@@ -412,7 +434,7 @@ def execute_run_task(
         spec_name=spec_name,
         batch_id=batch_id,
         append_workflow_log=_append_workflow_log,
-        timeout_seconds=3600,
+        timeout_seconds=execution_timeout_seconds,
     )
 
 
@@ -453,9 +475,13 @@ async def execute_run_task_wrapper(
 
     headless = True
     memory_enabled = True
+    execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds()
     with runtime.Session(runtime.engine) as session:
         settings = session.get(runtime.DBExecutionSettings, 1)
         if settings:
+            execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds(
+                getattr(settings, "ai_pipeline_timeout_seconds", None)
+            )
             headless = resolve_run_headless_mode(
                 env=runtime.os.environ,
                 execution_settings=settings,
@@ -477,12 +503,25 @@ async def execute_run_task_wrapper(
     await check_system_available("test run")
 
     try:
-        _append_workflow_log("Waiting for browser slot.", browser_slot_request_id=run_id)
+        queue_wait_timeout_seconds = resolve_test_run_queue_wait_timeout_seconds(execution_timeout_seconds)
+        _append_workflow_log(
+            "Waiting for browser slot.",
+            browser_slot_request_id=run_id,
+            timeout_seconds=queue_wait_timeout_seconds,
+        )
+        with runtime.Session(runtime.engine) as session:
+            run = session.get(runtime.DBTestRun, run_id)
+            if run and run.status not in ("stopped", "cancelled", "passed", "failed", "error", "completed"):
+                run.status = "queued"
+                run.stage_message = "Waiting for browser slot"
+                session.add(run)
+                session.commit()
         async with pool.browser_slot(
             request_id=run_id,
             operation_type=runtime.BrowserOpType.TEST_RUN,
             description=f"Test: {spec_name or spec_path}",
-            max_operation_duration=7200,
+            timeout=queue_wait_timeout_seconds,
+            max_operation_duration=execution_timeout_seconds,
         ) as acquired:
             if not acquired:
                 runtime.logger.warning(f"Run {run_id} failed to acquire browser slot (timeout)")
@@ -515,6 +554,8 @@ async def execute_run_task_wrapper(
                     run.status = "running"
                     run.started_at = runtime.datetime.utcnow()
                     run.queue_position = None
+                    run.current_stage = "generating"
+                    run.stage_message = f"Running AI generation with timeout {execution_timeout_seconds} seconds"
                     session.add(run)
                     session.commit()
                     ensure_linked_agent_run_for_test_run(
@@ -549,6 +590,7 @@ async def execute_run_task_wrapper(
                 storage_state_path,
                 browser_auth_context,
                 test_data_refs,
+                execution_timeout_seconds,
             )
             _append_workflow_log("Native run executor returned.", run_id=run_id)
 
@@ -919,10 +961,39 @@ async def start_test_run_temporal_or_fail(
     task_queue: str | None = None,
 ) -> None:
     from orchestrator.config import settings as app_settings
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_test_run_workflow
+    from orchestrator.services.temporal_client import (
+        TemporalUnavailableError,
+        describe_temporal_task_queue,
+        start_test_run_workflow,
+    )
 
     selected_task_queue = task_queue or app_settings.temporal_browser_workflow_task_queue
+    execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds()
     try:
+        with runtime.Session(runtime.engine) as settings_session:
+            settings = settings_session.get(runtime.DBExecutionSettings, 1)
+            if settings:
+                execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds(
+                    getattr(settings, "ai_pipeline_timeout_seconds", None)
+                )
+    except Exception:
+        pass
+    payload = {
+        **payload,
+        "ai_pipeline_timeout_seconds": execution_timeout_seconds,
+        "browser_slot_wait_timeout_seconds": resolve_test_run_queue_wait_timeout_seconds(
+            execution_timeout_seconds
+        ),
+    }
+    try:
+        task_queue_status = await describe_temporal_task_queue(selected_task_queue)
+        workflow_pollers = int((task_queue_status.get("workflow") or {}).get("poller_count") or 0)
+        activity_pollers = int((task_queue_status.get("activity") or {}).get("poller_count") or 0)
+        if workflow_pollers <= 0 or activity_pollers <= 0:
+            raise TemporalUnavailableError(
+                f"No Temporal pollers for task queue {selected_task_queue} "
+                f"(workflow={workflow_pollers}, activity={activity_pollers})"
+            )
         temporal = await start_test_run_workflow(run.id, payload, task_queue=selected_task_queue)
     except TemporalUnavailableError as exc:
         run.status = "error"

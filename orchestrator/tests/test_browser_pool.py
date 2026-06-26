@@ -36,6 +36,9 @@ class _FakeRedis:
         self.values[key] = value
         return True
 
+    async def expire(self, key, seconds):
+        return True
+
     async def get(self, key):
         return self.values.get(key)
 
@@ -48,9 +51,21 @@ class _FakeRedis:
     async def srem(self, key, value):
         self.sets.setdefault(key, set()).discard(value)
 
+    async def sadd(self, key, value):
+        self.sets.setdefault(key, set()).add(value)
+        return 1
+
     async def delete(self, key):
         self.values.pop(key, None)
         self.hashes.pop(key, None)
+
+    async def hset(self, key, mapping=None, **kwargs):
+        self.hashes.setdefault(key, {}).update(mapping or {})
+        return len(mapping or {})
+
+    async def rpush(self, key, value):
+        self.lists.setdefault(key, []).append(value)
+        return len(self.lists[key])
 
     async def lrange(self, key, start, end):
         values = self.lists.get(key, [])
@@ -342,8 +357,8 @@ async def test_redis_pool_uses_shared_max_browsers():
 
 
 @pytest.mark.asyncio
-async def test_redis_cleanup_preserves_stale_active_owner(monkeypatch):
-    """Redis cleanup should not free an old slot while its owner is active."""
+async def test_redis_cleanup_releases_stale_active_test_run(monkeypatch):
+    """Redis cleanup should free over-age test-run slots even if the DB owner still looks active."""
     redis = _FakeRedis()
     pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
     pool.redis = redis
@@ -363,8 +378,8 @@ async def test_redis_cleanup_preserves_stale_active_owner(monkeypatch):
 
     cleaned = await pool.cleanup_stale(max_age_minutes=1)
 
-    assert cleaned == []
-    assert request_id in redis.sets["browser_pool:running"]
+    assert cleaned == [request_id]
+    assert request_id not in redis.sets["browser_pool:running"]
 
 
 @pytest.mark.asyncio
@@ -470,6 +485,83 @@ async def test_redis_cleanup_removes_stale_queued_agent_request(monkeypatch):
 
     assert cleaned == ["agent:agent-missing"]
     assert redis.lists["browser_pool:queue"] == ["agent:agent-live"]
+
+
+@pytest.mark.asyncio
+async def test_redis_cancel_requests_clears_test_run_queue_and_running_slots():
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    redis.lists["browser_pool:queue"] = ["run-queued", "agent:agent-live"]
+    redis.sets["browser_pool:running"] = {"run-running", "agent:agent-running"}
+    redis.hashes["browser_pool:info:run-queued"] = {"type": OperationType.TEST_RUN.value}
+    redis.hashes["browser_pool:info:run-running"] = {"type": OperationType.TEST_RUN.value}
+    redis.hashes["browser_pool:info:agent:agent-live"] = {"type": OperationType.AGENT.value}
+    redis.hashes["browser_pool:info:agent:agent-running"] = {"type": OperationType.AGENT.value}
+
+    result = await pool.cancel_requests(
+        operation_types={OperationType.TEST_RUN},
+        include_running=True,
+        reason="test clear",
+    )
+
+    assert result["queued"] == 1
+    assert result["running"] == 1
+    assert set(result["request_ids"]) == {"run-queued", "run-running"}
+    assert redis.lists["browser_pool:queue"] == ["agent:agent-live"]
+    assert redis.sets["browser_pool:running"] == {"agent:agent-running"}
+    assert "browser_pool:info:run-queued" not in redis.hashes
+    assert "browser_pool:info:run-running" not in redis.hashes
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_preserves_stale_queued_test_run_when_owner_active(monkeypatch):
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    request_id = "run-stuck-queued"
+    redis.lists["browser_pool:queue"] = [request_id]
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.TEST_RUN.value,
+        "queued": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+    }
+
+    async def _active_owner(_request_id, _info):
+        return True
+
+    monkeypatch.setattr(pool, "_slot_owner_is_active", _active_owner)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=60)
+
+    assert cleaned == []
+    assert redis.lists["browser_pool:queue"] == [request_id]
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_removes_stale_queued_test_run_when_owner_missing(monkeypatch):
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    request_id = "run-missing-queued"
+    redis.lists["browser_pool:queue"] = [request_id]
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.TEST_RUN.value,
+        "queued": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+    }
+
+    async def _missing_owner(_request_id, _info):
+        return False
+
+    async def _unexpected_mark(*args, **kwargs):
+        raise AssertionError("queued cleanup must not write stale slot errors to test-run rows")
+
+    monkeypatch.setattr(pool, "_slot_owner_is_active", _missing_owner)
+    monkeypatch.setattr(pool, "_mark_test_run_slot_error", _unexpected_mark)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=60)
+
+    assert cleaned == [request_id]
+    assert redis.lists["browser_pool:queue"] == []
 
 
 @pytest.mark.asyncio

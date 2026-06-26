@@ -82,6 +82,7 @@ def _fake_runtime(tmp_path, captured_env):
 
     def capture_subprocess(**kwargs):
         captured_env.update(kwargs["env"])
+        captured_env["_timeout_seconds"] = kwargs["timeout_seconds"]
 
     return SimpleNamespace(
         datetime=datetime,
@@ -154,6 +155,31 @@ def test_execute_run_task_honors_test_run_playwright_workers_for_headless_subpro
     assert captured_env["HEADLESS"] == "true"
     assert captured_env["PLAYWRIGHT_HEADLESS"] == "true"
     assert captured_env["PLAYWRIGHT_WORKERS"] == "4"
+
+
+def test_execute_run_task_injects_ai_timeout_env_and_subprocess_timeout(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    captured_env = {}
+    runtime = _fake_runtime(tmp_path, captured_env)
+
+    execute_run_task(
+        runtime,
+        spec_path=str(tmp_path / "spec.md"),
+        run_dir=str(tmp_path / "run"),
+        run_id="run-ai-timeout",
+        headless=True,
+        ai_pipeline_timeout_seconds=86400,
+    )
+
+    assert captured_env["_timeout_seconds"] == 86400
+    assert captured_env["AI_PIPELINE_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["GENERATOR_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["PLANNER_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["HEALER_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["BROWSER_SLOT_TIMEOUT"] == "86400"
 
 
 def test_execute_run_task_sets_headed_subprocess_env_for_vnc_runs(

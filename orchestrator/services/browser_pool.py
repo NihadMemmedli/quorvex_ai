@@ -118,6 +118,14 @@ class AbstractBrowserPool:
         max_operation_duration: int | None = None,
     ) -> bool: ...
     async def release(self, request_id: str, success: bool = True, error: str | None = None): ...
+    async def cancel_requests(
+        self,
+        request_ids: set[str] | None = None,
+        operation_types: set[OperationType] | None = None,
+        *,
+        include_running: bool = False,
+        reason: str = "Cancelled",
+    ) -> dict: ...
     async def get_queue_position(self, request_id: str) -> int | None: ...
     async def is_running(self, request_id: str) -> bool: ...
     def get_slot(self, request_id: str) -> BrowserSlot | None: ...
@@ -270,9 +278,14 @@ class InMemoryBrowserPool(AbstractBrowserPool):
             True if slot acquired, False if timeout/cancelled
         """
         if timeout is None:
-            from orchestrator.config import settings as app_settings
+            try:
+                from orchestrator.services.execution_timeouts import get_persisted_ai_pipeline_timeout_seconds
 
-            timeout = float(app_settings.browser_slot_timeout)
+                timeout = float(get_persisted_ai_pipeline_timeout_seconds())
+            except Exception:
+                from orchestrator.config import settings as app_settings
+
+                timeout = float(app_settings.browser_slot_timeout)
 
         slot = BrowserSlot(
             request_id=request_id,
@@ -311,6 +324,9 @@ class InMemoryBrowserPool(AbstractBrowserPool):
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
             # Event was set by _notify_next_waiter - slot is acquired
+            if request_id not in self._running:
+                logger.info(f"[{request_id}] Browser slot request cancelled before acquisition")
+                return False
             logger.info(
                 f"[{request_id}] Acquired browser slot "
                 f"(type={operation_type.value}, "
@@ -376,6 +392,62 @@ class InMemoryBrowserPool(AbstractBrowserPool):
             f"[{request_id}] Released browser slot "
             f"(success={success}, running={len(self._running)}/{self.max_browsers})"
         )
+
+    async def cancel_requests(
+        self,
+        request_ids: set[str] | None = None,
+        operation_types: set[OperationType] | None = None,
+        *,
+        include_running: bool = False,
+        reason: str = "Cancelled",
+    ) -> dict:
+        """Cancel queued requests and optionally force-release running requests."""
+        request_ids = set(request_ids or [])
+        operation_types = set(operation_types or [])
+        cancelled_queued: list[str] = []
+        released_running: list[str] = []
+        now = datetime.now(timezone.utc)
+
+        async with self._slots_lock:
+            for req_id in list(self._queue):
+                slot = self._slots.get(req_id)
+                matches_id = not request_ids or req_id in request_ids
+                matches_type = not operation_types or (slot and slot.operation_type in operation_types)
+                if not (matches_id and matches_type):
+                    continue
+                self._queue.remove(req_id)
+                slot = self._slots.get(req_id)
+                if slot:
+                    slot.status = SlotStatus.CANCELLED
+                    slot.completed_at = now
+                    slot.error = reason
+                cancelled_queued.append(req_id)
+
+            if cancelled_queued:
+                self._waiters = deque((r, e) for r, e in self._waiters if r not in set(cancelled_queued))
+
+            if include_running:
+                for req_id in list(self._running):
+                    slot = self._slots.get(req_id)
+                    matches_id = not request_ids or req_id in request_ids
+                    matches_type = not operation_types or (slot and slot.operation_type in operation_types)
+                    if not (matches_id and matches_type):
+                        continue
+                    self._running.discard(req_id)
+                    if slot:
+                        slot.status = SlotStatus.CANCELLED
+                        slot.completed_at = now
+                        slot.error = reason
+                    released_running.append(req_id)
+
+        if released_running:
+            await self._notify_next_waiter()
+
+        return {
+            "queued": len(cancelled_queued),
+            "running": len(released_running),
+            "request_ids": cancelled_queued + released_running,
+        }
 
     async def _notify_next_waiter(self):
         """Wake the next eligible waiter in FIFO order."""
@@ -696,9 +768,14 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         max_operation_duration: int | None = None,
     ) -> bool:
         if timeout is None:
-            from orchestrator.config import settings as app_settings
+            try:
+                from orchestrator.services.execution_timeouts import get_persisted_ai_pipeline_timeout_seconds
 
-            timeout = float(app_settings.browser_slot_timeout)
+                timeout = float(get_persisted_ai_pipeline_timeout_seconds())
+            except Exception:
+                from orchestrator.config import settings as app_settings
+
+                timeout = float(app_settings.browser_slot_timeout)
 
         r = await self._ensure_connected()
 
@@ -713,6 +790,17 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
 
         # Push to Redis Queue
         await r.rpush(f"{self._key_prefix}:queue", request_id)
+        await r.hset(
+            f"{self._key_prefix}:info:{request_id}",
+            mapping={
+                "type": operation_type.value,
+                "desc": description,
+                "queued": datetime.now(timezone.utc).isoformat(),
+                "max_dur": str(max_operation_duration or ""),
+                "status": SlotStatus.QUEUED.value,
+            },
+        )
+        await r.expire(f"{self._key_prefix}:info:{request_id}", 86400)
 
         start_time = datetime.now(timezone.utc)
 
@@ -763,8 +851,10 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
                                 mapping={
                                     "type": operation_type.value,
                                     "desc": description,
+                                    "queued": slot.queued_at.isoformat(),
                                     "start": datetime.now(timezone.utc).isoformat(),
                                     "max_dur": str(max_operation_duration or ""),
+                                    "status": SlotStatus.RUNNING.value,
                                 },
                             )
                             # Set expiration on info to avoid zombies if crash
@@ -796,6 +886,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
             # Cleanup from queue
             r = await self._ensure_connected()
             await r.lrem(f"{self._key_prefix}:queue", 0, request_id)
+            await r.delete(f"{self._key_prefix}:info:{request_id}")
             logger.warning(f"[{request_id}] Redis acquire timeout")
             return False
 
@@ -804,6 +895,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
             slot.error = "Request cancelled"
             r = await self._ensure_connected()
             await r.lrem(f"{self._key_prefix}:queue", 0, request_id)
+            await r.delete(f"{self._key_prefix}:info:{request_id}")
             raise
 
     async def release(self, request_id: str, success: bool = True, error: str | None = None):
@@ -817,6 +909,81 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         await r.srem(f"{self._key_prefix}:running", request_id)
         await r.delete(f"{self._key_prefix}:info:{request_id}")
         logger.info(f"[{request_id}] Released Redis slot")
+
+    def _matches_cancel_filter(
+        self,
+        request_id: str,
+        info: dict[str, str],
+        request_ids: set[str],
+        operation_types: set[OperationType],
+    ) -> bool:
+        if request_ids and request_id not in request_ids:
+            return False
+        if not operation_types:
+            return True
+        raw_type = info.get("type")
+        if raw_type:
+            return raw_type in {op.value for op in operation_types}
+        return OperationType.TEST_RUN in operation_types and not request_id.startswith(("agent:", "gen_"))
+
+    async def cancel_requests(
+        self,
+        request_ids: set[str] | None = None,
+        operation_types: set[OperationType] | None = None,
+        *,
+        include_running: bool = False,
+        reason: str = "Cancelled",
+    ) -> dict:
+        """Cancel queued Redis requests and optionally force-release running slots."""
+        r = await self._ensure_connected()
+        request_ids = set(request_ids or [])
+        operation_types = set(operation_types or [])
+        cancelled_queued: list[str] = []
+        released_running: list[str] = []
+
+        queue = await r.lrange(f"{self._key_prefix}:queue", 0, -1)
+        for req_id in queue:
+            info = await r.hgetall(f"{self._key_prefix}:info:{req_id}")
+            if not self._matches_cancel_filter(req_id, info or {}, request_ids, operation_types):
+                continue
+            removed = await r.lrem(f"{self._key_prefix}:queue", 0, req_id)
+            if removed:
+                await r.delete(f"{self._key_prefix}:info:{req_id}")
+                slot = self._local_slots.get(req_id)
+                if slot:
+                    slot.status = SlotStatus.CANCELLED
+                    slot.completed_at = datetime.now(timezone.utc)
+                    slot.error = reason
+                cancelled_queued.append(req_id)
+
+        if include_running:
+            running = await r.smembers(f"{self._key_prefix}:running")
+            for req_id in running:
+                info = await r.hgetall(f"{self._key_prefix}:info:{req_id}")
+                if not self._matches_cancel_filter(req_id, info or {}, request_ids, operation_types):
+                    continue
+                await r.srem(f"{self._key_prefix}:running", req_id)
+                await r.delete(f"{self._key_prefix}:info:{req_id}")
+                slot = self._local_slots.get(req_id)
+                if slot:
+                    slot.status = SlotStatus.CANCELLED
+                    slot.completed_at = datetime.now(timezone.utc)
+                    slot.error = reason
+                released_running.append(req_id)
+
+        if cancelled_queued or released_running:
+            logger.warning(
+                "Cancelled browser pool requests: queued=%s running=%s reason=%s",
+                len(cancelled_queued),
+                len(released_running),
+                reason,
+            )
+
+        return {
+            "queued": len(cancelled_queued),
+            "running": len(released_running),
+            "request_ids": cancelled_queued + released_running,
+        }
 
     async def get_queue_position(self, request_id: str) -> int | None:
         """Get the queues position for a request (1-indexed)."""
@@ -976,6 +1143,35 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
 
         return None
 
+    async def _mark_test_run_slot_error(self, request_id: str, message: str) -> None:
+        """Best-effort terminal DB update when freeing a stale test-run slot."""
+        try:
+            from sqlmodel import Session
+
+            from orchestrator.api.db import engine
+            from orchestrator.api.models_db import TestRun
+
+            with Session(engine) as session:
+                run = session.get(TestRun, request_id)
+                if not run or str(run.status or "").lower() in {
+                    "passed",
+                    "failed",
+                    "error",
+                    "stopped",
+                    "cancelled",
+                    "completed",
+                }:
+                    return
+                run.status = "error"
+                run.queue_position = None
+                run.completed_at = datetime.utcnow()
+                run.error_message = message
+                run.stage_message = message
+                session.add(run)
+                session.commit()
+        except Exception as exc:
+            logger.debug("Could not mark stale test-run slot %s as error: %s", request_id, exc)
+
     async def cleanup_stale(self, max_age_minutes: int = 60) -> list[str]:
         """Clean up stale running slots from Redis."""
         r = await self._ensure_connected()
@@ -1011,25 +1207,51 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
             else:
                 age_stale = True
 
-            if owner_active is False or (owner_active is None and age_stale):
+            if owner_active is False or (owner_active is None and age_stale) or (
+                age_stale and info.get("type") == OperationType.TEST_RUN.value
+            ):
                 stale_ids.append(request_id)
             elif age_stale and owner_active is True:
                 logger.info("[%s] Preserving old browser slot because owner is still active", request_id)
 
         stale_queued_ids = []
         for request_id in queued_ids:
-            owner_active = await self._slot_owner_is_active(request_id, {})
-            if owner_active is False:
+            info = await r.hgetall(f"{self._key_prefix}:info:{request_id}")
+            owner_active = await self._slot_owner_is_active(request_id, info or {})
+            age_stale = False
+            corrupt_record = False
+            queued_str = (info or {}).get("queued")
+            if queued_str:
+                try:
+                    queued_at = datetime.fromisoformat(queued_str)
+                    if queued_at.tzinfo is None:
+                        queued_at = queued_at.replace(tzinfo=timezone.utc)
+                    age_stale = (now - queued_at).total_seconds() > max_age_minutes * 60
+                except (ValueError, TypeError):
+                    age_stale = True
+                    corrupt_record = True
+            elif owner_active is not True:
+                age_stale = True
+                corrupt_record = True
+
+            if owner_active is True:
+                if age_stale:
+                    logger.info("[%s] Preserving queued browser slot because owner is still active", request_id)
+                continue
+
+            if owner_active is False or (owner_active is None and age_stale and corrupt_record):
                 stale_queued_ids.append(request_id)
 
         for request_id in stale_queued_ids:
             removed = await r.lrem(f"{self._key_prefix}:queue", 0, request_id)
             if removed:
+                await r.delete(f"{self._key_prefix}:info:{request_id}")
                 logger.warning("[%s] Removed stale queued Redis browser request", request_id)
 
         for request_id in stale_ids:
             await r.srem(f"{self._key_prefix}:running", request_id)
             await r.delete(f"{self._key_prefix}:info:{request_id}")
+            await self._mark_test_run_slot_error(request_id, "Stale running browser slot cleaned up")
             # Update local slot cache if present
             slot = self._local_slots.get(request_id)
             if slot:

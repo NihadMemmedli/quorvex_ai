@@ -8,7 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from logging_config import get_logger
+from services.browser_pool import OperationType
 from services.browser_pool import get_browser_pool
+from services.execution_timeouts import apply_ai_pipeline_timeout_to_process, clamp_ai_pipeline_timeout_seconds
 from services.resource_manager import get_resource_manager
 
 from . import autopilot, exploration, spec_files
@@ -43,6 +45,40 @@ def _runs_dir() -> Path:
 async def _browser_pool():
     runtime = _runtime()
     return runtime.BROWSER_POOL or await get_browser_pool()
+
+
+async def _cancel_browser_pool_test_run_slots(
+    *,
+    run_ids: set[str] | None = None,
+    include_running: bool = False,
+    reason: str,
+    operation_types: set[OperationType] | None = None,
+) -> dict[str, Any]:
+    pool = await _browser_pool()
+    try:
+        return await pool.cancel_requests(
+            request_ids=run_ids,
+            operation_types=operation_types if operation_types is not None else {OperationType.TEST_RUN},
+            include_running=include_running,
+            reason=reason,
+        )
+    except Exception as exc:
+        logger.warning("Failed to cancel browser pool slots: %s", exc)
+        return {"queued": 0, "running": 0, "request_ids": [], "error": str(exc)}
+
+
+async def _flush_agent_queue_for_stop_all() -> dict[str, Any]:
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if not REDIS_AVAILABLE or not should_use_agent_queue():
+            return {"status": "skipped", "queued_cancelled": 0, "running_failed": 0}
+        queue = get_agent_queue()
+        await queue.connect()
+        return {"status": "success", **await queue.flush_queue()}
+    except Exception as exc:
+        logger.warning("stop-all: Failed to flush agent queue: %s", exc)
+        return {"status": "error", "queued_cancelled": 0, "running_failed": 0, "error": str(exc)}
 
 
 @router.get("/health")
@@ -198,6 +234,7 @@ def get_execution_settings(session: Session = Depends(get_session)):
         parallel_mode_enabled=settings.parallel_mode_enabled,
         headless_in_parallel=settings.headless_in_parallel,
         memory_enabled=settings.memory_enabled,
+        ai_pipeline_timeout_seconds=clamp_ai_pipeline_timeout_seconds(settings.ai_pipeline_timeout_seconds),
         database_type=runtime.get_database_type(),
         parallel_mode_available=runtime.is_parallel_mode_available(),
     )
@@ -212,7 +249,7 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
         settings = DBExecutionSettings(id=1)
 
     new_parallelism = request.parallelism if request.parallelism is not None else settings.parallelism
-    if new_parallelism > 1 and not runtime.is_parallel_mode_available():
+    if request.parallelism is not None and new_parallelism > 1 and not runtime.is_parallel_mode_available():
         raise HTTPException(
             status_code=400,
             detail="Parallelism > 1 requires PostgreSQL database. SQLite has write locking issues that prevent concurrent test execution.",
@@ -234,6 +271,9 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
 
     if request.memory_enabled is not None:
         settings.memory_enabled = request.memory_enabled
+
+    if request.ai_pipeline_timeout_seconds is not None:
+        settings.ai_pipeline_timeout_seconds = clamp_ai_pipeline_timeout_seconds(request.ai_pipeline_timeout_seconds)
 
     settings.updated_at = datetime.utcnow()
 
@@ -259,11 +299,14 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
             resolved_parallelism["parallelism_clamp_reason"],
         )
 
+    apply_ai_pipeline_timeout_to_process(settings.ai_pipeline_timeout_seconds)
+
     return ExecutionSettingsResponse(
         parallelism=settings.parallelism,
         parallel_mode_enabled=settings.parallel_mode_enabled,
         headless_in_parallel=settings.headless_in_parallel,
         memory_enabled=settings.memory_enabled,
+        ai_pipeline_timeout_seconds=clamp_ai_pipeline_timeout_seconds(settings.ai_pipeline_timeout_seconds),
         database_type=runtime.get_database_type(),
         parallel_mode_available=runtime.is_parallel_mode_available(),
     )
@@ -285,6 +328,10 @@ async def get_queue_status():
         "legacy_running_count": legacy_status.get("running_count"),
         "legacy_queued_count": legacy_status.get("queued_count"),
         "legacy_parallelism_limit": legacy_status.get("parallelism_limit"),
+        "test_run_running_count": legacy_status.get("running_count"),
+        "test_run_queued_count": legacy_status.get("queued_count"),
+        "browser_pool_running_count": int(browser_pool_status.get("running", 0) or 0),
+        "browser_pool_queued_count": int(browser_pool_status.get("queued", 0) or 0),
         "running_count": int(browser_pool_status.get("running", 0) or 0),
         "queued_count": int(browser_pool_status.get("queued", 0) or 0),
         "parallelism_limit": int(browser_pool_status.get("max_browsers", 0) or 0),
@@ -306,7 +353,7 @@ async def get_queue_status():
 
 
 @router.post("/queue/clear", response_model=ClearQueueResponse)
-def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_session)):
+async def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_session)):
     """Clear stuck queue entries."""
     runtime = _runtime()
     cleared_runs = []
@@ -315,23 +362,32 @@ def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_sessi
         queued = session.exec(select(DBTestRun).where(DBTestRun.status == "queued")).all()
         for run in queued:
             if run.temporal_workflow_id:
-                continue
+                try:
+                    await runtime._signal_test_run_temporal(run, "stop", "clear_queue")
+                except Exception as exc:
+                    logger.debug("clear_queue: Failed to signal Temporal run %s: %s", run.id, exc)
             if runtime.PROCESS_MANAGER:
                 runtime.PROCESS_MANAGER.stop(run.id)
-            run.status = "stopped"
+            run.status = "cancelled"
             run.queue_position = None
+            run.completed_at = datetime.utcnow()
+            run.error_message = "Cancelled by Clear Queue"
+            run.stage_message = "Cancelled by Clear Queue"
             session.add(run)
             cleared_runs.append(run.id)
 
             run_dir = _runs_dir() / run.id
             if run_dir.exists():
-                (run_dir / "status.txt").write_text("stopped")
+                (run_dir / "status.txt").write_text("cancelled")
 
     if request.include_running:
         running = session.exec(select(DBTestRun).where(DBTestRun.status.in_(["running", "in_progress"]))).all()
         for run in running:
             if run.temporal_workflow_id:
-                continue
+                try:
+                    await runtime._signal_test_run_temporal(run, "stop", "clear_queue")
+                except Exception as exc:
+                    logger.debug("clear_queue: Failed to signal Temporal run %s: %s", run.id, exc)
             if not runtime.is_process_active(run.id):
                 if runtime.PROCESS_MANAGER:
                     runtime.PROCESS_MANAGER.stop(run.id)
@@ -346,6 +402,18 @@ def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_sessi
 
     session.commit()
 
+    browser_pool_cleared = await _cancel_browser_pool_test_run_slots(
+        run_ids=None,
+        include_running=request.include_running,
+        reason="Clear Queue requested",
+    )
+    legacy_queue_cleared = 0
+    if runtime.PROCESS_MANAGER:
+        try:
+            legacy_queue_cleared = runtime.PROCESS_MANAGER.clear_queue_state()
+        except Exception as exc:
+            logger.debug("clear_queue: Failed to clear ProcessManager queue state: %s", exc)
+
     message_parts = []
     if request.include_queued:
         message_parts.append("queued")
@@ -355,7 +423,13 @@ def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_sessi
     return ClearQueueResponse(
         cleared_count=len(cleared_runs),
         cleared_runs=cleared_runs,
-        message=f"Cleared {len(cleared_runs)} {' and '.join(message_parts)} entries",
+        message=(
+            f"Cleared {len(cleared_runs)} {' and '.join(message_parts)} entries, "
+            f"{int(browser_pool_cleared.get('queued') or 0)} browser-pool queued slots, "
+            f"and {int(browser_pool_cleared.get('running') or 0)} browser-pool running slots"
+        ),
+        browser_pool_cleared=browser_pool_cleared,
+        legacy_queue_cleared=legacy_queue_cleared,
     )
 
 
@@ -367,6 +441,18 @@ async def stop_all_jobs():
     cancelled_autopilot = 0
     cancelled_explorations = 0
     cleaned_db_entries = 0
+    browser_pool_cleared = await _cancel_browser_pool_test_run_slots(
+        include_running=True,
+        reason="Stop All requested",
+        operation_types=set(),
+    )
+    agent_queue_flushed = await _flush_agent_queue_for_stop_all()
+    legacy_queue_cleared = 0
+    if runtime.PROCESS_MANAGER:
+        try:
+            legacy_queue_cleared = runtime.PROCESS_MANAGER.clear_queue_state()
+        except Exception as exc:
+            logger.debug("stop-all: Failed to clear ProcessManager queue state: %s", exc)
 
     for run_id in runtime.list_active_process_ids():
         try:
@@ -454,7 +540,10 @@ async def stop_all_jobs():
         f"cancelled_autopilot={cancelled_autopilot}, "
         f"cancelled_explorations={cancelled_explorations}, "
         f"cleaned_db_entries={cleaned_db_entries}, "
-        f"cleaned_runtime_entries={cleaned_runtime_entries}"
+        f"cleaned_runtime_entries={cleaned_runtime_entries}, "
+        f"browser_pool_cleared={browser_pool_cleared}, "
+        f"agent_queue_flushed={agent_queue_flushed}, "
+        f"legacy_queue_cleared={legacy_queue_cleared}"
     )
 
     return {
@@ -463,6 +552,9 @@ async def stop_all_jobs():
         "cancelled_explorations": cancelled_explorations,
         "cleaned_db_entries": cleaned_db_entries,
         "cleaned_runtime_entries": cleaned_runtime_entries,
+        "browser_pool_cleared": browser_pool_cleared,
+        "agent_queue_flushed": agent_queue_flushed,
+        "legacy_queue_cleared": legacy_queue_cleared,
     }
 
 

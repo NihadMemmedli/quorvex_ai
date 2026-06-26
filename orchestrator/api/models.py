@@ -124,6 +124,7 @@ class ExecutionSettingsResponse(BaseModel):
     parallel_mode_enabled: bool
     headless_in_parallel: bool
     memory_enabled: bool
+    ai_pipeline_timeout_seconds: int
     database_type: str  # "sqlite" or "postgresql"
     parallel_mode_available: bool  # False if SQLite
 
@@ -135,6 +136,7 @@ class UpdateExecutionSettingsRequest(BaseModel):
     parallel_mode_enabled: bool | None = None
     headless_in_parallel: bool | None = None
     memory_enabled: bool | None = None
+    ai_pipeline_timeout_seconds: int | None = Field(default=None, ge=900)
 
 
 class AgentWorkerHealth(BaseModel):
@@ -161,6 +163,10 @@ class QueueStatusResponse(BaseModel):
     agent_worker_health: AgentWorkerHealth | None = None
     browser_pool: dict[str, Any] | None = None
     browser_pool_by_type: dict[str, int] = Field(default_factory=dict)
+    browser_pool_running_count: int | None = None
+    browser_pool_queued_count: int | None = None
+    test_run_running_count: int | None = None
+    test_run_queued_count: int | None = None
     legacy_running_count: int | None = None
     legacy_queued_count: int | None = None
     legacy_parallelism_limit: int | None = None
@@ -179,6 +185,8 @@ class ClearQueueResponse(BaseModel):
     cleared_count: int
     cleared_runs: list[str]
     message: str
+    browser_pool_cleared: dict[str, Any] | None = None
+    legacy_queue_cleared: int = 0
 
 
 # ========== Regression Batch Models ==========

@@ -414,6 +414,12 @@ class AgentQueue:
             Task ID for tracking
         """
         redis = await self._ensure_connected()
+        try:
+            from orchestrator.services.execution_timeouts import merge_ai_pipeline_timeout_env_vars
+
+            env_vars = merge_ai_pipeline_timeout_env_vars(env_vars)
+        except Exception as exc:
+            logger.debug("Unable to inject AI pipeline timeout env vars for queued task: %s", exc)
 
         task = AgentTask(
             id=f"agent-{uuid.uuid4().hex[:12]}",
@@ -846,8 +852,29 @@ class AgentQueue:
             await asyncio.sleep(poll_interval)
 
         # Timeout - cancel the task
+        task = await self.get_task(task_id)
+        status = task.status.value if task else "unknown"
+        worker_id = task.worker_id if task else None
+        queue_len = await self.queue_length()
+        running = await self.running_count()
         await self.cancel_task(task_id)
-        raise asyncio.TimeoutError(f"Agent task timed out after {timeout}s")
+        if status == AgentTaskStatus.QUEUED.value:
+            raise asyncio.TimeoutError(
+                f"Agent task timed out after {timeout}s while queued "
+                f"(queue_depth={queue_len}, running={running})"
+            )
+        if status in {
+            AgentTaskStatus.RUNNING.value,
+            AgentTaskStatus.PAUSED.value,
+            AgentTaskStatus.CANCEL_REQUESTED.value,
+        }:
+            raise asyncio.TimeoutError(
+                f"Agent task timed out after {timeout}s while {status}"
+                + (f" on worker {worker_id}" if worker_id else "")
+            )
+        raise asyncio.TimeoutError(
+            f"Agent task timed out after {timeout}s while status={status}"
+        )
 
     async def pause_task(self, task_id: str) -> bool:
         """Pause a queued or running task.

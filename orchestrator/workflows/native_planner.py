@@ -1756,6 +1756,18 @@ Original task follows. Obey it, but correct the failure above.
                 subject_name,
                 draft_failure,
             )
+            locally_repaired_path = self._attempt_local_draft_script_repair(
+                plan_path=plan_path,
+                expected_output_path=expected_output_path,
+                agent_result=agent_result,
+                draft_script_validation_failure=draft_failure,
+            )
+            if locally_repaired_path:
+                return self._finalize_plan_artifact(
+                    plan_path=locally_repaired_path,
+                    expected_output_path=expected_output_path,
+                    require_draft_script=require_draft_script,
+                )
             repaired_plan_path = await self._attempt_repair_plan(
                 subject_type=subject_type,
                 subject_name=subject_name,
@@ -1872,6 +1884,95 @@ Original task follows. Obey it, but correct the failure above.
         self.last_draft_script_path = draft_path
         logger.info("Planner draft script saved: %s", draft_path)
         return plan_path
+
+    @staticmethod
+    def _observed_navigation_url(agent_result: Any) -> str | None:
+        for tc in list(getattr(agent_result, "tool_calls", []) or []):
+            tool_name = str(getattr(tc, "name", "") or "")
+            if "browser_navigate" not in tool_name:
+                continue
+            tool_input = getattr(tc, "input", None)
+            if not isinstance(tool_input, dict):
+                continue
+            url = str(tool_input.get("url") or "").strip()
+            if url.startswith(("http://", "https://")):
+                return url
+        return None
+
+    @staticmethod
+    def _fallback_test_name(content: str) -> str:
+        match = re.search(r"(?m)^###\s+TC-\d{3}:\s+(.+?)\s*$", content or "")
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()[:80] or "planned flow"
+        return "planned flow"
+
+    @classmethod
+    def _build_fallback_draft_script(cls, content: str, target_url: str) -> str:
+        test_name = cls._fallback_test_name(content)
+        escaped_test_name = test_name.replace("\\", "\\\\").replace("'", "\\'")
+        escaped_url = target_url.replace("\\", "\\\\").replace("'", "\\'")
+        parsed = urlsplit(target_url)
+        path_pattern = re.escape(parsed.path or "/")
+        if parsed.query:
+            path_pattern = f"{path_pattern}(?:\\?{re.escape(parsed.query)})?"
+        path_pattern_literal = json.dumps(path_pattern)
+
+        return "\n".join(
+            [
+                "import { test, expect } from '@playwright/test';",
+                "",
+                f"test('{escaped_test_name}', async ({{ page }}) => {{",
+                f"  await page.goto('{escaped_url}');",
+                "  await expect(page.locator('body')).toBeVisible();",
+                f"  await expect(page).toHaveURL(new RegExp({path_pattern_literal}));",
+                "});",
+            ]
+        )
+
+    def _attempt_local_draft_script_repair(
+        self,
+        *,
+        plan_path: Path,
+        expected_output_path: Path,
+        agent_result: Any,
+        draft_script_validation_failure: str | None,
+    ) -> Path | None:
+        if draft_script_validation_failure != "missing Draft Playwright Script fenced TypeScript block":
+            return None
+        try:
+            content = plan_path.read_text()
+        except OSError:
+            return None
+        valid, _reason = self._validate_test_plan_schema(content)
+        if not valid or self._extract_draft_script(content):
+            return None
+        target_url = self._observed_navigation_url(agent_result)
+        if not target_url:
+            return None
+
+        repaired_content = (
+            content.rstrip()
+            + "\n\n## Draft Playwright Script\n"
+            + "```typescript\n"
+            + self._build_fallback_draft_script(content, target_url)
+            + "\n```\n"
+        )
+        draft_failure = self._draft_script_validation_failure(repaired_content)
+        if draft_failure:
+            logger.warning(
+                "Local draft script repair for %s was invalid: %s",
+                expected_output_path,
+                draft_failure,
+            )
+            return None
+
+        expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_output_path.write_text(repaired_content)
+        logger.info(
+            "Locally repaired missing planner draft script using observed navigation URL: %s",
+            target_url,
+        )
+        return expected_output_path
 
     @classmethod
     def _validate_test_plan_schema(cls, content: str) -> tuple[bool, str | None]:
@@ -2371,7 +2472,7 @@ Original task follows. Obey it, but correct the failure above.
         return "\n".join(parts)
 
     async def _query_repair_agent(self, prompt: str):
-        timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "180"))
+        timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "900"))
         runner = create_agent_runner(
             self,
             timeout_seconds=timeout,
