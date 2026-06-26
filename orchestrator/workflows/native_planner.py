@@ -299,7 +299,7 @@ You MUST open a browser and explore the live application.
 - **Target URL**: {target_url}
 
 Use the Playwright MCP tools to:
-1. Call `planner_setup_page` with `seedFile: "tests/seed.spec.ts"` to initialize the browser
+1. Call `planner_setup_page` without `seedFile` to initialize the browser. The run-local seed is `tests/seed.spec.ts`; Playwright Test MCP discovers it automatically.
 2. **IMMEDIATELY** call `browser_navigate` to go to: {target_url}
    (Do NOT rely on any default page - the default is example.com. Navigate explicitly!)
 3. Use `browser_snapshot` to see the current page state
@@ -942,8 +942,11 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             diagnostics.get("failure_category")
             == "planner_live_sequence_setup_seed_warning"
             and diagnostics.get("non_fatal") is True
-            and diagnostics.get("setup_tool") == "generator_setup_page"
-            and diagnostics.get("setup_seed_file_omitted") is True
+            and diagnostics.get("setup_tool") in {"planner_setup_page", "generator_setup_page"}
+            and (
+                diagnostics.get("setup_seed_file_omitted") is True
+                or diagnostics.get("native_setup_seed_file_invalid") is True
+            )
         )
 
     def _record_live_sequence_warning(
@@ -1009,7 +1012,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     "Start from a clean sequence: `planner_setup_page`, then `browser_navigate` to the exact Target URL "
                     f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`. "
                     "Use `planner_setup_page` only for planner setup, do not call `generator_setup_page` during planning, "
-                    f"and every setup call must include `seedFile: \"{NATIVE_SETUP_SEED_FILE}\"`. "
+                    "and omit `seedFile` on setup calls. "
                     "Use only the structured prior evidence below plus fresh browser observations from this retry."
                 )
             else:
@@ -1018,7 +1021,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     "`planner_setup_page`, then `browser_navigate` to the exact Target URL "
                     f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`. "
                     "Use `planner_setup_page` only for planner setup, do not call `generator_setup_page` during planning, "
-                    f"and every setup call must include `seedFile: \"{NATIVE_SETUP_SEED_FILE}\"`."
+                    "and omit `seedFile` on setup calls."
                 )
             if error.diagnostics.get("failure_category") in {
                 "planner_live_tool_call_contract_failure",
@@ -1378,7 +1381,7 @@ Original task follows. Obey it, but correct the failure above.
         navigate_seen = False
         snapshot_seen = False
         save_seen = False
-        omitted_generator_setup_seed_after_valid_sequence = False
+        setup_seed_warning: dict[str, Any] | None = None
 
         for tool_call in tool_calls:
             short_name = cls._tool_call_short_name(tool_call)
@@ -1388,24 +1391,23 @@ Original task follows. Obey it, but correct the failure above.
                 if "seedFile" in setup_input:
                     seed_file = setup_input.get("seedFile")
                     if seed_file != NATIVE_SETUP_SEED_FILE:
-                        raise SpecGenerationError(
-                            f"{short_name} used an invalid setup seed file for a native browser run.",
-                            diagnostics={
-                                "failure_category": "native_setup_seed_file_error",
-                                "setup_tool": short_name,
-                                "expected_seed_file": NATIVE_SETUP_SEED_FILE,
-                                "received_seed_file": seed_file,
-                                "expected_target_url": target_url,
-                                "planner_setup_page_observed": setup_seen,
-                                "browser_navigate_observed": navigate_attempt_seen,
-                                "target_navigation_observed": navigate_seen,
-                                "browser_snapshot_after_navigation_observed": snapshot_seen,
-                                "planner_save_plan_observed": save_seen,
-                            },
-                        )
+                        setup_seed_warning = {
+                            "failure_category": "planner_live_sequence_setup_seed_warning",
+                            "non_fatal": True,
+                            "setup_tool": short_name,
+                            "native_setup_seed_file_invalid": True,
+                            "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                            "received_seed_file": seed_file,
+                        }
                 elif short_name == "generator_setup_page":
                     if setup_seen and navigate_seen and snapshot_seen:
-                        omitted_generator_setup_seed_after_valid_sequence = True
+                        setup_seed_warning = {
+                            "failure_category": "planner_live_sequence_setup_seed_warning",
+                            "non_fatal": True,
+                            "setup_tool": "generator_setup_page",
+                            "setup_seed_file_omitted": True,
+                            "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                        }
 
             tool_error = str(getattr(tool_call, "error", "") or "")
             browser_failure = classify_browser_failure(
@@ -1491,15 +1493,11 @@ Original task follows. Obey it, but correct the failure above.
                 },
             )
 
-        if omitted_generator_setup_seed_after_valid_sequence:
+        if setup_seed_warning:
             raise SpecGenerationError(
-                "Live-browser planner produced valid setup/navigate/snapshot evidence but called generator_setup_page during planning without seedFile.",
+                "Live-browser planner produced valid setup/navigate/snapshot evidence but used recoverable setup seed input.",
                 diagnostics={
-                    "failure_category": "planner_live_sequence_setup_seed_warning",
-                    "non_fatal": True,
-                    "setup_tool": "generator_setup_page",
-                    "setup_seed_file_omitted": True,
-                    "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                    **setup_seed_warning,
                     "expected_target_url": target_url,
                     "planner_setup_page_observed": setup_seen,
                     "browser_navigate_observed": navigate_attempt_seen,

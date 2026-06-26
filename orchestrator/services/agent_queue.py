@@ -748,6 +748,20 @@ class AgentQueue:
                             )
                         health = await self.get_worker_health()
                         alive_running_tasks = int(health.get("alive_tasks") or 0)
+                        live_running_tasks = 0
+                        if task.requires_live_browser and live_workers > 0:
+                            try:
+                                live_running_tasks = sum(
+                                    1
+                                    for summary in await self.get_running_task_summaries()
+                                    if summary.get("live")
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    "Unable to summarize live-browser running tasks for %s: %s",
+                                    task_id,
+                                    exc,
+                                )
                         # Cancel only when there is no evidence of worker capacity
                         # or in-flight task heartbeat. A busy worker can lose its
                         # worker-level heartbeat briefly while the task heartbeat
@@ -758,9 +772,18 @@ class AgentQueue:
                                 f"Task stuck in QUEUED for {elapsed:.0f}s — no agent workers are alive. "
                                 f"Check that the agent_worker process is running (supervisord)."
                             )
+                        live_saturation = (
+                            "all live-browser workers are busy; "
+                            if task.requires_live_browser
+                            and live_workers > 0
+                            and live_running_tasks >= live_workers
+                            else ""
+                        )
                         logger.warning(
                             f"Task {task_id} still QUEUED after {elapsed:.0f}s — "
-                            f"worker_processes={workers}, live_browser_workers={live_workers}, running={running}, "
+                            f"{live_saturation}"
+                            f"worker_processes={workers}, live_browser_workers={live_workers}, "
+                            f"live_browser_running={live_running_tasks}, running={running}, "
                             f"alive_running_tasks={alive_running_tasks}, queue_depth={queue_len}; "
                             "continuing to wait."
                         )
@@ -857,11 +880,42 @@ class AgentQueue:
         worker_id = task.worker_id if task else None
         queue_len = await self.queue_length()
         running = await self.running_count()
+        live_workers = 0
+        live_running_tasks = 0
+        if task and task.requires_live_browser:
+            try:
+                capabilities = await self.worker_capability_summary()
+                live_workers = int(capabilities.get("live_browser_worker_count") or 0)
+                if live_workers > 0:
+                    live_running_tasks = sum(
+                        1
+                        for summary in await self.get_running_task_summaries()
+                        if summary.get("live")
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Unable to include live-browser timeout details for %s: %s",
+                    task_id,
+                    exc,
+                )
         await self.cancel_task(task_id)
         if status == AgentTaskStatus.QUEUED.value:
+            live_detail = (
+                f", live_browser_workers={live_workers}, live_browser_running={live_running_tasks}"
+                if task and task.requires_live_browser
+                else ""
+            )
+            saturation_detail = (
+                ", all live-browser workers busy"
+                if task
+                and task.requires_live_browser
+                and live_workers > 0
+                and live_running_tasks >= live_workers
+                else ""
+            )
             raise asyncio.TimeoutError(
                 f"Agent task timed out after {timeout}s while queued "
-                f"(queue_depth={queue_len}, running={running})"
+                f"(queue_depth={queue_len}, running={running}{live_detail}{saturation_detail})"
             )
         if status in {
             AgentTaskStatus.RUNNING.value,
@@ -1203,6 +1257,8 @@ class AgentQueue:
         all_tasks = await redis.hgetall(self.TASKS_KEY)
         by_status: dict[str, int] = {}
         oldest_queued_age_seconds: float | None = None
+        oldest_live_queued_age_seconds: float | None = None
+        live_queued = 0
         stale_running = 0
         now = datetime.utcnow()
 
@@ -1218,6 +1274,13 @@ class AgentQueue:
                 age = (now - task.created_at).total_seconds()
                 if oldest_queued_age_seconds is None or age > oldest_queued_age_seconds:
                     oldest_queued_age_seconds = age
+                if task.requires_live_browser:
+                    live_queued += 1
+                    if (
+                        oldest_live_queued_age_seconds is None
+                        or age > oldest_live_queued_age_seconds
+                    ):
+                        oldest_live_queued_age_seconds = age
             elif task.status in (
                 AgentTaskStatus.RUNNING,
                 AgentTaskStatus.CANCEL_REQUESTED,
@@ -1235,6 +1298,8 @@ class AgentQueue:
             "by_status": by_status,
             "stale_running": stale_running,
             "oldest_queued_age_seconds": oldest_queued_age_seconds,
+            "live_queued": live_queued,
+            "oldest_live_queued_age_seconds": oldest_live_queued_age_seconds,
         }
 
     @staticmethod

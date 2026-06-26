@@ -1930,7 +1930,7 @@ async def test_live_plan_rejects_missing_target_navigation_despite_generator_see
 
 
 @pytest.mark.asyncio
-async def test_live_plan_rejects_explicitly_wrong_generator_setup_seed(
+async def test_live_plan_accepts_valid_saved_plan_with_wrong_generator_setup_seed_warning(
     tmp_path, monkeypatch
 ):
     planner = _planner(tmp_path)
@@ -1944,21 +1944,25 @@ async def test_live_plan_rejects_explicitly_wrong_generator_setup_seed(
             input={"seedFile": "tests/not-seed.spec.ts"},
         )
     )
-    _patch_agent_sequence(monkeypatch, planner, [result])
+    prompts = _patch_agent_sequence(monkeypatch, planner, [result])
 
-    with pytest.raises(SpecGenerationError) as exc_info:
-        await planner.generate_spec_from_flow_context(
-            flow_title="Checkout",
-            flow_context="Checkout flow",
-            target_url="https://example.test/checkout",
-            output_dir=tmp_path / "run",
-        )
+    path = await planner.generate_spec_from_flow_context(
+        flow_title="Checkout",
+        flow_context="Checkout flow",
+        target_url="https://example.test/checkout",
+        output_dir=tmp_path / "run",
+    )
 
-    assert "invalid setup seed file" in str(exc_info.value)
-    assert exc_info.value.diagnostics["failure_category"] == "native_setup_seed_file_error"
-    assert exc_info.value.diagnostics["received_seed_file"] == "tests/not-seed.spec.ts"
-    assert not (planner.session_dir / "planner_live_sequence_warning.json").exists()
-    assert not (tmp_path / "run" / "checkout.md").exists()
+    warning = json.loads(
+        (planner.session_dir / "planner_live_sequence_warning.json").read_text()
+    )
+    assert path.read_text().strip() == VALID_PLAN.strip()
+    assert len(prompts) == 1
+    assert warning["failure_category"] == "planner_live_sequence_setup_seed_warning"
+    assert warning["setup_tool"] == "generator_setup_page"
+    assert warning["native_setup_seed_file_invalid"] is True
+    assert warning["expected_seed_file"] == "tests/seed.spec.ts"
+    assert warning["received_seed_file"] == "tests/not-seed.spec.ts"
 
 
 @pytest.mark.asyncio

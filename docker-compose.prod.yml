@@ -263,7 +263,7 @@ services:
         condition: service_healthy
     deploy:
       mode: replicated
-      replicas: ${AGENT_WORKER_REPLICAS:-2}
+      replicas: ${AGENT_WORKER_REPLICAS:-4}
       resources:
         limits:
           memory: 2G

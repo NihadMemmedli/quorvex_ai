@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from orchestrator.workflows.native_planner import NativePlanner
 
 
-def test_planner_prompt_instructs_seed_file_for_setup():
+def test_planner_prompt_instructs_setup_seed_file_omission():
     planner = object.__new__(NativePlanner)
 
     prompt = planner._build_hybrid_prompt(
@@ -19,7 +19,8 @@ def test_planner_prompt_instructs_seed_file_for_setup():
         output_path="/tmp/checkout.md",
     )
 
-    assert 'planner_setup_page` with `seedFile: "tests/seed.spec.ts"`' in prompt
+    assert "Call `planner_setup_page` without `seedFile`" in prompt
+    assert "The run-local seed is `tests/seed.spec.ts`" in prompt
     assert "https://example.test/checkout" in prompt
     assert "## Draft Playwright Script" in prompt
     assert "Do not use `page.waitForTimeout()`" in prompt
@@ -49,10 +50,11 @@ def test_planner_prompt_normalizes_markdown_target_url():
     assert "https://pre.wetravel.to/user/my_trips?view=List" in prompt
 
 
-def test_planner_agent_definition_requires_seed_file():
+def test_planner_agent_definition_instructs_setup_seed_file_omission():
     content = (Path(__file__).resolve().parents[2] / ".claude" / "agents" / "playwright-test-planner.md").read_text()
 
-    assert 'planner_setup_page` tool once with `seedFile: "tests/seed.spec.ts"`' in content
+    assert "planner_setup_page` tool once without `seedFile`" in content
+    assert "The run-local seed is `tests/seed.spec.ts`" in content
 
 
 def test_planner_agent_definition_requires_draft_playwright_script():

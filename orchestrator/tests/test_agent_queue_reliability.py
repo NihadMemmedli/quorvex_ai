@@ -2333,6 +2333,62 @@ async def test_wait_for_result_keeps_queued_task_when_workers_are_busy():
 
 
 @pytest.mark.asyncio
+async def test_wait_for_result_reports_live_browser_saturation():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-live-busy-queued",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        requires_live_browser=True,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    async def worker_count():
+        return 2
+
+    async def queue_length():
+        return 3
+
+    async def running_count():
+        return 2
+
+    async def worker_capability_summary():
+        return {
+            "worker_count": 2,
+            "live_browser_worker_count": 2,
+            "non_live_browser_worker_count": 0,
+            "workers": [],
+        }
+
+    async def get_worker_health():
+        return {
+            "worker_count": 2,
+            "live_browser_worker_count": 2,
+            "alive_tasks": 2,
+        }
+
+    async def get_running_task_summaries():
+        return [
+            {"id": "agent-running-a", "live": True},
+            {"id": "agent-running-b", "live": True},
+        ]
+
+    queue.worker_count = worker_count
+    queue.queue_length = queue_length
+    queue.running_count = running_count
+    queue.worker_capability_summary = worker_capability_summary
+    queue.get_worker_health = get_worker_health
+    queue.get_running_task_summaries = get_running_task_summaries
+
+    with pytest.raises(asyncio.TimeoutError, match="all live-browser workers busy"):
+        await queue.wait_for_result(
+            task.id, timeout=0.05, poll_interval=0.001, queued_timeout=0.001
+        )
+
+
+@pytest.mark.asyncio
 async def test_wait_for_result_fails_live_task_when_workers_have_no_live_browser_capability():
     redis = _MemoryRedis()
     queue = _MemoryQueue(redis)
@@ -2356,6 +2412,34 @@ async def test_wait_for_result_fails_live_task_when_workers_have_no_live_browser
 
     cancelled = await queue.get_task(task.id)
     assert cancelled.status == AgentTaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_get_metrics_counts_live_browser_queued_tasks():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    normal_task = AgentTask(
+        id="agent-normal-queued",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+    )
+    live_task = AgentTask(
+        id="agent-live-queued",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        requires_live_browser=True,
+    )
+    live_task.created_at = live_task.created_at - timedelta(seconds=30)
+    await redis.hset(queue.TASKS_KEY, normal_task.id, json.dumps(normal_task.to_dict()))
+    await redis.hset(queue.TASKS_KEY, live_task.id, json.dumps(live_task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, normal_task.id)
+    await redis.rpush(queue.QUEUE_KEY, live_task.id)
+
+    metrics = await queue.get_metrics()
+
+    assert metrics["queue_length"] == 2
+    assert metrics["live_queued"] == 1
+    assert metrics["oldest_live_queued_age_seconds"] >= 29
 
 
 @pytest.mark.asyncio

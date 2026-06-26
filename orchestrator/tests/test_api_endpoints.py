@@ -4342,6 +4342,83 @@ class TestQueueEndpoints:
         assert data["workers_busy"] == 0
         assert data["workers_idle"] == 2
 
+    def test_agent_queue_status_reports_live_browser_saturation(
+        self, client, monkeypatch
+    ):
+        """GET /api/agents/queue-status should expose live-browser queue saturation."""
+        import orchestrator.api.main as main_module
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def get_metrics(self):
+                return {
+                    "queue_length": 1,
+                    "running": 2,
+                    "workers_alive": 2,
+                    "live_browser_workers_alive": 2,
+                    "stale_running": 0,
+                    "oldest_queued_age_seconds": 180,
+                    "oldest_live_queued_age_seconds": 180,
+                    "live_queued": 1,
+                    "by_status": {"queued": 1, "running": 2},
+                }
+
+            async def get_worker_health(self):
+                return {
+                    "worker_count": 2,
+                    "live_browser_worker_count": 2,
+                    "alive_tasks": 2,
+                }
+
+            async def get_running_task_summaries(self):
+                return [
+                    {
+                        "id": "agent-live-running-a",
+                        "status": "running",
+                        "heartbeat_alive": True,
+                        "live": True,
+                        "orphaned": False,
+                    },
+                    {
+                        "id": "agent-live-running-b",
+                        "status": "running",
+                        "heartbeat_alive": True,
+                        "live": True,
+                        "orphaned": False,
+                    },
+                ]
+
+        class FakeBrowserPool:
+            async def get_status(self):
+                return {
+                    "running": 2,
+                    "max_browsers": 4,
+                    "available": 2,
+                    "by_type": {"agent": 2},
+                }
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+        monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+        monkeypatch.setattr(main_module, "BROWSER_POOL", FakeBrowserPool())
+        _clear_active_agent_runs_for_queue_status()
+
+        response = client.get("/api/agents/queue-status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mode"] == "redis"
+        assert data["live_browser_workers_alive"] == 2
+        assert data["live_browser_workers_busy"] == 2
+        assert data["live_browser_workers_idle"] == 0
+        assert data["live_browser_running"] == 2
+        assert data["live_browser_queued"] == 1
+        assert data["live_browser_capacity_state"] == "live_browser_workers_saturated"
+        assert data["oldest_live_queued_age_seconds"] == 180
+
     def test_agent_queue_status_includes_persisted_active_agent_runs(
         self, client, monkeypatch
     ):
