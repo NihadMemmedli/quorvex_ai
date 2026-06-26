@@ -29,10 +29,12 @@ from typing import Any
 
 try:
     import redis.asyncio as aioredis
+    from redis.exceptions import TimeoutError as RedisTimeoutError
 
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
+    RedisTimeoutError = TimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -1079,7 +1081,10 @@ class AgentQueue:
         redis = await self._ensure_connected()
 
         # Blocking pop from list (FIFO)
-        result = await redis.blpop(self.QUEUE_KEY, timeout=timeout)
+        try:
+            result = await redis.blpop(self.QUEUE_KEY, timeout=timeout)
+        except RedisTimeoutError:
+            return None
 
         if result:
             _, task_id = result
