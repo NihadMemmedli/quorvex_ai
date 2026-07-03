@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -212,6 +213,132 @@ def write_run_storage_state_file(row: BrowserAuthSession, run_dir: Path) -> Path
     return path
 
 
+def _target_auth_preflight_script() -> str:
+    return r"""
+const { chromium } = require('playwright');
+
+const targetUrl = process.env.BROWSER_AUTH_PREFLIGHT_TARGET_URL;
+const loginUrl = process.env.BROWSER_AUTH_PREFLIGHT_LOGIN_URL || '';
+const storageStatePath = process.env.BROWSER_AUTH_PREFLIGHT_STORAGE_STATE;
+const headless = String(process.env.HEADLESS || process.env.PLAYWRIGHT_HEADLESS || 'true').toLowerCase() !== 'false';
+
+function normalizeUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return String(value || '').replace(/\/$/, '');
+  }
+}
+
+function loginRedirected(currentUrl) {
+  if (!loginUrl) return false;
+  const current = normalizeUrl(currentUrl);
+  const login = normalizeUrl(loginUrl);
+  if (current === login || current.startsWith(`${login}?`) || current.startsWith(`${login}/`)) {
+    return true;
+  }
+  try {
+    const currentParsed = new URL(currentUrl);
+    const loginParsed = new URL(loginUrl);
+    return currentParsed.origin === loginParsed.origin && currentParsed.pathname === loginParsed.pathname;
+  } catch {
+    return false;
+  }
+}
+
+(async () => {
+  const browser = await chromium.launch({ headless });
+  const context = await browser.newContext({ storageState: storageStatePath });
+  const page = await context.newPage();
+  try {
+    const response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    const status = response ? response.status() : 0;
+    const currentUrl = page.url();
+    if (status === 401 || status === 403) {
+      throw new Error(`Target preflight returned HTTP ${status} at ${currentUrl}`);
+    }
+    if (loginRedirected(currentUrl)) {
+      throw new Error(`Target preflight redirected to login URL ${currentUrl}`);
+    }
+  } finally {
+    await browser.close();
+  }
+})().catch((error) => {
+  console.error(error && error.message ? error.message : String(error));
+  process.exit(1);
+});
+"""
+
+
+def preflight_browser_auth_storage_state(
+    storage_state: dict[str, Any],
+    *,
+    target_url: str,
+    login_url: str | None = None,
+) -> None:
+    """Open the app target with saved storage state and verify it is authenticated."""
+
+    _validate_storage_state(storage_state)
+    if not target_url:
+        raise BrowserAuthSessionError("Browser auth session target URL is missing")
+    with tempfile.TemporaryDirectory(prefix="browser-auth-preflight-") as temp_dir:
+        temp_path = Path(temp_dir)
+        storage_path = temp_path / "storage-state.json"
+        script_path = temp_path / "preflight.js"
+        storage_path.write_text(json.dumps(storage_state), encoding="utf-8")
+        script_path.write_text(_target_auth_preflight_script(), encoding="utf-8")
+        env = os.environ.copy()
+        node_modules_path = str(BASE_DIR / "node_modules")
+        existing_node_path = env.get("NODE_PATH")
+        env.update(
+            {
+                "BROWSER_AUTH_PREFLIGHT_TARGET_URL": target_url,
+                "BROWSER_AUTH_PREFLIGHT_LOGIN_URL": login_url or "",
+                "BROWSER_AUTH_PREFLIGHT_STORAGE_STATE": str(storage_path),
+                "NODE_PATH": (
+                    f"{node_modules_path}{os.pathsep}{existing_node_path}"
+                    if existing_node_path
+                    else node_modules_path
+                ),
+            }
+        )
+        try:
+            result = subprocess.run(
+                ["node", str(script_path)],
+                cwd=BASE_DIR,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise BrowserAuthSessionError(
+                "Node.js is required for browser auth target preflight"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise BrowserAuthSessionError(
+                "Browser auth target preflight timed out"
+            ) from exc
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout or "").strip()
+            raise BrowserAuthSessionError(
+                "Browser auth target preflight failed"
+                + (f": {details}" if details else "")
+            )
+
+
+def _ensure_browser_auth_target_authenticated(row: BrowserAuthSession) -> None:
+    state = decrypt_storage_state(row.storage_state_json_encrypted)
+    preflight_browser_auth_storage_state(
+        state,
+        target_url=row.base_url,
+        login_url=row.login_url,
+    )
+
+
 def resolve_browser_auth_for_run(
     session: Session,
     project_id: str | None,
@@ -277,6 +404,7 @@ def validate_browser_auth_session(
     row = get_browser_auth_session_or_error(session, project_id, session_id)
     try:
         ensure_browser_auth_session_usable(row)
+        _ensure_browser_auth_target_authenticated(row)
         row.status = "active"
         row.failure_reason = None
         row.last_validated_at = _utcnow()
@@ -1185,6 +1313,11 @@ def refresh_browser_auth_session(
                     f"Direct Playwright capture failed: {direct_message}; "
                     f"MCP fallback failed: {mcp_message}"
                 ) from mcp_exc
+        preflight_browser_auth_storage_state(
+            state,
+            target_url=row.base_url,
+            login_url=row.login_url,
+        )
         row.storage_state_json_encrypted = encrypt_storage_state(state)
         row.status = "active"
         row.failure_reason = None

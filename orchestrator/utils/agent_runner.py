@@ -1140,6 +1140,26 @@ class AgentRunner:
             return None
         return list(self.allowed_tools)
 
+    def _sdk_tools_option(self) -> list[str] | dict[str, str] | None:
+        """Return the SDK tools option without hiding run-local MCP tools.
+
+        Claude Code treats the tools availability option as the built-in tool
+        set. Passing a restricted list such as ["Read", "mcp__..."] can leave
+        the model with only the built-in Read tool even when mcp_servers is
+        attached. Keep the approval surface in allowed_tools, but omit the SDK
+        tools option for MCP-backed runs so the configured MCP servers can
+        publish their tools.
+        """
+        tools = self._effective_tools()
+        if isinstance(tools, list) and any(str(tool).startswith("mcp__") for tool in tools):
+            mcp_path = (self.cwd or Path.cwd()) / ".mcp.json"
+            if mcp_path.exists():
+                logger.info(
+                    "MCP tools requested; omitting SDK tools restriction so MCP tools can load"
+                )
+                return None
+        return tools
+
     def _browser_tool_timeout_seconds(self) -> float:
         raw_value = None
         if _has_planner_setup_tool(self.allowed_tools, self._effective_tools()):
@@ -1489,7 +1509,7 @@ class AgentRunner:
             "permission_mode": self._effective_permission_mode(),
         }
 
-        tools = self._effective_tools()
+        tools = self._sdk_tools_option()
         if tools is not None:
             kwargs["tools"] = tools
         if self.disallowed_tools:

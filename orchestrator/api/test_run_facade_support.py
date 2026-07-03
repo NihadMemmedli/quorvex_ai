@@ -11,6 +11,7 @@ from typing import Any
 
 from services.browser_pool import AbstractBrowserPool
 from services.resource_manager import ResourceManager
+from orchestrator.services import scheduled_batch_executor
 
 from . import (
     startup_diagnostics_support,
@@ -194,6 +195,10 @@ def configure_test_run_facade(runtime_factory: RuntimeFactory, namespace: dict[s
             ),
             "_signal_test_run_temporal": functools.partial(
                 test_run_runtime_support.signal_test_run_temporal,
+                runtime,
+            ),
+            "_dispatch_scheduled_regression_batch": functools.partial(
+                scheduled_batch_executor.dispatch_scheduled_batch,
                 runtime,
             ),
             "_has_browser_auth_selection": functools.partial(

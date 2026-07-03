@@ -26,6 +26,7 @@ from orchestrator.services.agent_run_events import list_agent_run_events
 from orchestrator.services.handoff_manifest import init_manifest, record_artifact
 from orchestrator.utils.agent_runner import AgentResult
 from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
+from orchestrator.workflows.native_healer import NativeHealer
 
 
 def _bare_pipeline() -> FullNativePipeline:
@@ -693,6 +694,96 @@ def test_assertion_removal_blocks_new_fixme_without_triage_override():
     )
     assert "assertion_preservation_or_explicit_test_fixme" not in fixme_allowed["missing_required_tools"]
     assert "new_test_fixme_requires_non_healable_triage" not in fixme_allowed["missing_required_tools"]
+
+
+def test_healer_guardrail_blocks_authenticated_intent_downgrade():
+    pipeline = _bare_pipeline()
+    before = "test('applications', async ({ page }) => { await expect(page.getByText('Applications')).toBeVisible(); });"
+    after = "test.fixme('provided storage state does not authenticate target', async () => {});"
+
+    result = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_run", "tool": "test_run"},
+            {"name": "mcp__playwright-test__browser_network_requests", "tool": "browser_network_requests"},
+        ],
+        error_category="auth",
+        triage_allows_fixme=True,
+        auth_context={
+            "storage_state_attached": True,
+            "auth_preflight_status": "passed",
+            "auth_preflight_target_url": "https://staging.my.gov.az/applications",
+        },
+    )
+
+    assert result["guardrail_status"] == "failed"
+    assert "authenticated_auth_dependent_test_fixme_forbidden" in result["missing_required_tools"]
+    assert "authenticated_intent_downgrade_forbidden" in result["missing_required_tools"]
+
+
+def test_native_healer_prompt_includes_browser_auth_context(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "QUORVEX_BROWSER_AUTH_CONTEXT",
+        json.dumps(
+            {
+                "storage_state_attached": True,
+                "browser_auth_session_name": "Nihad_Login",
+                "auth_preflight_status": "passed",
+                "auth_preflight_target_url": "https://staging.my.gov.az/applications",
+                "auth_preflight_final_url": "https://staging.my.gov.az/applications",
+            }
+        ),
+    )
+    test_file = tmp_path / "auth.spec.ts"
+    test_file.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('applications', async ({ page }) => { await expect(page.getByText('Applications')).toBeVisible(); });\n"
+    )
+
+    prompt = NativeHealer()._build_healer_prompt(
+        test_file=str(test_file),
+        test_content=test_file.read_text(),
+        error_log="Timeout waiting for Applications",
+    )
+
+    assert "## Browser Authentication Context" in prompt
+    assert "Nihad_Login" in prompt
+    assert "https://staging.my.gov.az/applications" in prompt
+    assert "Do not convert authenticated assertions" in prompt
+
+
+def test_generated_file_rejects_authenticated_unauthenticated_replacement(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "QUORVEX_BROWSER_AUTH_CONTEXT",
+        json.dumps(
+            {
+                "storage_state_attached": True,
+                "auth_preflight_status": "passed",
+                "auth_preflight_target_url": "https://staging.my.gov.az/applications",
+            }
+        ),
+    )
+    test_path = tmp_path / "generated.spec.ts"
+    test_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('applications', async ({ page }) => {\n"
+        "  await page.goto('https://staging.my.gov.az/applications');\n"
+        "  await expect(page.getByText('Login page is visible')).toBeVisible();\n"
+        "});\n"
+    )
+    pipeline = _bare_pipeline()
+    pipeline.generated_preflight_list_enabled = False
+
+    error = pipeline._validate_generated_test_file(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="browser",
+    )
+
+    assert error is not None
+    assert "must not downgrade" in error
 
 
 def test_assertion_guardrail_allows_equivalent_assertion_replacement():

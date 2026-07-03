@@ -1331,10 +1331,11 @@ def test_agent_worker_cli_args_include_mcp_tools_when_config_exists(monkeypatch,
     args = captured["args"]
     assert result == "parsed"
     assert captured["cwd"] == str(tmp_path)
-    assert args[args.index("--tools") + 1] == "Read,mcp__playwright-test__browser_navigate"
+    assert "--tools" not in args
     assert args[args.index("--allowedTools") + 1] == "Read,mcp__playwright-test__browser_navigate"
     assert args[args.index("--mcp-config") + 1] == str(tmp_path / ".mcp.json")
     assert "--strict-mcp-config" in args
+    assert args[args.index("--setting-sources") + 1] == "project"
 
 
 def test_agent_worker_cli_parser_uses_stream_text_delta_without_result():

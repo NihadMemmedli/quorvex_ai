@@ -239,6 +239,15 @@ class RegressionBatchSummary(BaseModel):
     actual_passed: int | None = None
     actual_failed: int | None = None
     project_id: str | None = None
+    scheduler_status: str | None = None
+    chunk_size: int | None = None
+    max_active_runs: int | None = None
+    dispatch_total: int = 0
+    dispatch_started: int = 0
+    dispatch_completed: int = 0
+    dispatch_failed: int = 0
+    dispatch_cancelled: int = 0
+    scheduler_error: str | None = None
 
 
 class RegressionBatchDetail(RegressionBatchSummary):
@@ -267,6 +276,10 @@ class CreateBatchResponse(BaseModel):
     count: int
     mode: str
     max_iterations: int | None = None
+    scheduled: bool = False
+    chunk_size: int | None = None
+    max_active_runs: int | None = None
+    dispatched: int | None = None
 
 
 class BatchExportResponse(BaseModel):

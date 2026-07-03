@@ -1241,7 +1241,13 @@ changes, completed status, or `page.waitForResponse(...)` when appropriate.
 
 ## Browser Authentication Context
 The browser starts authenticated with saved session `{session_name}`.
+Target preflight status: `{auth_context.get('auth_preflight_status') or 'not_recorded'}`.
+Target URL: `{auth_context.get('auth_preflight_target_url') or auth_context.get('target_url') or 'not_recorded'}`.
+Final URL: `{auth_context.get('auth_preflight_final_url') or auth_context.get('auth_preflight_url') or 'not_recorded'}`.
 Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure.
+Use the Playwright `page` fixture so the configured storageState remains active.
+Do not call `browser.newContext()` or pass `storageState: undefined` unless the spec explicitly requires an unauthenticated browser.
+Do not convert authenticated assertions into unauthenticated/login-page assertions or `test.fixme()` unless target auth preflight failed and the run is auth-blocked.
 """
 
         memory_section = self._build_memory_context_section(

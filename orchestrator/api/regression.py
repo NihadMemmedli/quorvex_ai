@@ -29,9 +29,10 @@ from .models import (
     RegressionBatchListResponse,
     RegressionBatchSummary,
 )
-from .models_db import RegressionBatch
+from .models_db import RegressionBatch, RegressionBatchItem
 from .models_db import TestRun as DBTestRun
 from .process_manager import get_process_manager
+from . import run_files
 from .spec_files import build_generated_test_index, resolve_generated_code_path
 
 logger = logging.getLogger(__name__)
@@ -581,6 +582,15 @@ def _batch_to_summary(
         actual_passed=actual_passed,
         actual_failed=actual_failed,
         project_id=batch.project_id,
+        scheduler_status=batch.scheduler_status,
+        chunk_size=batch.chunk_size,
+        max_active_runs=batch.max_active_runs,
+        dispatch_total=batch.dispatch_total,
+        dispatch_started=batch.dispatch_started,
+        dispatch_completed=batch.dispatch_completed,
+        dispatch_failed=batch.dispatch_failed,
+        dispatch_cancelled=batch.dispatch_cancelled,
+        scheduler_error=batch.scheduler_error,
     )
 
 
@@ -811,17 +821,39 @@ def cancel_batch_runs(
 
     runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all()
     active_runs = [run for run in runs if run.status in ACTIVE_RUN_STATUSES]
+    scheduled_items = []
+    future_items_cancelled = 0
+    if batch.scheduler_status:
+        scheduled_items = session.exec(
+            select(RegressionBatchItem).where(RegressionBatchItem.batch_id == batch_id)
+        ).all()
+        now = datetime.utcnow()
+        for item in scheduled_items:
+            if item.status == "pending":
+                item.status = "cancelled"
+                item.completed_at = now
+                item.error_message = item.error_message or "Cancelled by user"
+                future_items_cancelled += 1
+                session.add(item)
+        batch.scheduler_status = "cancelling" if active_runs else "cancelled"
     if not active_runs:
-        _apply_batch_status_counts(batch, runs)
+        if batch.scheduler_status:
+            from orchestrator.services.scheduled_batch_executor import refresh_scheduled_batch_counts
+
+            refresh_scheduled_batch_counts(session, batch)
+            batch.scheduler_status = "cancelled"
+        else:
+            _apply_batch_status_counts(batch, runs)
         session.add(batch)
         session.commit()
         return {
-            "status": "no_active_runs",
+            "status": "cancelled" if future_items_cancelled else "no_active_runs",
             "batch_id": batch_id,
             "targeted": 0,
             "queued_cancelled": 0,
             "running_stopped": 0,
             "already_terminal": len(runs),
+            "future_items_cancelled": future_items_cancelled,
         }
 
     process_manager = get_process_manager()
@@ -864,7 +896,18 @@ def cancel_batch_runs(
         if run_dir.exists():
             (run_dir / "status.txt").write_text(run.status)
 
-    _apply_batch_status_counts(batch, runs)
+    if batch.scheduler_status:
+        for item in scheduled_items:
+            if item.run_id in {run.id for run in active_runs}:
+                item.status = "cancelled" if item.status == "queued" else "stopped"
+                item.completed_at = now
+                item.error_message = item.error_message or "Cancelled by user"
+                session.add(item)
+        from orchestrator.services.scheduled_batch_executor import refresh_scheduled_batch_counts
+
+        refresh_scheduled_batch_counts(session, batch)
+    else:
+        _apply_batch_status_counts(batch, runs)
     session.add(batch)
     session.commit()
 
@@ -876,6 +919,7 @@ def cancel_batch_runs(
         "running_stopped": running_stopped,
         "already_terminal": len(runs) - len(active_runs),
         "stop_failures": stop_failures,
+        "future_items_cancelled": future_items_cancelled,
     }
 
 
@@ -1966,6 +2010,9 @@ async def rerun_failed(batch_id: str, session: Session = Depends(get_session)):
                     run_dir=Path(task_args["run_dir"]),
                     browser_auth_session_id=requested_session_id,
                     use_project_default_browser_auth=use_project_default,
+                    target_url=run_files.extract_run_target_url_from_content(
+                        Path(task_args["spec_path"]).read_text(encoding="utf-8")
+                    ),
                 )
             else:
                 browser_auth_context = {

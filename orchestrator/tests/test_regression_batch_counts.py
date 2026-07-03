@@ -32,6 +32,64 @@ def test_create_regression_batch_rejects_oversized_bulk_run(monkeypatch):
         )
 
 
+def test_scheduled_regression_batch_persists_items_for_oversized_run(monkeypatch):
+    from orchestrator.api.db import engine, init_db
+    from orchestrator.api.models_db import RegressionBatch, RegressionBatchItem
+    from orchestrator.services import batch_executor
+    from orchestrator.services.scheduled_batch_executor import (
+        create_scheduled_regression_batch,
+        should_schedule_bulk_run,
+    )
+
+    monkeypatch.setenv("QUORVEX_MAX_BULK_RUN_SPECS", "2")
+    monkeypatch.setenv("QUORVEX_REGRESSION_CHUNK_SIZE", "5")
+    monkeypatch.setenv("QUORVEX_REGRESSION_MAX_ACTIVE_PER_BATCH", "3")
+    monkeypatch.setattr(
+        "orchestrator.services.scheduled_batch_executor._actual_test_count_for_spec",
+        lambda spec_name: 1,
+    )
+
+    init_db()
+    batch_id = None
+    try:
+        with Session(engine) as session:
+            spec_names = ["one.md", "two.md", "three.md"]
+            assert should_schedule_bulk_run(len(spec_names)) is True
+            result = create_scheduled_regression_batch(
+                batch_executor.BatchConfig(project_id="default", automated_only=True),
+                session,
+                spec_names=spec_names,
+                browser_auth_session_id=None,
+                use_project_default_browser_auth=False,
+                model_tier=None,
+            )
+            batch_id = result.batch_id
+            batch = session.get(RegressionBatch, batch_id)
+            assert batch is not None
+            assert batch.scheduler_status == "pending"
+            assert batch.total_tests == 3
+            assert batch.queued == 3
+            assert batch.dispatch_total == 3
+            assert batch.chunk_size == 5
+            assert batch.max_active_runs == 3
+            items = session.exec(
+                select(RegressionBatchItem).where(RegressionBatchItem.batch_id == batch_id)
+            ).all()
+            assert [item.spec_name for item in items] == spec_names
+            assert all(item.status == "pending" and item.run_id is None for item in items)
+    finally:
+        with Session(engine) as session:
+            if batch_id:
+                for item in session.exec(
+                    select(RegressionBatchItem).where(RegressionBatchItem.batch_id == batch_id)
+                ).all():
+                    session.delete(item)
+                batch = session.get(RegressionBatch, batch_id)
+                if batch:
+                    session.delete(batch)
+            session.commit()
+
+
 def test_create_regression_batch_caches_actual_playwright_test_count(tmp_path, monkeypatch):
     from orchestrator.api.db import engine
     from orchestrator.api.models_db import Project, RegressionBatch, SpecMetadata

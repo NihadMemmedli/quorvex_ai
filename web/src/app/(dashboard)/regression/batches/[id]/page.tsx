@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
     Clock, CheckCircle2, XCircle, PlayCircle, ChevronRight,
     Calendar, Tag, Download, RefreshCw, ArrowLeft, Chrome,
@@ -60,6 +60,15 @@ interface BatchDetail {
     actual_passed: number | null;
     actual_failed: number | null;
     project_id: string | null;
+    scheduler_status: string | null;
+    chunk_size: number | null;
+    max_active_runs: number | null;
+    dispatch_total: number;
+    dispatch_started: number;
+    dispatch_completed: number;
+    dispatch_failed: number;
+    dispatch_cancelled: number;
+    scheduler_error: string | null;
     runs: BatchRun[];
 }
 
@@ -133,6 +142,7 @@ interface RecentBatchOption {
 export default function BatchDetailPage() {
     const params = useParams();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const batchId = params.id as string;
     const { projectId, isLoading: projectLoading } = useRequiredProject();
     const { canEdit } = useProjectRole(projectId);
@@ -489,6 +499,10 @@ export default function BatchDetailPage() {
     }
 
     const activeRunCount = batch.running + batch.queued;
+    const isScheduledBulkBatch = Boolean(batch.scheduler_status) || searchParams.get('bulk') === 'scheduled' || searchParams.get('mode') === 'scheduled';
+    const scheduledCount = searchParams.get('count') || (batch.dispatch_total ? String(batch.dispatch_total) : null);
+    const scheduledChunkSize = searchParams.get('chunk_size') || (batch.chunk_size ? String(batch.chunk_size) : null);
+    const scheduledMaxActiveRuns = searchParams.get('max_active_runs') || (batch.max_active_runs ? String(batch.max_active_runs) : null);
     const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
     const displayedPassed = batch.actual_passed ?? batch.passed;
     const displayedFailed = batch.actual_failed ?? batch.failed;
@@ -580,6 +594,37 @@ export default function BatchDetailPage() {
                     </div>
                 }
             />
+
+            {isScheduledBulkBatch && (
+                <div
+                    className="card animate-in stagger-1"
+                    style={{
+                        padding: '1rem 1.25rem',
+                        marginBottom: '1.25rem',
+                        borderLeft: '3px solid var(--primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '1rem',
+                        flexWrap: 'wrap',
+                    }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', color: 'var(--text)' }}>
+                        <Hourglass size={18} color="var(--primary)" />
+                        <div>
+                            <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>Scheduled bulk run</div>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.15rem' }}>
+                                Runs are queued in chunks and this page will update as workers pick them up.
+                            </div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        {scheduledCount && <span style={{ padding: '0.25rem 0.55rem', borderRadius: 6, background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.8rem', fontWeight: 600 }}>{scheduledCount} tests</span>}
+                        {scheduledChunkSize && <span style={{ padding: '0.25rem 0.55rem', borderRadius: 6, background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.8rem', fontWeight: 600 }}>Chunk size {scheduledChunkSize}</span>}
+                        {scheduledMaxActiveRuns && <span style={{ padding: '0.25rem 0.55rem', borderRadius: 6, background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.8rem', fontWeight: 600 }}>Max active {scheduledMaxActiveRuns}</span>}
+                    </div>
+                </div>
+            )}
 
             {/* Batch metadata */}
             <div className="animate-in stagger-1" style={{ marginBottom: '2rem' }}>

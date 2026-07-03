@@ -4,10 +4,12 @@ import type { CSSProperties } from 'react';
 import { FileText, Plus, Play, FolderOpen, ChevronRight, ChevronDown, Search, FolderClosed, Tag, X, Edit, Check, Split, TestTube, Trash2, CheckCircle, LayoutTemplate, Zap, AlertCircle, ArrowDownToLine, Upload, Link2, Loader2, Pencil, FolderPlus, MoreHorizontal } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { toast } from 'sonner';
 import TagEditor from '@/components/TagEditor';
 import { useProject } from '@/contexts/ProjectContext';
 import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
+import { bulkBatchHref, bulkRunErrorMessage, bulkRunStartedMessage, type BulkRunResponse } from '@/lib/bulk-runs';
 import { splitSpecWithJob } from '@/lib/spec-split-jobs';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
@@ -156,6 +158,7 @@ function SpecsPageContent() {
     const [browserAuthMode, setBrowserAuthMode] = useState<SpecsBrowserAuthMode>('none');
     const [browserAuthSessionId, setBrowserAuthSessionId] = useState('');
     const [browserAuthError, setBrowserAuthError] = useState<string | null>(null);
+    const [bulkRunError, setBulkRunError] = useState<string | null>(null);
 
     useEffect(() => {
         if (!fileParam) return;
@@ -400,6 +403,7 @@ function SpecsPageContent() {
     const browserAuthSelectValue = browserAuthMode === 'session' ? `session:${browserAuthSessionId}` : browserAuthMode;
     const handleBrowserAuthSelectChange = (value: string) => {
         setBrowserAuthError(null);
+        setBulkRunError(null);
         if (value.startsWith('session:')) {
             setBrowserAuthMode('session');
             setBrowserAuthSessionId(value.slice('session:'.length));
@@ -421,7 +425,10 @@ function SpecsPageContent() {
             error = 'Project default browser login session is unavailable.';
         }
         setBrowserAuthError(error);
-        if (error && showAlert) alert(error);
+        if (error && showAlert) {
+            setBulkRunError(error);
+            toast.error(error);
+        }
         return !error;
     };
 
@@ -903,6 +910,7 @@ function SpecsPageContent() {
 
     const clearSelection = () => {
         setSelectedSpecs(new Set());
+        setBulkRunError(null);
     };
 
     const handleExport = async () => {
@@ -1091,6 +1099,8 @@ function SpecsPageContent() {
         if (!canEdit || selectedSpecs.size === 0) return;
         if (!validateBrowserAuthSelection(true)) return;
 
+        setBulkRunError(null);
+        setIsStartingRun(true);
         try {
             const res = await fetch(`${API_BASE}/runs/bulk`, {
                 method: 'POST',
@@ -1105,23 +1115,28 @@ function SpecsPageContent() {
                 })
             });
 
-            const data = await res.json();
+            const data = await res.json() as BulkRunResponse;
             if (!res.ok) {
-                alert(data.detail || 'Bulk run failed to start');
+                const message = bulkRunErrorMessage(data, 'Bulk run failed to start');
+                setBulkRunError(message);
+                toast.error(message);
                 return;
             }
             if (data.batch_id) {
-                alert(`Successfully started ${data.count} test runs!`);
+                toast.success(bulkRunStartedMessage(data));
                 clearSelection();
-                router.push(`/regression/batches/${data.batch_id}`);
+                router.push(bulkBatchHref(data.batch_id, data));
             } else if (data.run_ids) {
-                alert(`Successfully started ${data.count} test runs!`);
+                toast.success(bulkRunStartedMessage(data));
                 clearSelection();
                 router.push('/runs');
             }
         } catch (e) {
             console.error('Bulk run failed');
-            alert('Bulk run failed to start');
+            setBulkRunError('Bulk run failed to start');
+            toast.error('Bulk run failed to start');
+        } finally {
+            setIsStartingRun(false);
         }
     };
 
@@ -2965,6 +2980,7 @@ function SpecsPageContent() {
                     onClear={clearSelection}
                     label="Specs Selected"
                     extraControls={canEdit ? renderBrowserAuthSelect(true) : undefined}
+                    disabled={isStartingRun}
                     actions={[
                         {
                             id: 'export',
@@ -2989,6 +3005,8 @@ function SpecsPageContent() {
                             onClick: async () => {
                                 if (!canEdit) return;
                                 if (!validateBrowserAuthSelection(true)) return;
+                                setBulkRunError(null);
+                                setIsStartingRun(true);
                                 const automatedSpecs = Array.from(selectedSpecs).filter(name => {
                                     const spec = specs.find(s => s.name === name);
                                     return spec?.is_automated;
@@ -3006,22 +3024,27 @@ function SpecsPageContent() {
                                             ...selectedBrowserAuthBody()
                                         })
                                     });
-                                    const data = await res.json();
+                                    const data = await res.json() as BulkRunResponse;
                                     if (!res.ok) {
-                                        alert(data.detail || 'Failed to start automated tests');
+                                        const message = bulkRunErrorMessage(data, 'Failed to start automated tests');
+                                        setBulkRunError(message);
+                                        toast.error(message);
                                         return;
                                     }
                                     if (data.batch_id) {
-                                        alert(`Successfully started ${data.count} automated test runs!`);
+                                        toast.success(bulkRunStartedMessage(data, 'automated test run'));
                                         clearSelection();
-                                        router.push(`/regression/batches/${data.batch_id}`);
+                                        router.push(bulkBatchHref(data.batch_id, data));
                                     } else if (data.run_ids) {
-                                        alert(`Successfully started ${data.count} automated test runs!`);
+                                        toast.success(bulkRunStartedMessage(data, 'automated test run'));
                                         clearSelection();
                                         router.push('/runs');
                                     }
                                 } catch (e) {
-                                    alert('Failed to start automated tests');
+                                    setBulkRunError('Failed to start automated tests');
+                                    toast.error('Failed to start automated tests');
+                                } finally {
+                                    setIsStartingRun(false);
                                 }
                             },
                         },
@@ -3034,6 +3057,29 @@ function SpecsPageContent() {
                         },
                     ]}
                 />
+            )}
+
+            {activeTab === 'specs' && bulkRunError && selectedSpecs.size > 0 && (
+                <div
+                    role="status"
+                    style={{
+                        position: 'fixed',
+                        left: '50%',
+                        bottom: '7rem',
+                        transform: 'translateX(-50%)',
+                        zIndex: 101,
+                        maxWidth: 'min(560px, calc(100vw - 2rem))',
+                        border: '1px solid var(--danger)',
+                        background: 'var(--danger-muted)',
+                        color: 'var(--danger)',
+                        borderRadius: 8,
+                        padding: '0.75rem 1rem',
+                        fontSize: '0.85rem',
+                        boxShadow: 'var(--shadow-card)',
+                    }}
+                >
+                    {bulkRunError}
+                </div>
             )}
 
             {/* Export Modal */}

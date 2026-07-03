@@ -32,12 +32,18 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
 
             runs = session.exec(runtime.select(runtime.DBTestRun).where(runtime.DBTestRun.batch_id == batch_id)).all()
 
-            batch.total_tests = len(runs)
-            batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
-            batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
-            batch.stopped = sum(1 for r in runs if r.status in ("stopped", "cancelled"))
-            batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
-            batch.queued = sum(1 for r in runs if r.status == "queued")
+            scheduled_batch = bool(getattr(batch, "scheduler_status", None))
+            if scheduled_batch:
+                from orchestrator.services.scheduled_batch_executor import refresh_scheduled_batch_counts
+
+                refresh_scheduled_batch_counts(session, batch)
+            else:
+                batch.total_tests = len(runs)
+                batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
+                batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
+                batch.stopped = sum(1 for r in runs if r.status in ("stopped", "cancelled"))
+                batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
+                batch.queued = sum(1 for r in runs if r.status == "queued")
 
             if batch.running > 0 or batch.queued > 0:
                 batch.status = "running"
@@ -69,6 +75,13 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
 
             session.add(batch)
             session.commit()
+
+            if scheduled_batch and getattr(batch, "scheduler_status", None) in {"pending", "dispatching"}:
+                try:
+                    loop = runtime.asyncio.get_running_loop()
+                    loop.create_task(runtime._dispatch_scheduled_regression_batch(batch_id))
+                except RuntimeError:
+                    runtime.logger.debug("No running event loop available to dispatch scheduled batch %s", batch_id)
 
             if previous_status != "completed" and batch.status == "completed":
                 try:

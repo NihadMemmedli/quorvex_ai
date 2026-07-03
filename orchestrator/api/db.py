@@ -366,6 +366,46 @@ def _run_migrations():
             if "actual_failed" not in batch_columns:
                 conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_failed INTEGER"))
                 logger.info("Added column: regression_batches.actual_failed")
+            scheduled_batch_columns = {
+                "scheduler_status": "VARCHAR",
+                "scheduler_workflow_id": "VARCHAR",
+                "scheduler_run_id": "VARCHAR",
+                "chunk_size": "INTEGER",
+                "max_active_runs": "INTEGER",
+                "dispatch_total": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_started": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_completed": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_failed": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_cancelled": "INTEGER NOT NULL DEFAULT 0",
+                "next_spec_index": "INTEGER NOT NULL DEFAULT 0",
+                "scheduler_error": "TEXT",
+            }
+            for column_name, column_type in scheduled_batch_columns.items():
+                if column_name not in batch_columns:
+                    conn.execute(text(f"ALTER TABLE regression_batches ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: regression_batches.%s", column_name)
+
+        if "regression_batch_items" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            conn.execute(
+                text(f"""
+                CREATE TABLE regression_batch_items (
+                    id VARCHAR PRIMARY KEY,
+                    batch_id VARCHAR NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    spec_name VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    run_id VARCHAR,
+                    payload_json TEXT NOT NULL DEFAULT '{{}}',
+                    created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    started_at {timestamp_type},
+                    completed_at {timestamp_type},
+                    error_message TEXT,
+                    UNIQUE(batch_id, ordinal)
+                )
+            """)
+            )
+            logger.info("Created table: regression_batch_items")
 
         # Add project_id to specmetadata table
         if "specmetadata" in inspector.get_table_names():

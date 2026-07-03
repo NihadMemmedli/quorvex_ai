@@ -611,10 +611,17 @@ class BaseAgent:
         run_dir = Path(cwd or self.agent_cwd or os.getcwd())
         kwargs: dict[str, Any] = {
             "allowed_tools": config["allowed_tools"],
-            "tools": config.get("tools"),
             "setting_sources": ["project"],
             "permission_mode": self._resolved_permission_mode(),
         }
+        tools = config.get("tools")
+        if isinstance(tools, list) and any(str(tool).startswith("mcp__") for tool in tools):
+            mcp_path = run_dir / ".mcp.json"
+            if mcp_path.exists():
+                logger.info("[SDK DEBUG]   MCP tools requested; omitting SDK tools restriction so MCP tools can load")
+                tools = None
+        if tools is not None:
+            kwargs["tools"] = tools
         if stderr_callback is not None:
             kwargs["stderr"] = stderr_callback
         if self.model:

@@ -10,6 +10,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from orchestrator.api.agent_run_runtime_support import (
+    BrowserAuthPreflightResult,
+    _preflight_progress_payload,
+    _run_browser_auth_preflight,
+    _sanitize_preflight_url,
+)
 from orchestrator.utils.playwright_mcp import (
     display_aware_headless,
     display_capable_vnc_enabled,
@@ -373,6 +379,23 @@ def execute_run_task(
         storage_state_path=storage_state_path,
         agent_run_id=run_id,
     )
+    if storage_state_path:
+        try:
+            config_has_storage_state = (
+                playwright_config_dst.exists()
+                and "storageState:" in playwright_config_dst.read_text()
+            )
+            with runtime.Session(runtime.engine) as session:
+                run = session.get(runtime.DBTestRun, run_id)
+                if run:
+                    auth_context = dict(run.browser_auth or {})
+                    auth_context["storage_state_file_written"] = Path(storage_state_path).exists()
+                    auth_context["playwright_config_storage_state_attached"] = config_has_storage_state
+                    run.browser_auth = auth_context
+                    session.add(run)
+                    session.commit()
+        except Exception as exc:
+            runtime.logger.debug("Could not record browser auth storage state config status for %s: %s", run_id, exc)
     runtime._write_run_browser_metadata(
         run_dir_path,
         runtime._merge_run_browser_metadata(
@@ -1076,6 +1099,8 @@ def resolve_browser_auth_storage_state_for_run(
     run_dir: Path,
     browser_auth_session_id: str | None,
     use_project_default_browser_auth: bool,
+    target_url: str | None = None,
+    preflight_runner: Any = _run_browser_auth_preflight,
 ) -> tuple[str | None, dict[str, Any]]:
     browser_auth_session_id = (browser_auth_session_id or "").strip() or None
     intent: dict[str, Any] = {
@@ -1086,6 +1111,8 @@ def resolve_browser_auth_storage_state_for_run(
         "use_project_default_browser_auth": bool(use_project_default_browser_auth),
         "project_default_used": False,
         "storage_state_attached": False,
+        "storage_state_file_written": False,
+        "playwright_config_storage_state_attached": False,
     }
     if not runtime._has_browser_auth_selection(
         browser_auth_session_id=browser_auth_session_id,
@@ -1110,8 +1137,58 @@ def resolve_browser_auth_storage_state_for_run(
             "browser_auth_session_name": resolved.session_name,
             "project_default_used": bool(use_project_default_browser_auth),
             "storage_state_attached": True,
+            "storage_state_file_written": Path(resolved.storage_state_path).exists(),
         }
     )
+    target_url = str(target_url or "").strip()
+    if target_url:
+        preflight: BrowserAuthPreflightResult = preflight_runner(
+            storage_state_path=Path(resolved.storage_state_path),
+            target_url=target_url,
+        )
+        preflight_payload = _preflight_progress_payload(
+            preflight,
+            storage_state_attached=True,
+        )
+        preflight_payload["auth_preflight_target_url"] = _sanitize_preflight_url(target_url)
+        preflight_payload["auth_preflight_final_url"] = preflight_payload.get(
+            "auth_preflight_url"
+        )
+        intent.update(preflight_payload)
+        try:
+            artifact = {
+                key: value
+                for key, value in preflight_payload.items()
+                if key
+                in {
+                    "storage_state_attached",
+                    "auth_preflight_status",
+                    "auth_preflight_target_url",
+                    "auth_preflight_final_url",
+                    "auth_preflight_title",
+                    "auth_preflight_failure_kind",
+                    "auth_preflight_failure_reason",
+                }
+            }
+            (run_dir / "browser_auth_preflight.json").write_text(
+                json.dumps(artifact, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            runtime.logger.debug(
+                "Could not write browser auth preflight artifact for %s: %s",
+                run_dir,
+                exc,
+            )
+        if not preflight.passed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    preflight.failure_reason
+                    or "Saved browser session does not authenticate the target URL. "
+                    "Recapture the selected browser auth session for the application target."
+                ),
+            )
     return str(resolved.storage_state_path), intent
 
 
