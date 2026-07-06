@@ -104,6 +104,8 @@ def create_scheduled_regression_batch(
         actual_total_tests=actual_total_tests,
         actual_passed=0,
         actual_failed=0,
+        actual_skipped=0,
+        actual_other=0,
         status="pending",
         scheduler_status="pending",
         chunk_size=selected_chunk_size,

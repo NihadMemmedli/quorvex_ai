@@ -9,6 +9,7 @@ Mirrors the pattern from testrail_client.py.
 import asyncio
 import base64
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -31,18 +32,60 @@ class JiraError(Exception):
         super().__init__(message)
 
 
+class JiraTransientError(JiraError):
+    """Jira error that can reasonably be retried or circuit-broken."""
+
+
+JIRA_AUTH_CLOUD_BASIC = "cloud_basic"
+JIRA_AUTH_DATA_CENTER_PAT = "data_center_pat"
+JIRA_AUTH_MODES = {JIRA_AUTH_CLOUD_BASIC, JIRA_AUTH_DATA_CENTER_PAT}
+
+
+def summarize_jira_response(status_code: int, body: str, content_type: str = "") -> str:
+    """Return a short, UI-safe summary of Jira error responses."""
+    normalized_content_type = content_type.lower()
+    if "html" in normalized_content_type or "<html" in body.lower():
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", body, flags=re.IGNORECASE | re.DOTALL)
+        ref_match = re.search(r"Error reference:\s*([^<\s]+)", body, flags=re.IGNORECASE)
+        title = " ".join(title_match.group(1).split()) if title_match else "HTML error page"
+        message = f"Jira API {status_code}: {title}"
+        if ref_match:
+            message += f" (error reference: {ref_match.group(1)})"
+        return message
+
+    compact_body = " ".join(body.split())
+    if len(compact_body) > 500:
+        compact_body = compact_body[:497] + "..."
+    return f"Jira API {status_code}: {compact_body}"
+
+
 class JiraClient:
     """Async Jira REST API v2 client with rate limiting and retry."""
 
-    def __init__(self, base_url: str, email: str, api_token: str):
+    def __init__(
+        self,
+        base_url: str,
+        email: str,
+        api_token: str,
+        auth_mode: str = JIRA_AUTH_CLOUD_BASIC,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_prefix = self.base_url + "/rest/api/2/"
         self.email = email
         self.api_token = api_token
+        self.auth_mode = auth_mode if auth_mode in JIRA_AUTH_MODES else JIRA_AUTH_CLOUD_BASIC
         self._semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests
         self._client: httpx.AsyncClient | None = None
-        # Basic auth: base64(email:token) for both Cloud and Server
-        self._auth_header = "Basic " + base64.b64encode(f"{email}:{api_token}".encode()).decode()
+        self._auth_header = self._build_auth_header()
+        self.used_bearer_fallback = self.auth_mode == JIRA_AUTH_DATA_CENTER_PAT
+
+    def _build_auth_header(self) -> str:
+        if self.auth_mode == JIRA_AUTH_DATA_CENTER_PAT:
+            return f"Bearer {self.api_token}"
+        return "Basic " + base64.b64encode(f"{self.email}:{self.api_token}".encode()).decode()
+
+    def _bearer_auth_header(self) -> str:
+        return f"Bearer {self.api_token}"
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -126,7 +169,7 @@ class JiraClient:
 
     # ── Attachments ─────────────────────────────────────────────
 
-    @circuit(failure_threshold=5, recovery_timeout=60, expected_exception=Exception)
+    @circuit(failure_threshold=5, recovery_timeout=60, expected_exception=JiraTransientError)
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -165,11 +208,10 @@ class JiraClient:
 
     # ── Internal ────────────────────────────────────────────────
 
-    @circuit(failure_threshold=5, recovery_timeout=60, expected_exception=Exception)
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
+        retry=retry_if_exception_type(JiraTransientError),
         reraise=True,
     )
     async def _request(
@@ -189,6 +231,33 @@ class JiraClient:
                     client = self._get_client()
                     resp = await client.request(method, url, json=json, params=params)
 
+                    should_try_bearer = (
+                        self.auth_mode == JIRA_AUTH_CLOUD_BASIC
+                        and resp.status_code in {401, 403, 500}
+                        and (
+                            resp.status_code != 500
+                            or "html" in resp.headers.get("Content-Type", "").lower()
+                            or "<html" in resp.text[:500].lower()
+                        )
+                    )
+                    if should_try_bearer:
+                        bearer_resp = await client.request(
+                            method,
+                            url,
+                            json=json,
+                            params=params,
+                            headers={"Authorization": self._bearer_auth_header()},
+                        )
+                        if bearer_resp.status_code < 400:
+                            self.auth_mode = JIRA_AUTH_DATA_CENTER_PAT
+                            self._auth_header = self._bearer_auth_header()
+                            self.used_bearer_fallback = True
+                            if self._client and not self._client.is_closed:
+                                await self._client.aclose()
+                                self._client = None
+                            return {} if bearer_resp.status_code == 204 else bearer_resp.json()
+                        resp = bearer_resp
+
                     if resp.status_code == 429:
                         retry_after = int(resp.headers.get("Retry-After", 2 ** (attempt + 1)))
                         logger.warning("Jira rate limit hit, retrying in %ds", retry_after)
@@ -199,11 +268,14 @@ class JiraClient:
                         return {}
 
                     if resp.status_code >= 400:
-                        body = resp.text
-                        raise JiraError(
-                            f"Jira API {resp.status_code}: {body}",
-                            status_code=resp.status_code,
+                        body = summarize_jira_response(
+                            resp.status_code,
+                            resp.text,
+                            resp.headers.get("Content-Type", ""),
                         )
+                        if resp.status_code >= 500 or resp.status_code == 429:
+                            raise JiraTransientError(body, status_code=resp.status_code)
+                        raise JiraError(body, status_code=resp.status_code)
 
                     return resp.json()
 
@@ -211,11 +283,11 @@ class JiraClient:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2**attempt)
                         continue
-                    raise JiraError("Jira API request timed out")
+                    raise JiraTransientError("Jira API request timed out")
                 except httpx.HTTPError as e:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2**attempt)
                         continue
-                    raise JiraError(f"Jira connection error: {e}")
+                    raise JiraTransientError(f"Jira connection error: {e}")
 
-        raise JiraError("Max retries exceeded")
+        raise JiraTransientError("Max retries exceeded")

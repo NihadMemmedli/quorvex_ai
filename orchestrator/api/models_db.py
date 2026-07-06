@@ -1586,6 +1586,8 @@ class RegressionBatch(SQLModel, table=True):
     actual_total_tests: int | None = None
     actual_passed: int | None = None
     actual_failed: int | None = None
+    actual_skipped: int | None = None
+    actual_other: int | None = None
 
     # Durable scheduler state for large Run All batches. Small legacy batches
     # leave these fields empty and continue to use immediate fan-out.

@@ -160,7 +160,7 @@ def _count_tests_for_run(run: DBTestRun) -> int:
     return 1
 
 
-def _run_playwright_result_counts(run: DBTestRun) -> tuple[int, int, int] | None:
+def _run_playwright_result_counts(run: DBTestRun) -> tuple[int, int, int, int, int] | None:
     """Return per-test counts from Playwright JSON reporter artifacts when present."""
     run_dir = RUNS_DIR / run.id
     for results_path in (run_dir / "test-results.json", run_dir / "test-results" / "test-results.json"):
@@ -171,13 +171,15 @@ def _run_playwright_result_counts(run: DBTestRun) -> tuple[int, int, int] | None
         total = int(summary.get("total") or len(parsed.get("tests") or []))
         passed = int(summary.get("passed") or 0)
         failed = int(summary.get("failed") or 0)
-        return total, passed, failed
+        skipped = int(summary.get("skipped") or 0)
+        other = max(0, total - passed - failed - skipped)
+        return total, passed, failed, skipped, other
     return None
 
 
-def _run_actual_test_counts(run: DBTestRun, fallback_test_count: int) -> tuple[int, int, int]:
+def _run_actual_test_counts(run: DBTestRun, fallback_test_count: int) -> tuple[int, int, int, int, int]:
     """
-    Return (total, passed, failed) for one run.
+    Return (total, passed, failed, skipped, other) for one run.
 
     Playwright JSON reporter output is authoritative because it captures mixed
     outcomes inside a single spec file. The file-count fallback is only used
@@ -188,23 +190,29 @@ def _run_actual_test_counts(run: DBTestRun, fallback_test_count: int) -> tuple[i
         return parsed_counts
 
     if run.status in ("passed", "completed"):
-        return fallback_test_count, fallback_test_count, 0
+        return fallback_test_count, fallback_test_count, 0, 0, 0
     if run.status in ("failed", "error"):
-        return fallback_test_count, 0, fallback_test_count
-    return fallback_test_count, 0, 0
+        return fallback_test_count, 0, fallback_test_count, 0, 0
+    if run.status in ("skipped", "cancelled", "stopped"):
+        return fallback_test_count, 0, 0, fallback_test_count, 0
+    if run.status in ACTIVE_RUN_STATUSES or run.status == "pending":
+        return fallback_test_count, 0, 0, 0, 0
+    return fallback_test_count, 0, 0, 0, fallback_test_count
 
 
-def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]:
+def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int, int, int]:
     """
     Calculate actual test counts from Playwright results when available.
     Batches filesystem lookups by unique spec name to avoid redundant I/O.
 
     Returns:
-        Tuple of (actual_total, actual_passed, actual_failed)
+        Tuple of (actual_total, actual_passed, actual_failed, actual_skipped, actual_other)
     """
     actual_total = 0
     actual_passed = 0
     actual_failed = 0
+    actual_skipped = 0
+    actual_other = 0
 
     # Batch: compute test count per unique spec_name once
     spec_test_counts: dict[str, int] = {}
@@ -214,33 +222,51 @@ def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]
             spec_test_counts[run.spec_name] = count_tests_in_file(str(test_path)) if test_path else 1
 
     for run in runs:
-        total, passed, failed = _run_actual_test_counts(run, spec_test_counts[run.spec_name])
+        total, passed, failed, skipped, other = _run_actual_test_counts(run, spec_test_counts[run.spec_name])
         actual_total += total
         actual_passed += passed
         actual_failed += failed
+        actual_skipped += skipped
+        actual_other += other
 
-    return actual_total, actual_passed, actual_failed
+    return actual_total, actual_passed, actual_failed, actual_skipped, actual_other
 
 
 def _cache_actual_test_counts(
-    batch: RegressionBatch, actual_total: int, actual_passed: int, actual_failed: int, session: Session
+    batch: RegressionBatch,
+    actual_total: int,
+    actual_passed: int,
+    actual_failed: int,
+    actual_skipped: int,
+    actual_other: int,
+    session: Session,
 ) -> None:
     if (
         batch.actual_total_tests == actual_total
         and batch.actual_passed == actual_passed
         and batch.actual_failed == actual_failed
+        and batch.actual_skipped == actual_skipped
+        and batch.actual_other == actual_other
     ):
         return
     batch.actual_total_tests = actual_total
     batch.actual_passed = actual_passed
     batch.actual_failed = actual_failed
+    batch.actual_skipped = actual_skipped
+    batch.actual_other = actual_other
     session.add(batch)
     session.commit()
     session.refresh(batch)
 
 
 def _has_fresh_actual_test_count_cache(batch: RegressionBatch) -> bool:
-    if batch.actual_total_tests is None or batch.actual_passed is None or batch.actual_failed is None:
+    if (
+        batch.actual_total_tests is None
+        or batch.actual_passed is None
+        or batch.actual_failed is None
+        or batch.actual_skipped is None
+        or batch.actual_other is None
+    ):
         return False
 
     # Failed batches may have old fallback counts where one failed test made
@@ -249,7 +275,11 @@ def _has_fresh_actual_test_count_cache(batch: RegressionBatch) -> bool:
         return False
 
     completed_result_files = batch.passed + batch.failed
-    if completed_result_files > 0 and batch.actual_passed + batch.actual_failed < completed_result_files:
+    if (
+        completed_result_files > 0
+        and batch.actual_passed + batch.actual_failed + batch.actual_skipped + batch.actual_other
+        < completed_result_files
+    ):
         return False
 
     return True
@@ -556,6 +586,8 @@ def _batch_to_summary(
     actual_total: int | None = None,
     actual_passed: int | None = None,
     actual_failed: int | None = None,
+    actual_skipped: int | None = None,
+    actual_other: int | None = None,
 ) -> RegressionBatchSummary:
     """Convert database batch to summary response."""
     success_rate = batch.success_rate
@@ -581,6 +613,8 @@ def _batch_to_summary(
         actual_total_tests=actual_total,
         actual_passed=actual_passed,
         actual_failed=actual_failed,
+        actual_skipped=actual_skipped,
+        actual_other=actual_other,
         project_id=batch.project_id,
         scheduler_status=batch.scheduler_status,
         chunk_size=batch.chunk_size,
@@ -709,13 +743,16 @@ def list_batches(
     summaries = []
     for batch in batches:
         actual_total, actual_passed, actual_failed = None, None, None
+        actual_skipped, actual_other = None, None
 
         # Use cached values from DB by default. Full artifact recounts are
         # intentionally opt-in because large batches can contain 100k+ runs.
         if include_actual_counts:
             runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch.id)).all()
-            actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
-            _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
+            actual_total, actual_passed, actual_failed, actual_skipped, actual_other = _calculate_actual_test_counts(runs)
+            _cache_actual_test_counts(
+                batch, actual_total, actual_passed, actual_failed, actual_skipped, actual_other, session
+            )
         elif (
             batch.actual_total_tests is not None
             and batch.actual_passed is not None
@@ -724,10 +761,17 @@ def list_batches(
             actual_total = batch.actual_total_tests
             actual_passed = batch.actual_passed
             actual_failed = batch.actual_failed
+            actual_skipped = batch.actual_skipped
+            actual_other = batch.actual_other
 
         summaries.append(
             _batch_to_summary(
-                batch, actual_total=actual_total, actual_passed=actual_passed, actual_failed=actual_failed
+                batch,
+                actual_total=actual_total,
+                actual_passed=actual_passed,
+                actual_failed=actual_failed,
+                actual_skipped=actual_skipped,
+                actual_other=actual_other,
             )
         )
 
@@ -785,14 +829,20 @@ def get_batch_detail(
     actual_total = batch.actual_total_tests
     actual_passed = batch.actual_passed
     actual_failed = batch.actual_failed
+    actual_skipped = batch.actual_skipped
+    actual_other = batch.actual_other
     if include_actual_counts and runs_total <= 5000:
         all_runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all()
-        actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(all_runs)
-        _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
+        actual_total, actual_passed, actual_failed, actual_skipped, actual_other = _calculate_actual_test_counts(all_runs)
+        _cache_actual_test_counts(
+            batch, actual_total, actual_passed, actual_failed, actual_skipped, actual_other, session
+        )
     elif actual_total is None or actual_passed is None or actual_failed is None:
         actual_total = batch.total_tests
         actual_passed = batch.passed
         actual_failed = batch.failed
+        actual_skipped = None
+        actual_other = None
 
     actual_success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0
 
@@ -837,6 +887,8 @@ def get_batch_detail(
         actual_total_tests=actual_total,
         actual_passed=actual_passed,
         actual_failed=actual_failed,
+        actual_skipped=actual_skipped,
+        actual_other=actual_other,
         project_id=batch.project_id,
         scheduler_status=batch.scheduler_status,
         chunk_size=batch.chunk_size,
@@ -898,16 +950,25 @@ def refresh_batch_stats(batch_id: str, session: Session = Depends(get_session)):
     _apply_batch_status_counts(batch, runs)
 
     # Cache actual test counts (D1 performance fix)
-    actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+    actual_total, actual_passed, actual_failed, actual_skipped, actual_other = _calculate_actual_test_counts(runs)
 
     session.add(batch)
     batch.actual_total_tests = actual_total
     batch.actual_passed = actual_passed
     batch.actual_failed = actual_failed
+    batch.actual_skipped = actual_skipped
+    batch.actual_other = actual_other
     session.commit()
     session.refresh(batch)
 
-    return _batch_to_summary(batch, actual_total=actual_total, actual_passed=actual_passed, actual_failed=actual_failed)
+    return _batch_to_summary(
+        batch,
+        actual_total=actual_total,
+        actual_passed=actual_passed,
+        actual_failed=actual_failed,
+        actual_skipped=actual_skipped,
+        actual_other=actual_other,
+    )
 
 
 @router.post("/batches/{batch_id}/cancel")
@@ -1028,19 +1089,23 @@ def cancel_batch_runs(
 def generate_batch_html_report(
     batch: RegressionBatch,
     tests: list[dict],
-    actual_counts: tuple[int, int, int] | None = None,
+    actual_counts: tuple[int, int, int, int, int] | None = None,
 ) -> str:
     """Generate a standalone HTML report for the batch."""
 
     # Calculate stats
     if actual_counts is not None:
-        total_actual_tests, passed_count, failed_count = actual_counts
+        total_actual_tests, passed_count, failed_count, skipped_count, other_count = actual_counts
     else:
         total_actual_tests = sum(int(t.get("actual_test_count") or 1) for t in tests)
         passed_count = sum(
             int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("passed", "completed")
         )
         failed_count = sum(int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("failed", "error"))
+        skipped_count = sum(
+            int(t.get("actual_test_count") or 1) for t in tests if t["status"] in ("skipped", "stopped", "cancelled")
+        )
+        other_count = max(0, total_actual_tests - passed_count - failed_count - skipped_count)
     sum(1 for t in tests if t["status"] == "stopped")
     success_rate = round((passed_count / total_actual_tests * 100), 1) if total_actual_tests else 0
 
@@ -1225,6 +1290,15 @@ def generate_batch_html_report(
     hybrid_html = ""
     if batch.hybrid_mode:
         hybrid_html = '<span class="hybrid-badge">Extended Healing</span>'
+
+    other_card_html = ""
+    if other_count > 0:
+        other_card_html = f"""
+            <div class="card stat-card">
+                <div class="stat-value">{other_count}</div>
+                <div class="stat-label">Other</div>
+            </div>
+        """
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1736,6 +1810,11 @@ def generate_batch_html_report(
                 <div class="stat-value" style="color: var(--danger)">{failed_count}</div>
                 <div class="stat-label">Failed</div>
             </div>
+            <div class="card stat-card warning">
+                <div class="stat-value" style="color: var(--warning)">{skipped_count}</div>
+                <div class="stat-label">Skipped</div>
+            </div>
+            {other_card_html}
             <div class="card stat-card" style="border-left: 3px solid {get_rate_color(success_rate)}">
                 <div class="stat-value" style="color: {get_rate_color(success_rate)}">{success_rate}%</div>
                 <div class="stat-label">Success Rate</div>
@@ -1826,10 +1905,12 @@ def export_batch(
             }
         )
 
-    actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+    actual_total, actual_passed, actual_failed, actual_skipped, actual_other = _calculate_actual_test_counts(runs)
     batch.actual_total_tests = actual_total
     batch.actual_passed = actual_passed
     batch.actual_failed = actual_failed
+    batch.actual_skipped = actual_skipped
+    batch.actual_other = actual_other
     session.add(batch)
     session.commit()
 
@@ -1873,7 +1954,9 @@ def export_batch(
                     pass  # Skip if run.json is invalid or unreadable
 
         # Generate HTML report with run details
-        html_content = generate_batch_html_report(batch, tests, (actual_total, actual_passed, actual_failed))
+        html_content = generate_batch_html_report(
+            batch, tests, (actual_total, actual_passed, actual_failed, actual_skipped, actual_other)
+        )
         return Response(
             content=html_content,
             media_type="text/html",
@@ -1895,12 +1978,16 @@ def export_batch(
                 "total_files": batch.total_tests,
                 "passed": actual_passed,
                 "failed": actual_failed,
+                "skipped": actual_skipped,
+                "other": actual_other,
                 "stopped": batch.stopped,
                 "success_rate": round((actual_passed / actual_total * 100), 1) if actual_total else 0,
                 "duration_seconds": batch.duration_seconds,
                 "actual_total_tests": actual_total,
                 "actual_passed": actual_passed,
                 "actual_failed": actual_failed,
+                "actual_skipped": actual_skipped,
+                "actual_other": actual_other,
             },
             tests=tests,
         )
@@ -2169,6 +2256,7 @@ def batch_trend(
     trend = []
     for b in reversed(batches):  # oldest first for chart
         actual_total, actual_passed, actual_failed = None, None, None
+        actual_skipped, actual_other = None, None
         if (
             b.actual_total_tests is not None
             and b.actual_passed is not None
@@ -2177,6 +2265,8 @@ def batch_trend(
             actual_total = b.actual_total_tests
             actual_passed = b.actual_passed
             actual_failed = b.actual_failed
+            actual_skipped = b.actual_skipped
+            actual_other = b.actual_other
         success_rate = b.success_rate
         if actual_total is not None and actual_passed is not None:
             success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0
@@ -2188,6 +2278,8 @@ def batch_trend(
                 "success_rate": success_rate,
                 "passed": actual_passed if actual_passed is not None else b.passed,
                 "failed": actual_failed if actual_failed is not None else b.failed,
+                "skipped": actual_skipped,
+                "other": actual_other,
                 "total": actual_total if actual_total is not None else b.total_tests,
             }
         )

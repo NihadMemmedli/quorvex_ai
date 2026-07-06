@@ -100,10 +100,14 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
                     try:
                         from .regression import _calculate_actual_test_counts
 
-                        actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+                        actual_total, actual_passed, actual_failed, actual_skipped, actual_other = (
+                            _calculate_actual_test_counts(runs)
+                        )
                         batch.actual_total_tests = actual_total
                         batch.actual_passed = actual_passed
                         batch.actual_failed = actual_failed
+                        batch.actual_skipped = actual_skipped
+                        batch.actual_other = actual_other
                     except Exception as count_err:
                         runtime.logger.warning(f"Failed to cache actual test counts for {batch_id}: {count_err}")
             elif batch.total_tests == 0:
@@ -124,10 +128,14 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
                     from .regression import _calculate_actual_test_counts
 
                     runs = session.exec(runtime.select(runtime.DBTestRun).where(runtime.DBTestRun.batch_id == batch_id)).all()
-                    actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+                    actual_total, actual_passed, actual_failed, actual_skipped, actual_other = (
+                        _calculate_actual_test_counts(runs)
+                    )
                     batch.actual_total_tests = actual_total
                     batch.actual_passed = actual_passed
                     batch.actual_failed = actual_failed
+                    batch.actual_skipped = actual_skipped
+                    batch.actual_other = actual_other
                 except Exception as count_err:
                     runtime.logger.warning(f"Failed to cache actual test counts for {batch_id}: {count_err}")
 

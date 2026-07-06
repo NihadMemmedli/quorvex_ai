@@ -141,6 +141,8 @@ test.skip('third flow', async () => {});
             assert batch.actual_total_tests == 3
             assert batch.actual_passed == 0
             assert batch.actual_failed == 0
+            assert batch.actual_skipped == 0
+            assert batch.actual_other == 0
 
         import orchestrator.api.regression as regression_module
 
@@ -155,6 +157,8 @@ test.skip('third flow', async () => {});
             detail = detail_response.json()
             assert detail["total_tests"] == 1
             assert detail["actual_total_tests"] == 3
+            assert detail["actual_skipped"] == 0
+            assert detail["actual_other"] == 0
             assert detail["runs"][0]["actual_test_count"] == 3
 
         with Session(engine) as session:
@@ -241,6 +245,8 @@ test('third flow', async () => {});
             assert batch["actual_total_tests"] == 3
             assert batch["actual_passed"] == 3
             assert batch["actual_failed"] == 0
+            assert batch["actual_skipped"] == 0
+            assert batch["actual_other"] == 0
 
         with Session(engine) as session:
             cached = session.get(RegressionBatch, batch_id)
@@ -345,6 +351,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert detail["actual_total_tests"] == 10
             assert detail["actual_passed"] == 9
             assert detail["actual_failed"] == 1
+            assert detail["actual_skipped"] == 0
+            assert detail["actual_other"] == 0
             assert detail["success_rate"] == 90.0
             assert detail["runs"][0]["actual_test_count"] == 10
 
@@ -354,6 +362,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert batch["actual_total_tests"] == 10
             assert batch["actual_passed"] == 9
             assert batch["actual_failed"] == 1
+            assert batch["actual_skipped"] == 0
+            assert batch["actual_other"] == 0
             assert batch["success_rate"] == 90.0
 
             export_response = client.get(f"/regression/batches/{batch_id}/export?format=json")
@@ -362,6 +372,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert summary["actual_total_tests"] == 10
             assert summary["actual_passed"] == 9
             assert summary["actual_failed"] == 1
+            assert summary["actual_skipped"] == 0
+            assert summary["actual_other"] == 0
             assert summary["success_rate"] == 90.0
 
         with Session(engine) as session:
@@ -369,6 +381,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert cached is not None
             assert cached.actual_passed == 9
             assert cached.actual_failed == 1
+            assert cached.actual_skipped == 0
+            assert cached.actual_other == 0
     finally:
         with Session(engine) as session:
             for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
@@ -448,6 +462,8 @@ test('third flow', async () => {});
             assert detail["actual_total_tests"] == 3
             assert detail["actual_passed"] == 0
             assert detail["actual_failed"] == 3
+            assert detail["actual_skipped"] == 0
+            assert detail["actual_other"] == 0
             assert detail["success_rate"] == 0.0
     finally:
         with Session(engine) as session:
@@ -460,6 +476,90 @@ test('third flow', async () => {});
             if project:
                 session.delete(project)
             session.commit()
+
+
+def test_actual_counts_include_playwright_skipped_and_unknown_statuses(tmp_path, monkeypatch):
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    import orchestrator.api.regression as regression_module
+
+    run_id = f"run_{uuid4().hex}"
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / run_id
+    generated_dir = tmp_path / "tests" / "generated"
+    run_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    (generated_dir / "mixed-status.spec.ts").write_text(
+        """
+import { test } from '@playwright/test';
+
+test('passed flow', async () => {});
+test('failed flow', async () => {});
+test.skip('skipped flow', async () => {});
+test('unknown flow', async () => {});
+""",
+        encoding="utf-8",
+    )
+    (run_dir / "test-results.json").write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "title": "mixed-status.spec.ts",
+                        "specs": [
+                            {
+                                "title": "passed flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [{"results": [{"status": "passed", "duration": 1}]}],
+                            },
+                            {
+                                "title": "failed flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "duration": 1,
+                                                "error": {"message": "Expected value to match"},
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "title": "skipped flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [{"results": [{"status": "skipped", "duration": 0}]}],
+                            },
+                            {
+                                "title": "unknown flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [{"results": [{"status": "flaky", "duration": 1}]}],
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(regression_module, "RUNS_DIR", runs_dir)
+    monkeypatch.setattr(regression_module, "TESTS_DIR", generated_dir)
+
+    counts = regression_module._calculate_actual_test_counts(
+        [
+            DBTestRun(
+                id=run_id,
+                spec_name="mixed-status.md",
+                status="failed",
+                batch_id=f"batch_{uuid4().hex}",
+                project_id="default",
+            )
+        ]
+    )
+
+    assert counts == (4, 1, 1, 1, 1)
 
 
 def test_batch_detail_paginates_runs_without_full_count_recalculation(monkeypatch):

@@ -238,6 +238,8 @@ class RegressionBatchSummary(BaseModel):
     actual_total_tests: int | None = None  # Total individual tests across all files
     actual_passed: int | None = None
     actual_failed: int | None = None
+    actual_skipped: int | None = None
+    actual_other: int | None = None
     project_id: str | None = None
     scheduler_status: str | None = None
     chunk_size: int | None = None

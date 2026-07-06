@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
+import { deriveBatchDisplayCounts } from '@/lib/batch-counts';
 import { useRequiredProject } from '@/contexts/ProjectContext';
 import { useProjectRole } from '@/hooks/useProjectRole';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -61,6 +62,8 @@ interface BatchDetail {
     actual_total_tests: number | null;
     actual_passed: number | null;
     actual_failed: number | null;
+    actual_skipped?: number | null;
+    actual_other?: number | null;
     project_id: string | null;
     scheduler_status: string | null;
     chunk_size: number | null;
@@ -567,10 +570,13 @@ export default function BatchDetailPage() {
     const scheduledCount = searchParams.get('count') || (batch.dispatch_total ? String(batch.dispatch_total) : null);
     const scheduledChunkSize = searchParams.get('chunk_size') || (batch.chunk_size ? String(batch.chunk_size) : null);
     const scheduledMaxActiveRuns = searchParams.get('max_active_runs') || (batch.max_active_runs ? String(batch.max_active_runs) : null);
-    const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
-    const displayedPassed = batch.actual_passed ?? batch.passed;
-    const displayedFailed = batch.actual_failed ?? batch.failed;
-    const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
+    const displayCounts = deriveBatchDisplayCounts(batch);
+    const displayedTotal = displayCounts.total;
+    const displayedPassed = displayCounts.passed;
+    const displayedFailed = displayCounts.failed;
+    const displayedSkipped = displayCounts.skipped;
+    const displayedOther = displayCounts.other;
+    const displayedSuccessRate = displayCounts.successRate;
 
     const sortedRuns = batch.runs;
     const runsStart = batch.runs_total === 0 ? 0 : batch.runs_offset + 1;
@@ -693,7 +699,7 @@ export default function BatchDetailPage() {
             </div>
 
             {/* Summary Cards */}
-            <div className="animate-in stagger-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
+            <div className="animate-in stagger-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))', gap: '1rem', marginBottom: '2rem' }}>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center' }}>
                     <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{displayedTotal}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Total Tests</div>
@@ -706,6 +712,16 @@ export default function BatchDetailPage() {
                     <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--danger)' }}>{displayedFailed}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Failed</div>
                 </div>
+                <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: '3px solid var(--warning)' }}>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--warning)' }}>{displayedSkipped}</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Skipped</div>
+                </div>
+                {displayedOther > 0 && (
+                    <div className="card" style={{ padding: '1.25rem', textAlign: 'center' }}>
+                        <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{displayedOther}</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Other</div>
+                    </div>
+                )}
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: `3px solid ${getSuccessRateColor(displayedSuccessRate)}` }}>
                     <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: getSuccessRateColor(displayedSuccessRate) }}>{displayedSuccessRate}%</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Success Rate</div>

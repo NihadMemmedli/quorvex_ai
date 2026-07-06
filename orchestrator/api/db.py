@@ -320,6 +320,11 @@ def _run_migrations():
                         stopped INTEGER NOT NULL DEFAULT 0,
                         running INTEGER NOT NULL DEFAULT 0,
                         queued INTEGER NOT NULL DEFAULT 0,
+                        actual_total_tests INTEGER,
+                        actual_passed INTEGER,
+                        actual_failed INTEGER,
+                        actual_skipped INTEGER,
+                        actual_other INTEGER,
                         status VARCHAR NOT NULL DEFAULT 'pending'
                     )
                 """)
@@ -344,6 +349,11 @@ def _run_migrations():
                         stopped INTEGER NOT NULL DEFAULT 0,
                         running INTEGER NOT NULL DEFAULT 0,
                         queued INTEGER NOT NULL DEFAULT 0,
+                        actual_total_tests INTEGER,
+                        actual_passed INTEGER,
+                        actual_failed INTEGER,
+                        actual_skipped INTEGER,
+                        actual_other INTEGER,
                         status VARCHAR NOT NULL DEFAULT 'pending'
                     )
                 """)
@@ -366,6 +376,12 @@ def _run_migrations():
             if "actual_failed" not in batch_columns:
                 conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_failed INTEGER"))
                 logger.info("Added column: regression_batches.actual_failed")
+            if "actual_skipped" not in batch_columns:
+                conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_skipped INTEGER"))
+                logger.info("Added column: regression_batches.actual_skipped")
+            if "actual_other" not in batch_columns:
+                conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_other INTEGER"))
+                logger.info("Added column: regression_batches.actual_other")
             scheduled_batch_columns = {
                 "scheduler_status": "VARCHAR",
                 "scheduler_workflow_id": "VARCHAR",

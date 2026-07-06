@@ -317,6 +317,8 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
         actual_total_tests=actual_total_tests,
         actual_passed=0,
         actual_failed=0,
+        actual_skipped=0,
+        actual_other=0,
         status="pending",
     )
     session.add(batch)

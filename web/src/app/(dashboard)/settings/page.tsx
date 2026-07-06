@@ -76,6 +76,8 @@ interface AssistantSettings {
     assistant_runtime: string;
 }
 
+type JiraAuthMode = 'cloud_basic' | 'data_center_pat';
+
 type ClaudeTokenSetupPhase = 'idle' | 'checking_cli' | 'running_claude' | 'saving_token' | 'success' | 'manual_fallback';
 
 interface ClaudeTokenSetupState {
@@ -206,6 +208,7 @@ export default function SettingsPage() {
     // Jira integration state
     const [jiraUrl, setJiraUrl] = useState('');
     const [jiraEmail, setJiraEmail] = useState('');
+    const [jiraAuthMode, setJiraAuthMode] = useState<JiraAuthMode>('cloud_basic');
     const [jiraApiToken, setJiraApiToken] = useState('');
     const [jiraApiTokenMasked, setJiraApiTokenMasked] = useState('');
     const [showJiraApiToken, setShowJiraApiToken] = useState(false);
@@ -383,6 +386,7 @@ export default function SettingsPage() {
                 if (data.configured) {
                     setJiraUrl(data.base_url || '');
                     setJiraEmail(data.email || '');
+                    setJiraAuthMode(data.auth_mode === 'data_center_pat' ? 'data_center_pat' : 'cloud_basic');
                     setJiraApiToken('');
                     setJiraApiTokenMasked(data.api_token_masked || '');
                     setJiraProjectKey(data.project_key || null);
@@ -411,6 +415,7 @@ export default function SettingsPage() {
                 } else {
                     setJiraUrl('');
                     setJiraEmail('');
+                    setJiraAuthMode('cloud_basic');
                     setJiraApiToken('');
                     setJiraProjectKey(null);
                     setJiraIssueTypeId(null);
@@ -897,23 +902,30 @@ export default function SettingsPage() {
     // ── Jira handlers ────────────────────────────────────────────
 
     const handleJiraTestConnection = async () => {
-        if (!currentProject?.id || !jiraUrl || !jiraEmail || (!jiraApiToken && !jiraConfigured)) return;
+        const jiraEmailRequired = jiraAuthMode === 'cloud_basic';
+        if (!currentProject?.id || !jiraUrl || (jiraEmailRequired && !jiraEmail) || (!jiraApiToken && !jiraConfigured)) return;
         setJiraTesting(true);
         setJiraConnectionStatus(null);
 
         try {
+            const configBody: any = {
+                base_url: jiraUrl,
+                email: jiraEmail,
+                auth_mode: jiraAuthMode,
+                project_key: jiraProjectKey,
+                issue_type_id: jiraIssueTypeId,
+            };
             if (jiraApiToken) {
-                await fetch(`${API_BASE}/jira/${encodeURIComponent(currentProject.id)}/config`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        base_url: jiraUrl,
-                        email: jiraEmail,
-                        api_token: jiraApiToken,
-                        project_key: jiraProjectKey,
-                        issue_type_id: jiraIssueTypeId,
-                    })
-                });
+                configBody.api_token = jiraApiToken;
+            }
+            const configRes = await fetch(`${API_BASE}/jira/${encodeURIComponent(currentProject.id)}/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(configBody),
+            });
+            if (!configRes.ok) {
+                const configData = await configRes.json();
+                throw new Error(configData.detail || 'Failed to save Jira config before testing');
             }
 
             const res = await fetch(`${API_BASE}/jira/${encodeURIComponent(currentProject.id)}/test-connection`, {
@@ -977,6 +989,7 @@ export default function SettingsPage() {
             const body: any = {
                 base_url: jiraUrl,
                 email: jiraEmail,
+                auth_mode: jiraAuthMode,
                 project_key: jiraProjectKey,
                 issue_type_id: jiraIssueTypeId,
             };
@@ -1012,6 +1025,7 @@ export default function SettingsPage() {
             setJiraConfigured(false);
             setJiraUrl('');
             setJiraEmail('');
+            setJiraAuthMode('cloud_basic');
             setJiraApiToken('');
             setJiraApiTokenMasked('');
             setJiraProjectKey(null);
@@ -2292,9 +2306,34 @@ export default function SettingsPage() {
                             </div>
                         </div>
 
+                        {/* Auth Mode */}
+                        <div className="form-group">
+                            <label className="label">Authentication</label>
+                            <div className="input-group">
+                                <div className="input-icon">
+                                    <Shield size={18} />
+                                </div>
+                                <select
+                                    value={jiraAuthMode}
+                                    onChange={e => setJiraAuthMode(e.target.value === 'data_center_pat' ? 'data_center_pat' : 'cloud_basic')}
+                                    className="input has-icon"
+                                >
+                                    <option value="cloud_basic">Jira Cloud API token</option>
+                                    <option value="data_center_pat">Jira Data Center personal access token</option>
+                                </select>
+                            </div>
+                        </div>
+
                         {/* Email */}
                         <div className="form-group">
-                            <label className="label">Email</label>
+                            <label className="label">
+                                Email
+                                {jiraAuthMode === 'data_center_pat' && (
+                                    <span style={{ color: 'var(--text-secondary)', fontWeight: 400, marginLeft: '0.5rem', fontSize: '0.85rem' }}>
+                                        (not used for Data Center PAT)
+                                    </span>
+                                )}
+                            </label>
                             <div className="input-group">
                                 <div className="input-icon">
                                     <Mail size={18} />
@@ -2305,6 +2344,7 @@ export default function SettingsPage() {
                                     onChange={e => setJiraEmail(e.target.value)}
                                     placeholder="user@company.com"
                                     className="input has-icon"
+                                    disabled={jiraAuthMode === 'data_center_pat'}
                                 />
                             </div>
                         </div>
@@ -2341,7 +2381,11 @@ export default function SettingsPage() {
                                 </button>
                             </div>
                             <p className="helper-text">
-                                Generate an API token at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>Atlassian Account Settings</a>
+                                {jiraAuthMode === 'cloud_basic' ? (
+                                    <>Generate an API token at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>Atlassian Account Settings</a></>
+                                ) : (
+                                    <>Use a Jira Data Center personal access token. Quorvex sends it as a Bearer token.</>
+                                )}
                             </p>
                         </div>
 
@@ -2351,7 +2395,7 @@ export default function SettingsPage() {
                                 type="button"
                                 className="btn btn-secondary"
                                 onClick={handleJiraTestConnection}
-                                disabled={jiraTesting || !jiraUrl || !jiraEmail || (!jiraApiToken && !jiraConfigured)}
+                                disabled={jiraTesting || !jiraUrl || (jiraAuthMode === 'cloud_basic' && !jiraEmail) || (!jiraApiToken && !jiraConfigured)}
                                 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                             >
                                 {jiraTesting ? <Loader2 size={16} className="animate-spin" style={{ animation: 'spin 1s linear infinite' }} /> : <Link2 size={16} />}
@@ -2442,7 +2486,7 @@ export default function SettingsPage() {
                                     type="button"
                                     className="btn btn-primary"
                                     onClick={handleJiraSave}
-                                    disabled={jiraSaving || !jiraUrl || !jiraEmail}
+                                    disabled={jiraSaving || !jiraUrl || (jiraAuthMode === 'cloud_basic' && !jiraEmail)}
                                     style={{
                                         minWidth: '140px',
                                         justifyContent: 'center',

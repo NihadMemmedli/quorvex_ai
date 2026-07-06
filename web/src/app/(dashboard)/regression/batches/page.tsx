@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRequiredProject } from '@/contexts/ProjectContext';
 import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
+import { deriveBatchDisplayCounts } from '@/lib/batch-counts';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -31,6 +32,8 @@ interface RegressionBatch {
     actual_total_tests: number | null;
     actual_passed: number | null;
     actual_failed: number | null;
+    actual_skipped?: number | null;
+    actual_other?: number | null;
 }
 
 interface PaginatedResponse {
@@ -334,14 +337,18 @@ export default function BatchListPage() {
                 <div className="animate-in stagger-2" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                     {batches.map(batch => {
                         const status = getStatusConfig(batch.status);
-                        const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
-                        const displayedPassed = batch.actual_passed ?? batch.passed;
-                        const displayedFailed = batch.actual_failed ?? batch.failed;
-                        const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
+                        const displayCounts = deriveBatchDisplayCounts(batch);
+                        const displayedTotal = displayCounts.total;
+                        const displayedPassed = displayCounts.passed;
+                        const displayedFailed = displayCounts.failed;
+                        const displayedSkipped = displayCounts.skipped;
+                        const displayedOther = displayCounts.other;
+                        const displayedSuccessRate = displayCounts.successRate;
                         const total_t = displayedTotal || 1;
                         const passedPct = (displayedPassed / total_t) * 100;
                         const failedPct = (displayedFailed / total_t) * 100;
-                        const stoppedPct = (batch.stopped / (batch.total_tests || 1)) * 100;
+                        const skippedPct = (displayedSkipped / total_t) * 100;
+                        const stoppedPct = displayedSkipped > 0 ? 0 : (batch.stopped / (batch.total_tests || 1)) * 100;
 
                         return (
                             <div
@@ -451,6 +458,9 @@ export default function BatchListPage() {
                                             {failedPct > 0 && (
                                                 <div style={{ width: `${failedPct}%`, background: 'var(--danger)', transition: 'width 0.3s' }} />
                                             )}
+                                            {skippedPct > 0 && (
+                                                <div style={{ width: `${skippedPct}%`, background: 'var(--warning)', transition: 'width 0.3s' }} />
+                                            )}
                                             {stoppedPct > 0 && (
                                                 <div style={{ width: `${stoppedPct}%`, background: 'var(--warning)', transition: 'width 0.3s' }} />
                                             )}
@@ -466,6 +476,16 @@ export default function BatchListPage() {
                                         {displayedFailed > 0 && (
                                             <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
                                                 {displayedFailed} failed
+                                            </span>
+                                        )}
+                                        {displayedSkipped > 0 && (
+                                            <span style={{ color: 'var(--warning)', fontWeight: 600 }}>
+                                                {displayedSkipped} skipped
+                                            </span>
+                                        )}
+                                        {displayedOther > 0 && (
+                                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+                                                {displayedOther} other
                                             </span>
                                         )}
                                         {batch.running > 0 && (
