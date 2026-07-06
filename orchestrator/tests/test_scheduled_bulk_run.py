@@ -150,6 +150,7 @@ def test_bulk_run_scheduled_mode_starts_only_bounded_initial_slice(tmp_path, mon
         lambda *args, **kwargs: (None, {"mode": "none", "storage_state_attached": False}),
     )
     monkeypatch.setattr(main_module, "_start_test_run_temporal_or_fail", fake_start_test_run_temporal_or_fail)
+    monkeypatch.setattr(main_module, "BROWSER_POOL", type("FakePool", (), {"effective_max_browsers": 5})())
 
     init_db()
     created_batch_id = None
@@ -173,8 +174,8 @@ def test_bulk_run_scheduled_mode_starts_only_bounded_initial_slice(tmp_path, mon
         assert body["mode"] == "scheduled"
         assert body["scheduled"] is True
         assert body["run_ids"] == []
-        assert body["dispatched"] == 2
-        assert len(started_run_ids) == 2
+        assert body["dispatched"] == 4
+        assert len(started_run_ids) == 4
 
         with Session(engine) as session:
             batch = session.get(RegressionBatch, created_batch_id)
@@ -186,13 +187,13 @@ def test_bulk_run_scheduled_mode_starts_only_bounded_initial_slice(tmp_path, mon
             assert batch is not None
             assert batch.scheduler_status == "dispatching"
             assert batch.dispatch_total == 5
-            assert batch.dispatch_started == 2
+            assert batch.dispatch_started == 4
             assert batch.chunk_size == 4
-            assert batch.max_active_runs == 2
-            assert len(runs) == 2
+            assert batch.max_active_runs == 5
+            assert len(runs) == 4
             runs_by_id = {run.id: run for run in runs}
-            assert sum(1 for item in items if item.status == "queued" and item.run_id) == 2
-            assert sum(1 for item in items if item.status == "pending" and not item.run_id) == 3
+            assert sum(1 for item in items if item.status == "queued" and item.run_id) == 4
+            assert sum(1 for item in items if item.status == "pending" and not item.run_id) == 1
             assert all(
                 item.run_id in runs_by_id
                 for item in items

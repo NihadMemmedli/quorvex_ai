@@ -3360,15 +3360,17 @@ class TestExecutionSettings:
         monkeypatch.setattr(main_module, "is_parallel_mode_available", lambda: True)
         monkeypatch.setenv("VNC_ENABLED", "true")
         monkeypatch.setenv("DISPLAY", ":99")
-        monkeypatch.setenv("HEADLESS", "true")
-        monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "true")
+        monkeypatch.setenv("HEADLESS", "false")
+        monkeypatch.setenv("PLAYWRIGHT_HEADLESS", "false")
 
-        response = client.put("/execution-settings", json={"parallelism": 3, "headless_in_parallel": True})
+        response = client.put("/execution-settings", json={"parallelism": 5, "headless_in_parallel": True})
 
         assert response.status_code == 200, response.text
         assert pool.updated_to == response.json()["parallelism"]
         assert pool.requested_max_browsers == response.json()["parallelism"]
         assert pool.effective_max_browsers == response.json()["parallelism"]
+        assert pool.browser_runtime_mode == "headless"
+        assert pool.parallelism_clamp_reason is None
 
     def test_update_execution_settings_clamps_shared_vnc_headed_browser_pool(self, client, monkeypatch):
         """Shared-display VNC headed mode should serialize browser-producing runs."""

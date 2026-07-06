@@ -194,8 +194,14 @@ def resolve_run_headless_mode(
     *,
     env: dict[str, str] | None = None,
     execution_settings: Any | None = None,
+    requested_parallelism: int | None = None,
 ) -> bool:
     """Resolve browser visibility for server-triggered test runs."""
+    if requested_parallelism is not None and _positive_int(requested_parallelism, default=1) > 1:
+        settings_headless = getattr(execution_settings, "headless_in_parallel", None)
+        if settings_headless is not None:
+            return display_aware_headless(bool(settings_headless), env)
+
     explicit_headless = requested_headless_from_env(env)
     if explicit_headless is not None:
         return display_aware_headless(explicit_headless, env)
@@ -257,7 +263,11 @@ def resolve_effective_browser_parallelism(
 ) -> dict[str, Any]:
     """Resolve browser pool capacity with shared VNC display safety applied."""
     requested = _positive_int(requested_parallelism, default=1)
-    headless = resolve_run_headless_mode(env=env, execution_settings=execution_settings)
+    headless = resolve_run_headless_mode(
+        env=env,
+        execution_settings=execution_settings,
+        requested_parallelism=requested,
+    )
     shared_vnc_display = display_capable_vnc_enabled(env) and not headless
     effective = 1 if shared_vnc_display else requested
     return {

@@ -1042,6 +1042,13 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
     runtime = _runtime()
     hybrid_mode = request.hybrid or request.ralph or False
     max_iterations = request.max_iterations or 20
+    scheduled_max_active_runs = None
+    if runtime.BROWSER_POOL is not None:
+        scheduled_max_active_runs = getattr(
+            runtime.BROWSER_POOL,
+            "effective_max_browsers",
+            getattr(runtime.BROWSER_POOL, "max_browsers", None),
+        )
 
     runtime._validate_browser_auth_selection_for_project(
         session,
@@ -1080,6 +1087,7 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
                 browser_auth_session_id=request.browser_auth_session_id,
                 use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
                 model_tier=request.model_tier,
+                max_active_runs=scheduled_max_active_runs,
             )
             dispatched = await dispatch_scheduled_batch(runtime, scheduled_result.batch_id)
             return CreateBatchResponse(
