@@ -285,6 +285,51 @@ def _has_fresh_actual_test_count_cache(batch: RegressionBatch) -> bool:
     return True
 
 
+def _has_placeholder_actual_outcome_cache(batch: RegressionBatch) -> bool:
+    """Return true for the initial zero outcome cache written at batch creation."""
+    if not batch.actual_total_tests or batch.actual_total_tests <= 0:
+        return False
+    return (
+        int(batch.actual_passed or 0) == 0
+        and int(batch.actual_failed or 0) == 0
+        and int(batch.actual_skipped or 0) == 0
+        and int(batch.actual_other or 0) == 0
+    )
+
+
+def _repair_all_passed_placeholder_cache(batch: RegressionBatch, session: Session) -> bool:
+    """
+    Repair a stale initial actual-count cache for fully passed batches.
+
+    This intentionally uses only indexed database status counts and never parses
+    Playwright artifacts, so list/detail page loads remain scalable.
+    """
+    if batch.status != "completed" or not _has_placeholder_actual_outcome_cache(batch):
+        return False
+    if batch.total_tests <= 0 or batch.passed != batch.total_tests or batch.failed or batch.stopped:
+        return False
+
+    non_passed_runs = session.exec(
+        select(func.count())
+        .select_from(DBTestRun)
+        .where(
+            DBTestRun.batch_id == batch.id,
+            DBTestRun.status.notin_(["passed", "completed"]),
+        )
+    ).one()
+    if int(non_passed_runs or 0) != 0:
+        return False
+
+    batch.actual_passed = int(batch.actual_total_tests or 0)
+    batch.actual_failed = 0
+    batch.actual_skipped = 0
+    batch.actual_other = 0
+    session.add(batch)
+    session.commit()
+    session.refresh(batch)
+    return True
+
+
 FAILURE_STATUSES = {"failed", "error", "stopped"}
 ACTIVE_RUN_STATUSES = {"queued", "running", "in_progress"}
 TERMINAL_RUN_STATUSES = {"passed", "completed", "failed", "error", "stopped", "cancelled"}
@@ -758,6 +803,7 @@ def list_batches(
             and batch.actual_passed is not None
             and batch.actual_failed is not None
         ):
+            _repair_all_passed_placeholder_cache(batch, session)
             actual_total = batch.actual_total_tests
             actual_passed = batch.actual_passed
             actual_failed = batch.actual_failed
@@ -831,6 +877,13 @@ def get_batch_detail(
     actual_failed = batch.actual_failed
     actual_skipped = batch.actual_skipped
     actual_other = batch.actual_other
+    if not include_actual_counts:
+        _repair_all_passed_placeholder_cache(batch, session)
+        actual_total = batch.actual_total_tests
+        actual_passed = batch.actual_passed
+        actual_failed = batch.actual_failed
+        actual_skipped = batch.actual_skipped
+        actual_other = batch.actual_other
     if include_actual_counts and runs_total <= 5000:
         all_runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all()
         actual_total, actual_passed, actual_failed, actual_skipped, actual_other = _calculate_actual_test_counts(all_runs)

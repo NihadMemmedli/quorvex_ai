@@ -562,6 +562,283 @@ test('unknown flow', async () => {});
     assert counts == (4, 1, 1, 1, 1)
 
 
+def test_all_passed_stale_placeholder_cache_repairs_without_full_recount(monkeypatch):
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router as regression_router
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"cheap-repair-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+
+    def fail_if_recounted(runs):
+        raise AssertionError("normal list/detail requests must not recalculate artifact counts")
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fail_if_recounted)
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Cheap Repair"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Cheap Repair",
+                    project_id=project_id,
+                    total_tests=2,
+                    passed=2,
+                    failed=0,
+                    stopped=0,
+                    running=0,
+                    queued=0,
+                    status="completed",
+                    actual_total_tests=7,
+                    actual_passed=0,
+                    actual_failed=0,
+                    actual_skipped=0,
+                    actual_other=0,
+                )
+            )
+            for index in range(2):
+                session.add(
+                    DBTestRun(
+                        id=f"run_{uuid4().hex}",
+                        spec_name=f"passed-{index}.md",
+                        status="passed",
+                        batch_id=batch_id,
+                        project_id=project_id,
+                    )
+                )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            list_response = client.get(f"/regression/batches?project_id={project_id}")
+            assert list_response.status_code == 200
+            listed = list_response.json()["batches"][0]
+            assert listed["actual_total_tests"] == 7
+            assert listed["actual_passed"] == 7
+            assert listed["actual_failed"] == 0
+            assert listed["actual_skipped"] == 0
+            assert listed["success_rate"] == 100.0
+
+            detail_response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_failure_details=false"
+            )
+            assert detail_response.status_code == 200
+            detail = detail_response.json()
+            assert detail["actual_total_tests"] == 7
+            assert detail["actual_passed"] == 7
+            assert detail["actual_failed"] == 0
+            assert detail["actual_skipped"] == 0
+            assert detail["success_rate"] == 100.0
+
+        with Session(engine) as session:
+            cached = session.get(RegressionBatch, batch_id)
+            assert cached is not None
+            assert cached.actual_passed == 7
+            assert cached.actual_failed == 0
+            assert cached.actual_skipped == 0
+            assert cached.actual_other == 0
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_mixed_stale_placeholder_cache_does_not_recount_on_normal_detail(monkeypatch):
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router as regression_router
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"mixed-stale-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+
+    def fail_if_recounted(runs):
+        raise AssertionError("mixed stale batches require explicit refresh, not page-load recounts")
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fail_if_recounted)
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Mixed Stale"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Mixed Stale",
+                    project_id=project_id,
+                    total_tests=2,
+                    passed=1,
+                    failed=0,
+                    stopped=1,
+                    status="completed",
+                    actual_total_tests=5,
+                    actual_passed=0,
+                    actual_failed=0,
+                    actual_skipped=0,
+                    actual_other=0,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="passed.md",
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="stopped.md",
+                    status="stopped",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_failure_details=false"
+            )
+            assert response.status_code == 200
+            detail = response.json()
+            assert detail["actual_total_tests"] == 5
+            assert detail["actual_passed"] == 0
+            assert detail["actual_failed"] == 0
+            assert detail["actual_skipped"] == 0
+
+        with Session(engine) as session:
+            cached = session.get(RegressionBatch, batch_id)
+            assert cached is not None
+            assert cached.actual_passed == 0
+            assert cached.actual_skipped == 0
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_update_batch_stats_recalculates_completed_placeholder_cache(monkeypatch):
+    from datetime import datetime
+    import asyncio
+    from types import SimpleNamespace
+
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.test_run_batch_watchdog_support import update_batch_stats
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"completion-cache-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+    run_id = f"run_{uuid4().hex}"
+    calls = []
+
+    def fake_calculate(runs):
+        calls.append([run.id for run in runs])
+        return 7, 7, 0, 0, 0
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fake_calculate)
+
+    runtime = SimpleNamespace(
+        Session=Session,
+        engine=engine,
+        RegressionBatch=RegressionBatch,
+        DBTestRun=DBTestRun,
+        select=select,
+        datetime=SimpleNamespace(utcnow=datetime.utcnow),
+        asyncio=asyncio,
+        get_database_type=lambda: "sqlite",
+        logger=SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+    )
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Completion Cache"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Completion Cache",
+                    project_id=project_id,
+                    total_tests=1,
+                    passed=0,
+                    failed=0,
+                    status="running",
+                    actual_total_tests=7,
+                    actual_passed=0,
+                    actual_failed=0,
+                    actual_skipped=0,
+                    actual_other=0,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="passed.md",
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    started_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                )
+            )
+            session.commit()
+
+        update_batch_stats(runtime, batch_id)
+
+        with Session(engine) as session:
+            batch = session.get(RegressionBatch, batch_id)
+            assert batch is not None
+            assert batch.status == "completed"
+            assert batch.passed == 1
+            assert batch.actual_total_tests == 7
+            assert batch.actual_passed == 7
+            assert batch.actual_failed == 0
+            assert batch.actual_skipped == 0
+            assert batch.actual_other == 0
+        assert calls == [[run_id]]
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
 def test_batch_detail_paginates_runs_without_full_count_recalculation(monkeypatch):
     from orchestrator.api.db import engine
     from orchestrator.api.models_db import Project, RegressionBatch

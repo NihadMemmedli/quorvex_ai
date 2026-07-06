@@ -9,6 +9,7 @@ import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE } from '@/lib/api';
 import { PageHeader } from '@/components/ui/page-header';
 import { PageLayout } from '@/components/ui/page-layout';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
 
 interface RecordingSession {
     id: string;
@@ -83,15 +84,8 @@ function formatLocalRecorderHost(hostname: string): string {
     return hostname === '::1' ? '[::1]' : hostname;
 }
 
-function localRecorderBrowserUrl(): string | null {
-    if (typeof window === 'undefined') return null;
-    const hostname = window.location.hostname;
-    if (!isLocalDashboardHost(hostname)) return null;
-    return `http://${formatLocalRecorderHost(hostname)}:6080/vnc.html?autoconnect=true&resize=scale`;
-}
-
-function recorderBrowserUrl(session: RecordingSession): string | null {
-    if (!session.browser_url) return localRecorderBrowserUrl();
+export function recorderBrowserUrl(session: Pick<RecordingSession, 'browser_url'>): string | null {
+    if (!session.browser_url) return null;
     if (typeof window === 'undefined') return session.browser_url;
     try {
         const url = new URL(session.browser_url);
@@ -337,43 +331,53 @@ export default function RecordingsPage() {
                     )}
 
                     {activeSession && (
-                        <div className="card-elevated" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
-                            <div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem' }}>
-                                    {statusBadge(activeSession.status)}
-                                    <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem' }}>PID {activeSession.process_id || '-'}</span>
+                        <div className="card-elevated" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                                <div style={{ minWidth: 0 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
+                                        {statusBadge(activeSession.status)}
+                                        <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem' }}>PID {activeSession.process_id || '-'}</span>
+                                    </div>
+                                    <div style={{ fontWeight: 700 }}>{activeSession.name || 'Recording session'}</div>
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem', overflowWrap: 'anywhere' }}>{activeSession.target_url}</div>
                                 </div>
-                                <div style={{ fontWeight: 700 }}>{activeSession.name || 'Recording session'}</div>
-                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>{activeSession.target_url}</div>
-                                {canEdit && activeRecorderUrl && (
-                                    <div style={{ marginTop: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                        <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem' }}>
-                                            The recorder browser is running in the backend display.
-                                        </span>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                    {canEdit && activeRecorderUrl && (
                                         <a
                                             className="btn btn-secondary"
                                             href={activeRecorderUrl}
                                             target="_blank"
                                             rel="noreferrer"
-                                            style={{ padding: '0.4rem 0.65rem', textDecoration: 'none' }}
+                                            style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}
                                         >
                                             <ExternalLink size={14} />
                                             Open Recorder
                                         </a>
-                                    </div>
-                                )}
+                                    )}
+                                    {canEdit && (
+                                        <button
+                                            className="btn btn-secondary"
+                                            onClick={() => stopRecording(activeSession.id)}
+                                            disabled={isStopping}
+                                            style={{ cursor: isStopping ? 'not-allowed' : 'pointer' }}
+                                        >
+                                            {isStopping ? <Loader2 size={16} className="spin" /> : <Square size={16} />}
+                                            Stop
+                                        </button>
+                                    )}
+                                </div>
                             </div>
-                            {canEdit && (
-                                <button
-                                    className="btn btn-secondary"
-                                    onClick={() => stopRecording(activeSession.id)}
-                                    disabled={isStopping}
-                                    style={{ cursor: isStopping ? 'not-allowed' : 'pointer' }}
-                                >
-                                    {isStopping ? <Loader2 size={16} className="spin" /> : <Square size={16} />}
-                                    Stop
-                                </button>
-                            )}
+                            <LiveBrowserView
+                                runId={activeSession.id}
+                                isActive={isRecording}
+                                showHeader
+                                artifacts={[]}
+                                vncUrl={null}
+                                liveBrowserRequested
+                                liveViewAvailable
+                                browserActivitySeen
+                                browserActive={isRecording}
+                            />
                         </div>
                     )}
 

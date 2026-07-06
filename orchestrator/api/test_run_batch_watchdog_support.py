@@ -7,6 +7,17 @@ from typing import Any
 from sqlalchemy import case, func, text
 
 
+def _has_placeholder_actual_outcome_cache(batch: Any) -> bool:
+    if not getattr(batch, "actual_total_tests", None) or batch.actual_total_tests <= 0:
+        return False
+    return (
+        int(getattr(batch, "actual_passed", None) or 0) == 0
+        and int(getattr(batch, "actual_failed", None) or 0) == 0
+        and int(getattr(batch, "actual_skipped", None) or 0) == 0
+        and int(getattr(batch, "actual_other", None) or 0) == 0
+    )
+
+
 def update_batch_stats(runtime: Any, batch_id: str) -> None:
     """Update batch statistics after a run completes.
 
@@ -94,6 +105,7 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
                         batch.actual_total_tests is None
                         or batch.actual_passed is None
                         or batch.actual_failed is None
+                        or _has_placeholder_actual_outcome_cache(batch)
                     )
                 ):
                     runs = session.exec(runtime.select(runtime.DBTestRun).where(runtime.DBTestRun.batch_id == batch_id)).all()
@@ -122,6 +134,7 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
                     batch.actual_total_tests is None
                     or batch.actual_passed is None
                     or batch.actual_failed is None
+                    or _has_placeholder_actual_outcome_cache(batch)
                 )
             ):
                 try:
