@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useState } from 'react';
 import {
     AlertTriangle,
     ArrowRight,
@@ -18,6 +19,8 @@ import { PageHeader } from '@/components/ui/page-header';
 import { PageLayout } from '@/components/ui/page-layout';
 import { useCommandCenterData, type AgentQueueTaskSummary, type AutoPilotSessionSummary } from '@/hooks/useCommandCenterData';
 import { useWorkflowProgress } from '@/hooks/useWorkflowProgress';
+import { fetchWithAuth } from '@/contexts/AuthContext';
+import { API_BASE } from '@/lib/api';
 
 const statusMeta: Record<string, { label: string; color: string; bg: string; icon: typeof Clock }> = {
     pending: { label: 'Pending', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.12)', icon: Clock },
@@ -369,8 +372,10 @@ export default function Home() {
         dashboard,
         sessions,
         queue,
+        health,
         loading,
         error,
+        reload,
         activeSessions,
         failedSessions,
         completedSessions,
@@ -378,6 +383,7 @@ export default function Home() {
         awaitingInput,
         hasAnySessions,
     } = useCommandCenterData();
+    const [cleaningOrphans, setCleaningOrphans] = useState(false);
     const { progress: workflowProgress } = useWorkflowProgress();
 
     const passRate = Math.round(dashboard.pass_rate ?? dashboard.success_rate ?? 0);
@@ -408,6 +414,19 @@ export default function Home() {
     const staleRunningCount = queue?.stale_running ?? 0;
     const queueUnavailable = queue?.mode === 'temporal' && ((queue?.active ?? 0) > 0 || (queue?.queued ?? 0) > 0) && workersAlive === 0;
     const queueDegraded = orphanedTaskCount > 0 || staleRunningCount > 0 || queueUnavailable;
+    const processHealth = health?.checks?.processes;
+    const orphanedApiProcessCount = processHealth?.orphaned_api_process_count ?? 0;
+    const apiProcessCount = processHealth?.api_process_count ?? 0;
+    const runtimeProcessDegraded = orphanedApiProcessCount > 0 || processHealth?.status === 'warning';
+    const handleCleanupOrphanedApiProcesses = async () => {
+        setCleaningOrphans(true);
+        try {
+            await fetchWithAuth(`${API_BASE}/runtime/orphaned-api-processes/cleanup`, { method: 'POST' });
+            await reload({ silent: true });
+        } finally {
+            setCleaningOrphans(false);
+        }
+    };
     const hasCoverageData = rtmCoverage > 0 || (workflowProgress?.requirements ?? 0) > 0;
     const coverageGap = hasCoverageData && rtmCoverage < 60;
     const hasRecentQualityData = dashboard.total_runs > 0 || hasAnySessions;
@@ -565,6 +584,16 @@ export default function Home() {
             severity: queueUnavailable ? 'danger' : queueDegraded ? 'warning' : queue ? 'healthy' : 'neutral',
         },
         {
+            label: 'Runtime processes',
+            value: runtimeProcessDegraded ? 'Degraded' : health ? 'Stable' : '—',
+            detail: runtimeProcessDegraded
+                ? `${orphanedApiProcessCount} orphaned API process${orphanedApiProcessCount === 1 ? '' : 'es'}, ${apiProcessCount} API process${apiProcessCount === 1 ? '' : 'es'} total`
+                : health ? `${apiProcessCount || 1} API process active` : 'Runtime health has not loaded',
+            icon: <ShieldAlert size={15} />,
+            href: '/workflow',
+            severity: runtimeProcessDegraded ? 'danger' : health ? 'healthy' : 'neutral',
+        },
+        {
             label: 'Recent run age',
             value: lastRunAge || '—',
             detail: lastRunAge ? 'Latest completed signal' : dashboard.total_runs > 0 ? 'Last run timestamp unavailable' : 'No recent runs',
@@ -599,6 +628,37 @@ export default function Home() {
                 }}>
                     <XCircle size={16} />
                     {error}
+                </div>
+            )}
+
+            {runtimeProcessDegraded && (
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    marginBottom: '1rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    background: 'rgba(245, 158, 11, 0.1)',
+                    border: '1px solid rgba(245, 158, 11, 0.28)',
+                    color: '#f59e0b',
+                    fontSize: '0.86rem',
+                    fontWeight: 650,
+                    flexWrap: 'wrap',
+                }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.55rem' }}>
+                        <AlertTriangle size={16} />
+                        Runtime process warning: {orphanedApiProcessCount} orphaned API process{orphanedApiProcessCount === 1 ? '' : 'es'} detected.
+                    </span>
+                    <button
+                        onClick={handleCleanupOrphanedApiProcesses}
+                        disabled={cleaningOrphans}
+                        className="btn btn-secondary"
+                        style={{ padding: '0.45rem 0.75rem', opacity: cleaningOrphans ? 0.65 : 1 }}
+                    >
+                        {cleaningOrphans ? 'Cleaning...' : 'Clean orphaned API processes'}
+                    </button>
                 </div>
             )}
 

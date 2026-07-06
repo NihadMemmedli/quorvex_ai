@@ -124,6 +124,7 @@ class ExecutionSettingsResponse(BaseModel):
     parallel_mode_enabled: bool
     headless_in_parallel: bool
     memory_enabled: bool
+    ai_pipeline_timeout_seconds: int
     database_type: str  # "sqlite" or "postgresql"
     parallel_mode_available: bool  # False if SQLite
 
@@ -135,6 +136,7 @@ class UpdateExecutionSettingsRequest(BaseModel):
     parallel_mode_enabled: bool | None = None
     headless_in_parallel: bool | None = None
     memory_enabled: bool | None = None
+    ai_pipeline_timeout_seconds: int | None = Field(default=None, ge=900)
 
 
 class AgentWorkerHealth(BaseModel):
@@ -161,6 +163,10 @@ class QueueStatusResponse(BaseModel):
     agent_worker_health: AgentWorkerHealth | None = None
     browser_pool: dict[str, Any] | None = None
     browser_pool_by_type: dict[str, int] = Field(default_factory=dict)
+    browser_pool_running_count: int | None = None
+    browser_pool_queued_count: int | None = None
+    test_run_running_count: int | None = None
+    test_run_queued_count: int | None = None
     legacy_running_count: int | None = None
     legacy_queued_count: int | None = None
     legacy_parallelism_limit: int | None = None
@@ -179,6 +185,8 @@ class ClearQueueResponse(BaseModel):
     cleared_count: int
     cleared_runs: list[str]
     message: str
+    browser_pool_cleared: dict[str, Any] | None = None
+    legacy_queue_cleared: int = 0
 
 
 # ========== Regression Batch Models ==========
@@ -230,7 +238,18 @@ class RegressionBatchSummary(BaseModel):
     actual_total_tests: int | None = None  # Total individual tests across all files
     actual_passed: int | None = None
     actual_failed: int | None = None
+    actual_skipped: int | None = None
+    actual_other: int | None = None
     project_id: str | None = None
+    scheduler_status: str | None = None
+    chunk_size: int | None = None
+    max_active_runs: int | None = None
+    dispatch_total: int = 0
+    dispatch_started: int = 0
+    dispatch_completed: int = 0
+    dispatch_failed: int = 0
+    dispatch_cancelled: int = 0
+    scheduler_error: str | None = None
 
 
 class RegressionBatchDetail(RegressionBatchSummary):
@@ -239,6 +258,11 @@ class RegressionBatchDetail(RegressionBatchSummary):
     triggered_by: str | None = None
     started_at: str | None = None
     runs: list[BatchRunInList] = []
+    runs_total: int = 0
+    runs_limit: int = 100
+    runs_offset: int = 0
+    runs_has_more: bool = False
+    runs_status: str | None = None
 
 
 class RegressionBatchListResponse(BaseModel):
@@ -259,6 +283,10 @@ class CreateBatchResponse(BaseModel):
     count: int
     mode: str
     max_iterations: int | None = None
+    scheduled: bool = False
+    chunk_size: int | None = None
+    max_active_runs: int | None = None
+    dispatched: int | None = None
 
 
 class BatchExportResponse(BaseModel):

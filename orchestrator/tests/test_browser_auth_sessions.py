@@ -53,6 +53,9 @@ from orchestrator.api.agent_run_runtime_support import (
     _resolve_agent_browser_auth_storage_path,
     update_agent_run_progress,
 )
+from orchestrator.api.test_run_runtime_support import (
+    resolve_browser_auth_storage_state_for_run,
+)
 from orchestrator.api.credentials import set_project_credential
 from orchestrator.api.db import _run_migrations, engine
 from orchestrator.api.models_db import AgentRun, AgentRunEvent, BrowserAuthSession, Project
@@ -66,8 +69,19 @@ from orchestrator.services.browser_auth_sessions import (
     resolve_browser_auth_for_run,
     validate_browser_auth_session,
 )
+from orchestrator.services import browser_auth_sessions as browser_auth_service
 from orchestrator.services.temporal_client import TemporalWorkflowStart
 from orchestrator.utils.agent_runner import AgentResult
+from orchestrator.utils.browser_auth_classification import is_login_logout_spec
+
+
+@pytest.fixture(autouse=True)
+def _disable_browser_auth_target_preflight(monkeypatch):
+    monkeypatch.setattr(
+        browser_auth_service,
+        "preflight_browser_auth_storage_state",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def _create_project() -> str:
@@ -302,6 +316,90 @@ def test_agent_browser_auth_preflight_failure_marks_run_failed(tmp_path):
         assert run.progress["auth_preflight_failure_kind"] == "challenge"
         events = session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all()
         assert any(event.event_type == "auth_preflight" and event.level == "error" for event in events)
+
+
+def test_test_run_browser_auth_preflight_uses_spec_target_url(tmp_path):
+    project_id = _create_project()
+    auth_session_id = _create_active_browser_auth_session(project_id)
+    seen: dict[str, str] = {}
+    runtime = types.SimpleNamespace(
+        _has_browser_auth_selection=lambda **kwargs: bool(
+            kwargs.get("browser_auth_session_id")
+            or kwargs.get("use_project_default_browser_auth")
+        ),
+        resolve_browser_auth_for_run=resolve_browser_auth_for_run,
+        BrowserAuthSessionError=BrowserAuthSessionError,
+        logger=types.SimpleNamespace(debug=lambda *args, **kwargs: None),
+    )
+
+    def fake_preflight(**kwargs):
+        seen["target_url"] = kwargs["target_url"]
+        return BrowserAuthPreflightResult(
+            status="passed",
+            target_url=kwargs["target_url"],
+            url="https://staging.my.gov.az/applications?code=hidden",
+            title="Applications",
+        )
+
+    with Session(engine) as session:
+        storage_path, intent = resolve_browser_auth_storage_state_for_run(
+            runtime,
+            session,
+            project_id,
+            run_dir=tmp_path,
+            browser_auth_session_id=auth_session_id,
+            use_project_default_browser_auth=False,
+            target_url="https://staging.my.gov.az/applications?code=hidden",
+            preflight_runner=fake_preflight,
+        )
+
+    assert seen["target_url"] == "https://staging.my.gov.az/applications?code=hidden"
+    assert storage_path == str(tmp_path / "browser-auth-storage-state.json")
+    assert intent["auth_preflight_status"] == "passed"
+    assert intent["auth_preflight_target_url"] == "https://staging.my.gov.az/applications"
+    assert intent["auth_preflight_final_url"] == "https://staging.my.gov.az/applications"
+    assert (tmp_path / "browser_auth_preflight.json").exists()
+
+
+def test_test_run_browser_auth_preflight_failure_blocks_generation(tmp_path):
+    project_id = _create_project()
+    auth_session_id = _create_active_browser_auth_session(project_id)
+    runtime = types.SimpleNamespace(
+        _has_browser_auth_selection=lambda **kwargs: bool(
+            kwargs.get("browser_auth_session_id")
+            or kwargs.get("use_project_default_browser_auth")
+        ),
+        resolve_browser_auth_for_run=resolve_browser_auth_for_run,
+        BrowserAuthSessionError=BrowserAuthSessionError,
+        logger=types.SimpleNamespace(debug=lambda *args, **kwargs: None),
+    )
+
+    def fake_preflight(**kwargs):
+        return BrowserAuthPreflightResult(
+            status="failed",
+            target_url=kwargs["target_url"],
+            url="https://staging.my.gov.az/login",
+            title="Login",
+            failure_kind="login",
+            failure_reason="Saved browser session was attached, but target opened a login page. Refresh the browser auth session or use a trusted browser context.",
+        )
+
+    with Session(engine) as session, pytest.raises(Exception) as raised:
+        resolve_browser_auth_storage_state_for_run(
+            runtime,
+            session,
+            project_id,
+            run_dir=tmp_path,
+            browser_auth_session_id=auth_session_id,
+            use_project_default_browser_auth=False,
+            target_url="https://staging.my.gov.az/applications",
+            preflight_runner=fake_preflight,
+        )
+
+    assert "target opened a login page" in str(raised.value)
+    artifact = (tmp_path / "browser_auth_preflight.json").read_text()
+    assert "staging.my.gov.az/applications" in artifact
+    assert "staging.my.gov.az/login" in artifact
 
 
 def test_browser_auth_preflight_detector_catches_security_challenges():
@@ -833,6 +931,91 @@ def test_validate_browser_auth_session_does_not_require_llm_key(monkeypatch):
     assert validated.status == "active"
     assert validated.failure_reason is None
     assert validated.last_validated_at is not None
+
+
+def test_validate_browser_auth_session_marks_invalid_when_target_preflight_fails(monkeypatch):
+    project_id = _create_project()
+    session_id = _create_active_browser_auth_session(project_id)
+
+    def fail_preflight(*_args, **_kwargs):
+        raise BrowserAuthSessionError("Target preflight redirected to login URL")
+
+    monkeypatch.setattr(
+        browser_auth_service,
+        "preflight_browser_auth_storage_state",
+        fail_preflight,
+    )
+
+    with Session(engine) as session:
+        validated = validate_browser_auth_session(session, project_id, session_id)
+
+    assert validated.status == "invalid"
+    assert "redirected to login" in validated.failure_reason
+
+
+def test_refresh_browser_auth_session_rejects_captured_state_when_target_preflight_fails(monkeypatch):
+    project_id = _create_project()
+    with Session(engine) as session:
+        assert set_project_credential(project_id, "LOGIN_USERNAME", "user@example.com", session)
+        assert set_project_credential(project_id, "LOGIN_PASSWORD", "secret-password", session)
+        row = BrowserAuthSession(
+            project_id=project_id,
+            name="Preflight refresh",
+            base_url="https://example.com/dashboard",
+            login_url="https://example.com/login",
+            username_key="LOGIN_USERNAME",
+            password_key="LOGIN_PASSWORD",
+            status="pending",
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+
+        monkeypatch.setattr(
+            browser_auth_service,
+            "create_storage_state_via_playwright",
+            lambda **_kwargs: {"cookies": [], "origins": []},
+        )
+
+        def fail_preflight(*_args, **_kwargs):
+            raise BrowserAuthSessionError("Target preflight returned HTTP 401")
+
+        monkeypatch.setattr(
+            browser_auth_service,
+            "preflight_browser_auth_storage_state",
+            fail_preflight,
+        )
+
+        with pytest.raises(BrowserAuthSessionError, match="HTTP 401"):
+            refresh_browser_auth_session(session, project_id, row.id)
+        session.refresh(row)
+
+        assert row.status == "invalid"
+        assert "HTTP 401" in row.failure_reason
+
+
+def test_browser_auth_suppression_keeps_authenticated_user_specs():
+    assert (
+        is_login_logout_spec(
+            "mygov-id-authenticated-dashboard.md",
+            "# MyGov-ID authenticated dashboard\n\nPrecondition: user is already authenticated.",
+        )
+        is False
+    )
+    assert (
+        is_login_logout_spec(
+            "login.md",
+            "# Login With Valid Credentials\n\nSteps: open /login and sign in.",
+        )
+        is True
+    )
+    assert (
+        is_login_logout_spec(
+            "blocked-guest.md",
+            "# Unauthenticated users are redirected\n\nExpected: login page is visible.",
+        )
+        is True
+    )
 
 
 def test_browser_auth_session_api_round_trips_advanced_capture_settings():

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from orchestrator.utils import agent_runner as agent_runner_module
 from orchestrator.utils.agent_runner import (
     AgentRunner,
-    NativeSetupSeedFileError,
+    _native_setup_seed_file_diagnostics,
     _validate_native_setup_seed_file,
 )
 
@@ -43,7 +43,7 @@ def _patch_runner_runtime(monkeypatch, *, query_impl, killed_calls: list[set[int
     monkeypatch.setattr(agent_runner_module, "kill_new_children", fake_kill)
 
 
-def test_native_generator_setup_defaults_missing_run_local_seed_file():
+def test_native_generator_setup_records_missing_run_local_seed_file_without_mutating():
     tool_input = {}
 
     assert (
@@ -53,20 +53,47 @@ def test_native_generator_setup_defaults_missing_run_local_seed_file():
         )
         is True
     )
-    assert tool_input == {"seedFile": "tests/seed.spec.ts"}
+    assert tool_input == {}
+    assert _native_setup_seed_file_diagnostics(
+        "mcp__playwright-test__generator_setup_page",
+        tool_input,
+    ) == {
+        "setup_tool": "generator_setup_page",
+        "expected_seed_file": "tests/seed.spec.ts",
+        "native_setup_seed_file_omitted": True,
+    }
 
-    _validate_native_setup_seed_file(
+    assert _native_setup_seed_file_diagnostics(
         "mcp__playwright-test__generator_setup_page",
         {"seedFile": "tests/seed.spec.ts"},
-    )
+    ) == {
+        "setup_tool": "generator_setup_page",
+        "expected_seed_file": "tests/seed.spec.ts",
+        "native_setup_seed_file_valid": True,
+        "received_seed_file": "tests/seed.spec.ts",
+    }
 
 
-def test_native_generator_setup_rejects_wrong_run_local_seed_file():
-    with pytest.raises(NativeSetupSeedFileError, match="generator_setup_page"):
+def test_native_generator_setup_records_wrong_run_local_seed_file():
+    tool_input = {"seedFile": "tests/not-seed.spec.ts"}
+
+    assert (
         _validate_native_setup_seed_file(
             "mcp__playwright-test__generator_setup_page",
-            {"seedFile": "tests/not-seed.spec.ts"},
+            tool_input,
         )
+        is False
+    )
+    assert tool_input == {"seedFile": "tests/not-seed.spec.ts"}
+    assert _native_setup_seed_file_diagnostics(
+        "mcp__playwright-test__generator_setup_page",
+        tool_input,
+    ) == {
+        "setup_tool": "generator_setup_page",
+        "expected_seed_file": "tests/seed.spec.ts",
+        "native_setup_seed_file_invalid": True,
+        "received_seed_file": "tests/not-seed.spec.ts",
+    }
 
 
 @pytest.mark.asyncio

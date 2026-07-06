@@ -11,7 +11,83 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 from sqlmodel import Session, SQLModel, select
+
+
+def test_create_regression_batch_rejects_oversized_bulk_run(monkeypatch):
+    from orchestrator.services import batch_executor
+
+    monkeypatch.setenv("QUORVEX_MAX_BULK_RUN_SPECS", "2")
+    monkeypatch.setattr(
+        batch_executor,
+        "select_regression_specs",
+        lambda config, session: ["one.md", "two.md", "three.md"],
+    )
+
+    with pytest.raises(ValueError, match="limited to 2 spec files"):
+        batch_executor.create_regression_batch(
+            batch_executor.BatchConfig(project_id="default", automated_only=True),
+            session=None,
+        )
+
+
+def test_scheduled_regression_batch_persists_items_for_oversized_run(monkeypatch):
+    from orchestrator.api.db import engine, init_db
+    from orchestrator.api.models_db import RegressionBatch, RegressionBatchItem
+    from orchestrator.services import batch_executor
+    from orchestrator.services.scheduled_batch_executor import (
+        create_scheduled_regression_batch,
+        should_schedule_bulk_run,
+    )
+
+    monkeypatch.setenv("QUORVEX_MAX_BULK_RUN_SPECS", "2")
+    monkeypatch.setenv("QUORVEX_REGRESSION_CHUNK_SIZE", "5")
+    monkeypatch.setenv("QUORVEX_REGRESSION_MAX_ACTIVE_PER_BATCH", "3")
+    monkeypatch.setattr(
+        "orchestrator.services.scheduled_batch_executor._actual_test_count_for_spec",
+        lambda spec_name: 1,
+    )
+
+    init_db()
+    batch_id = None
+    try:
+        with Session(engine) as session:
+            spec_names = ["one.md", "two.md", "three.md"]
+            assert should_schedule_bulk_run(len(spec_names)) is True
+            result = create_scheduled_regression_batch(
+                batch_executor.BatchConfig(project_id="default", automated_only=True),
+                session,
+                spec_names=spec_names,
+                browser_auth_session_id=None,
+                use_project_default_browser_auth=False,
+                model_tier=None,
+            )
+            batch_id = result.batch_id
+            batch = session.get(RegressionBatch, batch_id)
+            assert batch is not None
+            assert batch.scheduler_status == "pending"
+            assert batch.total_tests == 3
+            assert batch.queued == 3
+            assert batch.dispatch_total == 3
+            assert batch.chunk_size == 5
+            assert batch.max_active_runs == 3
+            items = session.exec(
+                select(RegressionBatchItem).where(RegressionBatchItem.batch_id == batch_id)
+            ).all()
+            assert [item.spec_name for item in items] == spec_names
+            assert all(item.status == "pending" and item.run_id is None for item in items)
+    finally:
+        with Session(engine) as session:
+            if batch_id:
+                for item in session.exec(
+                    select(RegressionBatchItem).where(RegressionBatchItem.batch_id == batch_id)
+                ).all():
+                    session.delete(item)
+                batch = session.get(RegressionBatch, batch_id)
+                if batch:
+                    session.delete(batch)
+            session.commit()
 
 
 def test_create_regression_batch_caches_actual_playwright_test_count(tmp_path, monkeypatch):
@@ -65,6 +141,10 @@ test.skip('third flow', async () => {});
             assert batch.actual_total_tests == 3
             assert batch.actual_passed == 0
             assert batch.actual_failed == 0
+            assert batch.actual_skipped == 0
+            assert batch.actual_other == 0
+            assert result.tasks_to_start[0]["try_code_path"]
+            assert result.tasks_to_start[0]["healer_max_attempts"] == 1
 
         import orchestrator.api.regression as regression_module
 
@@ -72,11 +152,15 @@ test.skip('third flow', async () => {});
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            detail_response = client.get(f"/regression/batches/{created_batch_id}?project_id={project_id}")
+            detail_response = client.get(
+                f"/regression/batches/{created_batch_id}?project_id={project_id}&include_actual_counts=true"
+            )
             assert detail_response.status_code == 200
             detail = detail_response.json()
             assert detail["total_tests"] == 1
             assert detail["actual_total_tests"] == 3
+            assert detail["actual_skipped"] == 0
+            assert detail["actual_other"] == 0
             assert detail["runs"][0]["actual_test_count"] == 3
 
         with Session(engine) as session:
@@ -100,7 +184,7 @@ test.skip('third flow', async () => {});
             session.commit()
 
 
-def test_list_batches_refreshes_stale_actual_pass_fail_cache(tmp_path, monkeypatch):
+def test_list_batches_refreshes_stale_actual_pass_fail_cache_when_requested(tmp_path, monkeypatch):
     from orchestrator.api.db import engine
     from orchestrator.api.models_db import Project, RegressionBatch
     from orchestrator.api.models_db import TestRun as DBTestRun
@@ -157,12 +241,14 @@ test('third flow', async () => {});
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.get(f"/regression/batches?project_id={project_id}")
+            response = client.get(f"/regression/batches?project_id={project_id}&include_actual_counts=true")
             assert response.status_code == 200
             batch = response.json()["batches"][0]
             assert batch["actual_total_tests"] == 3
             assert batch["actual_passed"] == 3
             assert batch["actual_failed"] == 0
+            assert batch["actual_skipped"] == 0
+            assert batch["actual_other"] == 0
 
         with Session(engine) as session:
             cached = session.get(RegressionBatch, batch_id)
@@ -259,12 +345,16 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            detail_response = client.get(f"/regression/batches/{batch_id}?project_id={project_id}")
+            detail_response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_actual_counts=true"
+            )
             assert detail_response.status_code == 200
             detail = detail_response.json()
             assert detail["actual_total_tests"] == 10
             assert detail["actual_passed"] == 9
             assert detail["actual_failed"] == 1
+            assert detail["actual_skipped"] == 0
+            assert detail["actual_other"] == 0
             assert detail["success_rate"] == 90.0
             assert detail["runs"][0]["actual_test_count"] == 10
 
@@ -274,6 +364,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert batch["actual_total_tests"] == 10
             assert batch["actual_passed"] == 9
             assert batch["actual_failed"] == 1
+            assert batch["actual_skipped"] == 0
+            assert batch["actual_other"] == 0
             assert batch["success_rate"] == 90.0
 
             export_response = client.get(f"/regression/batches/{batch_id}/export?format=json")
@@ -282,6 +374,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert summary["actual_total_tests"] == 10
             assert summary["actual_passed"] == 9
             assert summary["actual_failed"] == 1
+            assert summary["actual_skipped"] == 0
+            assert summary["actual_other"] == 0
             assert summary["success_rate"] == 90.0
 
         with Session(engine) as session:
@@ -289,6 +383,8 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
             assert cached is not None
             assert cached.actual_passed == 9
             assert cached.actual_failed == 1
+            assert cached.actual_skipped == 0
+            assert cached.actual_other == 0
     finally:
         with Session(engine) as session:
             for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
@@ -360,13 +456,492 @@ test('third flow', async () => {});
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.get(f"/regression/batches/{batch_id}?project_id={project_id}")
+            response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_actual_counts=true"
+            )
             assert response.status_code == 200
             detail = response.json()
             assert detail["actual_total_tests"] == 3
             assert detail["actual_passed"] == 0
             assert detail["actual_failed"] == 3
+            assert detail["actual_skipped"] == 0
+            assert detail["actual_other"] == 0
             assert detail["success_rate"] == 0.0
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_actual_counts_include_playwright_skipped_and_unknown_statuses(tmp_path, monkeypatch):
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    import orchestrator.api.regression as regression_module
+
+    run_id = f"run_{uuid4().hex}"
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / run_id
+    generated_dir = tmp_path / "tests" / "generated"
+    run_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    (generated_dir / "mixed-status.spec.ts").write_text(
+        """
+import { test } from '@playwright/test';
+
+test('passed flow', async () => {});
+test('failed flow', async () => {});
+test.skip('skipped flow', async () => {});
+test('unknown flow', async () => {});
+""",
+        encoding="utf-8",
+    )
+    (run_dir / "test-results.json").write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "title": "mixed-status.spec.ts",
+                        "specs": [
+                            {
+                                "title": "passed flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [{"results": [{"status": "passed", "duration": 1}]}],
+                            },
+                            {
+                                "title": "failed flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "duration": 1,
+                                                "error": {"message": "Expected value to match"},
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "title": "skipped flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [{"results": [{"status": "skipped", "duration": 0}]}],
+                            },
+                            {
+                                "title": "unknown flow",
+                                "file": "mixed-status.spec.ts",
+                                "tests": [{"results": [{"status": "flaky", "duration": 1}]}],
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(regression_module, "RUNS_DIR", runs_dir)
+    monkeypatch.setattr(regression_module, "TESTS_DIR", generated_dir)
+
+    counts = regression_module._calculate_actual_test_counts(
+        [
+            DBTestRun(
+                id=run_id,
+                spec_name="mixed-status.md",
+                status="failed",
+                batch_id=f"batch_{uuid4().hex}",
+                project_id="default",
+            )
+        ]
+    )
+
+    assert counts == (4, 1, 1, 1, 1)
+
+
+def test_all_passed_stale_placeholder_cache_repairs_without_full_recount(monkeypatch):
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router as regression_router
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"cheap-repair-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+
+    def fail_if_recounted(runs):
+        raise AssertionError("normal list/detail requests must not recalculate artifact counts")
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fail_if_recounted)
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Cheap Repair"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Cheap Repair",
+                    project_id=project_id,
+                    total_tests=2,
+                    passed=2,
+                    failed=0,
+                    stopped=0,
+                    running=0,
+                    queued=0,
+                    status="completed",
+                    actual_total_tests=7,
+                    actual_passed=0,
+                    actual_failed=0,
+                    actual_skipped=0,
+                    actual_other=0,
+                )
+            )
+            for index in range(2):
+                session.add(
+                    DBTestRun(
+                        id=f"run_{uuid4().hex}",
+                        spec_name=f"passed-{index}.md",
+                        status="passed",
+                        batch_id=batch_id,
+                        project_id=project_id,
+                    )
+                )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            list_response = client.get(f"/regression/batches?project_id={project_id}")
+            assert list_response.status_code == 200
+            listed = list_response.json()["batches"][0]
+            assert listed["actual_total_tests"] == 7
+            assert listed["actual_passed"] == 7
+            assert listed["actual_failed"] == 0
+            assert listed["actual_skipped"] == 0
+            assert listed["success_rate"] == 100.0
+
+            detail_response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_failure_details=false"
+            )
+            assert detail_response.status_code == 200
+            detail = detail_response.json()
+            assert detail["actual_total_tests"] == 7
+            assert detail["actual_passed"] == 7
+            assert detail["actual_failed"] == 0
+            assert detail["actual_skipped"] == 0
+            assert detail["success_rate"] == 100.0
+
+        with Session(engine) as session:
+            cached = session.get(RegressionBatch, batch_id)
+            assert cached is not None
+            assert cached.actual_passed == 7
+            assert cached.actual_failed == 0
+            assert cached.actual_skipped == 0
+            assert cached.actual_other == 0
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_mixed_stale_placeholder_cache_does_not_recount_on_normal_detail(monkeypatch):
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router as regression_router
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"mixed-stale-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+
+    def fail_if_recounted(runs):
+        raise AssertionError("mixed stale batches require explicit refresh, not page-load recounts")
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fail_if_recounted)
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Mixed Stale"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Mixed Stale",
+                    project_id=project_id,
+                    total_tests=2,
+                    passed=1,
+                    failed=0,
+                    stopped=1,
+                    status="completed",
+                    actual_total_tests=5,
+                    actual_passed=0,
+                    actual_failed=0,
+                    actual_skipped=0,
+                    actual_other=0,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="passed.md",
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="stopped.md",
+                    status="stopped",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_failure_details=false"
+            )
+            assert response.status_code == 200
+            detail = response.json()
+            assert detail["actual_total_tests"] == 5
+            assert detail["actual_passed"] == 0
+            assert detail["actual_failed"] == 0
+            assert detail["actual_skipped"] == 0
+
+        with Session(engine) as session:
+            cached = session.get(RegressionBatch, batch_id)
+            assert cached is not None
+            assert cached.actual_passed == 0
+            assert cached.actual_skipped == 0
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_update_batch_stats_recalculates_completed_placeholder_cache(monkeypatch):
+    from datetime import datetime
+    import asyncio
+    from types import SimpleNamespace
+
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.test_run_batch_watchdog_support import update_batch_stats
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"completion-cache-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+    run_id = f"run_{uuid4().hex}"
+    calls = []
+
+    def fake_calculate(runs):
+        calls.append([run.id for run in runs])
+        return 7, 7, 0, 0, 0
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fake_calculate)
+
+    runtime = SimpleNamespace(
+        Session=Session,
+        engine=engine,
+        RegressionBatch=RegressionBatch,
+        DBTestRun=DBTestRun,
+        select=select,
+        datetime=SimpleNamespace(utcnow=datetime.utcnow),
+        asyncio=asyncio,
+        get_database_type=lambda: "sqlite",
+        logger=SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+    )
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Completion Cache"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Completion Cache",
+                    project_id=project_id,
+                    total_tests=1,
+                    passed=0,
+                    failed=0,
+                    status="running",
+                    actual_total_tests=7,
+                    actual_passed=0,
+                    actual_failed=0,
+                    actual_skipped=0,
+                    actual_other=0,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="passed.md",
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    started_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                )
+            )
+            session.commit()
+
+        update_batch_stats(runtime, batch_id)
+
+        with Session(engine) as session:
+            batch = session.get(RegressionBatch, batch_id)
+            assert batch is not None
+            assert batch.status == "completed"
+            assert batch.passed == 1
+            assert batch.actual_total_tests == 7
+            assert batch.actual_passed == 7
+            assert batch.actual_failed == 0
+            assert batch.actual_skipped == 0
+            assert batch.actual_other == 0
+        assert calls == [[run_id]]
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_batch_detail_paginates_runs_without_full_count_recalculation(monkeypatch):
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router as regression_router
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"paged-detail-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+
+    def fail_if_recounted(runs):
+        raise AssertionError("detail should not recalculate all actual counts by default")
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fail_if_recounted)
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Paged Detail"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Paged Detail",
+                    project_id=project_id,
+                    total_tests=3,
+                    passed=1,
+                    failed=1,
+                    running=1,
+                    status="running",
+                    actual_total_tests=3,
+                    actual_passed=1,
+                    actual_failed=1,
+                    scheduler_status="dispatching",
+                    chunk_size=50,
+                    max_active_runs=5,
+                    dispatch_total=3,
+                    dispatch_started=2,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="z-running.md",
+                    status="running",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            failed_run_id = f"run_{uuid4().hex}"
+            session.add(
+                DBTestRun(
+                    id=failed_run_id,
+                    spec_name="a-failed.md",
+                    status="failed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    error_message="failed",
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="m-passed.md",
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&runs_limit=2&include_failure_details=false"
+            )
+            assert response.status_code == 200
+            detail = response.json()
+            assert detail["runs_total"] == 3
+            assert detail["runs_limit"] == 2
+            assert detail["runs_offset"] == 0
+            assert detail["runs_has_more"] is True
+            assert [run["status"] for run in detail["runs"]] == ["failed", "running"]
+            assert detail["runs"][0]["id"] == failed_run_id
+            assert detail["actual_total_tests"] == 3
+            assert detail["actual_passed"] == 1
+            assert detail["actual_failed"] == 1
+            assert detail["scheduler_status"] == "dispatching"
+            assert detail["chunk_size"] == 50
+            assert detail["max_active_runs"] == 5
+            assert detail["dispatch_total"] == 3
+            assert detail["dispatch_started"] == 2
+
+            failures = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&runs_status=failures"
+            )
+            assert failures.status_code == 200
+            failure_detail = failures.json()
+            assert failure_detail["runs_total"] == 1
+            assert failure_detail["runs_status"] == "failures"
+            assert [run["id"] for run in failure_detail["runs"]] == [failed_run_id]
     finally:
         with Session(engine) as session:
             for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
@@ -385,6 +960,8 @@ def test_automated_only_without_spec_names_selects_all_matching_project_specs(tm
     from orchestrator.api.models_db import Project, RegressionBatch, SpecMetadata
     from orchestrator.api.models_db import TestRun as DBTestRun
     from orchestrator.services import batch_executor
+
+    monkeypatch.setenv("QUORVEX_MAX_BULK_RUN_SPECS", "100")
 
     project_id = f"all-automated-{uuid4().hex}"
     other_project_id = f"other-{uuid4().hex}"

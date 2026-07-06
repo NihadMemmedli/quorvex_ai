@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
+from contextlib import AsyncExitStack
 from concurrent.futures import ThreadPoolExecutor
 
 from orchestrator.config import settings
@@ -121,6 +123,16 @@ def _validate_worker_contract() -> None:
         )
 
 
+def _configured_task_queues() -> list[str]:
+    raw = os.environ.get("TEMPORAL_WORKFLOW_TASK_QUEUES", "").strip()
+    if raw:
+        queues = [queue.strip() for queue in raw.split(",") if queue.strip()]
+    else:
+        queues = [settings.temporal_workflow_task_queue]
+    seen = set()
+    return [queue for queue in queues if not (queue in seen or seen.add(queue))]
+
+
 async def main() -> None:
     from temporalio.client import Client
     from temporalio.worker import Worker
@@ -142,23 +154,29 @@ async def main() -> None:
 
     _validate_worker_contract()
     contract = get_worker_contract()
+    task_queues = _configured_task_queues()
     with ThreadPoolExecutor(max_workers=8) as activity_executor:
-        worker = Worker(
-            client,
-            task_queue=settings.temporal_workflow_task_queue,
-            workflows=WORKFLOWS,
-            activities=ACTIVITIES,
-            activity_executor=activity_executor,
-        )
+        workers = [
+            Worker(
+                client,
+                task_queue=task_queue,
+                workflows=WORKFLOWS,
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            for task_queue in task_queues
+        ]
         logger.info(
-            "Starting custom workflow Temporal worker at %s namespace=%s task_queue=%s workflows=%s activities=%s",
+            "Starting custom workflow Temporal worker at %s namespace=%s task_queues=%s workflows=%s activities=%s",
             settings.temporal_address,
             settings.temporal_namespace,
-            settings.temporal_workflow_task_queue,
+            ",".join(task_queues),
             ",".join(contract["workflows"]),
             ",".join(contract["activities"]),
         )
-        async with worker:
+        async with AsyncExitStack() as stack:
+            for worker in workers:
+                await stack.enter_async_context(worker)
             await stop_event.wait()
 
 

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { buildCodingAgentRunBody, getAssistantActionConfig, redactAssistantActionArgs } from './action-registry';
+import { MUTATING_TOOL_NAMES } from './tools';
 
 describe('assistant action registry', () => {
+  it('has execution configs for every mutating chat tool', () => {
+    const missing = Array.from(MUTATING_TOOL_NAMES).filter((toolName) => !getAssistantActionConfig(toolName));
+
+    expect(missing).toEqual([]);
+  });
+
   it('builds startCodingAgent as a proposal-only coding run', () => {
     const config = getAssistantActionConfig('startCodingAgent');
 

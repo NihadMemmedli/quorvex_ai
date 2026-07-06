@@ -609,6 +609,11 @@ def main():
         "--max-iterations", type=int, default=20, help="Maximum healing iterations (default: 20, used with --hybrid)"
     )
     parser.add_argument(
+        "--healer-max-attempts",
+        type=int,
+        help="Maximum native healer attempts for this run. Defaults to 3 when omitted.",
+    )
+    parser.add_argument(
         "--split", action="store_true", help="Split PRD spec into individual test specs (one per test case)"
     )
     parser.add_argument("--split-output-dir", help="Output directory for split specs (default: <spec-name>-tests/)")
@@ -1585,6 +1590,7 @@ def main():
                     max_iterations=args.max_iterations,
                     skip_planning=False,
                     existing_test_path=existing_test_path,  # Triggers healing-only mode when set
+                    healer_max_attempts=args.healer_max_attempts,
                     force_api=getattr(args, "api", False),
                 )
             )

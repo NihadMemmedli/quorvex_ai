@@ -46,6 +46,7 @@ from orchestrator.services.handoff_manifest import (
 from orchestrator.utils.agent_runner import (
     AgentResult,
     AgentRunner,
+    NATIVE_SETUP_SEED_FILE,
     get_default_timeout,
 )
 from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
@@ -244,6 +245,13 @@ class NativeGenerator:
         logger.info("Invoking Playwright Generator Agent...")
         result = await self._query_generator_agent(prompt)
         agent_result = self.last_agent_result
+        if self._should_retry_after_setup_seed_failure(agent_result):
+            logger.warning(
+                "Retrying native generator once after setup seed discovery failure"
+            )
+            retry_prompt = self._build_setup_seed_retry_prompt(prompt)
+            result = await self._query_generator_agent(retry_prompt)
+            agent_result = self.last_agent_result
 
         # Check if the agent created the file
         if output_path.exists():
@@ -408,6 +416,45 @@ class NativeGenerator:
                 if isinstance(value, str) and self._looks_like_playwright_test(value):
                     return value
         return None
+
+    @staticmethod
+    def _build_setup_seed_retry_prompt(prompt: str) -> str:
+        return (
+            f"{prompt}\n\n"
+            "## Retry Correction\n"
+            "The previous generator attempt failed during setup seed discovery. "
+            "Call `generator_setup_page` without `seedFile`; do not pass the generated spec path as seed. "
+            f"The run-local seed is `{NATIVE_SETUP_SEED_FILE}` and Playwright Test MCP discovers it automatically."
+        )
+
+    @classmethod
+    def _should_retry_after_setup_seed_failure(
+        cls, agent_result: AgentResult | None
+    ) -> bool:
+        if agent_result is None or getattr(agent_result, "success", True):
+            return False
+        haystack_parts = [
+            str(getattr(agent_result, "error", "") or ""),
+            str(getattr(agent_result, "output", "") or ""),
+        ]
+        for call in getattr(agent_result, "tool_calls", []) or []:
+            name = str(getattr(call, "name", "") or "")
+            short_name = name.rsplit("__", 1)[-1] if "__" in name else name
+            tool_input = getattr(call, "input", None)
+            if short_name == "generator_setup_page" and isinstance(tool_input, dict):
+                seed_file = tool_input.get("seedFile")
+                if seed_file is not None and seed_file != NATIVE_SETUP_SEED_FILE:
+                    return True
+            haystack_parts.extend(
+                [
+                    str(getattr(call, "error", "") or ""),
+                    str(getattr(call, "result_preview", "") or ""),
+                ]
+            )
+        haystack = "\n".join(haystack_parts).lower()
+        return "seed test not found" in haystack or (
+            "seed.spec" in haystack and "not found" in haystack
+        )
 
     def _record_generated_test_handoff(
         self,
@@ -1194,7 +1241,13 @@ changes, completed status, or `page.waitForResponse(...)` when appropriate.
 
 ## Browser Authentication Context
 The browser starts authenticated with saved session `{session_name}`.
+Target preflight status: `{auth_context.get('auth_preflight_status') or 'not_recorded'}`.
+Target URL: `{auth_context.get('auth_preflight_target_url') or auth_context.get('target_url') or 'not_recorded'}`.
+Final URL: `{auth_context.get('auth_preflight_final_url') or auth_context.get('auth_preflight_url') or 'not_recorded'}`.
 Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure.
+Use the Playwright `page` fixture so the configured storageState remains active.
+Do not call `browser.newContext()` or pass `storageState: undefined` unless the spec explicitly requires an unauthenticated browser.
+Do not convert authenticated assertions into unauthenticated/login-page assertions or `test.fixme()` unless target auth preflight failed and the run is auth-blocked.
 """
 
         memory_section = self._build_memory_context_section(
@@ -1227,7 +1280,7 @@ Context: User wants to generate automated tests from the following test plan.
 ## Instructions
 
 For each test case in the spec:
-1. Call `generator_setup_page` with `seedFile: "tests/seed.spec.ts"` to initialize the browser
+1. Call `generator_setup_page` without `seedFile` to initialize the browser. The run-local seed is `tests/seed.spec.ts`; Playwright Test MCP discovers it automatically.
 2. **IMMEDIATELY** call `browser_navigate` to go to the supplied target URL: `{target_url or "read the first explicit http(s) URL in the spec"}`
    - Navigate only to that supplied target URL at setup time unless a test step explicitly requires another route.
    - The default page is example.com - NOT your target. Navigate explicitly.
@@ -1535,6 +1588,8 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             memory_stage="native_generator",
             inject_memory=False,
             requires_live_browser=True,
+            resume_session_id=None,
+            continue_conversation=False,
             preserve_browser_on_failure=self.owner_type == "autopilot",
             autopilot_agent_kind=getattr(self, "autopilot_agent_kind", "test_generation"),
             runner_cls=AgentRunner,

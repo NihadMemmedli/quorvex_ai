@@ -96,6 +96,7 @@ class NativeHealer:
         memory_run_id: str | None = None,
         attempt_context: str | None = None,
         attempt_number: int | None = None,
+        max_attempts: int | None = None,
         browser: str | None = None,
         failure_metadata: dict[str, Any] | None = None,
     ) -> str | None:
@@ -128,6 +129,7 @@ class NativeHealer:
             memory_run_id=memory_run_id,
             attempt_context=attempt_context,
             attempt_number=attempt_number,
+            max_attempts=max_attempts,
             browser=browser,
             failure_metadata=failure_metadata,
         )
@@ -326,6 +328,7 @@ Rules:
         memory_run_id: str | None = None,
         attempt_context: str | None = None,
         attempt_number: int | None = None,
+        max_attempts: int | None = None,
         browser: str | None = None,
         failure_metadata: dict[str, Any] | None = None,
     ) -> str:
@@ -343,7 +346,8 @@ Rules:
 
         attempt_section = ""
         if attempt_number:
-            attempt_section = f"\nThis is healing attempt {attempt_number} of 3.\n"
+            total_attempts = max_attempts or 3
+            attempt_section = f"\nThis is healing attempt {attempt_number} of {total_attempts}.\n"
         if attempt_context:
             attempt_section += f"""
 ## Prior Healing Attempts (do not repeat failed fixes)
@@ -438,6 +442,7 @@ If the MCP server supports locations, this is also file-scoped:
             source_id=test_file,
             run_id=memory_run_id,
         )
+        auth_section = self._browser_auth_prompt_context()
         test_context = self._healer_test_context(test_content, error_log=error_log)
 
         prompt = f"""You are the Playwright Test Healer.
@@ -455,6 +460,7 @@ If the MCP server supports locations, this is also file-scoped:
 {diagnosis_section}
 {failure_section}
 {test_data_section}
+{auth_section}
 {memory_section}
 
 ## Your Workflow
@@ -496,6 +502,7 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - Use Playwright best practices
 - Preserve the debug browser state; do not close it manually after `test_debug`.
 - Preserve test intent. Do not remove assertions to make the test pass. If the behavior is genuinely not testable, use an explicit `test.fixme()` with a reason.
+- If browser auth storage state is attached and target preflight passed, do not replace authenticated checks with unauthenticated/login-page assertions or `test.fixme()`.
 - For sort/select/dropdown tests, do not assert a persisted default value unless live evidence proves it is deterministic. Prefer asserting valid options exist, then call `selectOption` and verify the selected value changes to the chosen option.
 - If `quorvex_record_note` is available, record durable notes only for meaningful findings, decisions, blockers, handoffs, or final root cause. Do not record routine low-level tool activity as notes.
 - In your final response, include `strategy: ...`, `root_cause: ...`, and `changed_selectors: ...`.
@@ -512,6 +519,35 @@ Start with `test_list` only if needed to identify the failed test. Otherwise sta
             rendered_prompt=prompt,
         )
         return attach_prompt_metadata(prompt, metadata)
+
+    @staticmethod
+    def _load_browser_auth_context() -> dict[str, Any]:
+        try:
+            raw = os.environ.get("QUORVEX_BROWSER_AUTH_CONTEXT")
+            value = json.loads(raw) if raw else {}
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _browser_auth_prompt_context(self) -> str:
+        context = self._load_browser_auth_context()
+        if not context.get("storage_state_attached"):
+            return ""
+        session_name = (
+            context.get("browser_auth_session_name")
+            or context.get("browser_auth_session_id")
+            or "selected session"
+        )
+        return (
+            "\n## Browser Authentication Context\n"
+            f"The browser starts authenticated with saved session `{session_name}`.\n"
+            f"Target preflight status: `{context.get('auth_preflight_status') or 'not_recorded'}`.\n"
+            f"Target URL: `{context.get('auth_preflight_target_url') or context.get('target_url') or 'not_recorded'}`.\n"
+            f"Final URL: `{context.get('auth_preflight_final_url') or context.get('auth_preflight_url') or 'not_recorded'}`.\n"
+            "Use the Playwright `page` fixture so configured storageState remains active. "
+            "Do not call `browser.newContext()` or pass `storageState: undefined` unless the failed scenario explicitly requires an unauthenticated browser. "
+            "Do not convert authenticated assertions into unauthenticated assertions or `test.fixme()` unless target auth preflight failed and the run is auth-blocked.\n"
+        )
 
     def _build_memory_context_section(
         self,

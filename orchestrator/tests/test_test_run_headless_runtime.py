@@ -56,6 +56,22 @@ def test_resolve_run_headless_env_overrides_db_settings():
     )
 
 
+def test_resolve_run_headless_parallel_setting_overrides_headed_env():
+    assert (
+        resolve_run_headless_mode(
+            env={
+                "HEADLESS": "false",
+                "PLAYWRIGHT_HEADLESS": "false",
+                "VNC_ENABLED": "true",
+                "DISPLAY": ":99",
+            },
+            execution_settings=_Settings(headless_in_parallel=True),
+            requested_parallelism=5,
+        )
+        is True
+    )
+
+
 def test_resolve_run_headless_vnc_requires_display():
     assert resolve_run_headless_mode(env={"VNC_ENABLED": "true"}) is True
     assert resolve_run_headless_mode(env={"VNC_ENABLED": "true", "DISPLAY": ":99"}) is False
@@ -82,6 +98,8 @@ def _fake_runtime(tmp_path, captured_env):
 
     def capture_subprocess(**kwargs):
         captured_env.update(kwargs["env"])
+        captured_env["_cmd"] = kwargs["cmd"]
+        captured_env["_timeout_seconds"] = kwargs["timeout_seconds"]
 
     return SimpleNamespace(
         datetime=datetime,
@@ -156,6 +174,53 @@ def test_execute_run_task_honors_test_run_playwright_workers_for_headless_subpro
     assert captured_env["PLAYWRIGHT_WORKERS"] == "4"
 
 
+def test_execute_run_task_injects_ai_timeout_env_and_subprocess_timeout(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    captured_env = {}
+    runtime = _fake_runtime(tmp_path, captured_env)
+
+    execute_run_task(
+        runtime,
+        spec_path=str(tmp_path / "spec.md"),
+        run_dir=str(tmp_path / "run"),
+        run_id="run-ai-timeout",
+        headless=True,
+        ai_pipeline_timeout_seconds=86400,
+    )
+
+    assert captured_env["_timeout_seconds"] == 86400
+    assert captured_env["AI_PIPELINE_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["GENERATOR_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["PLANNER_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["HEALER_TIMEOUT_SECONDS"] == "86400"
+    assert captured_env["BROWSER_SLOT_TIMEOUT"] == "86400"
+
+
+def test_execute_run_task_passes_healer_attempt_limit_to_cli(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    captured_env = {}
+    runtime = _fake_runtime(tmp_path, captured_env)
+
+    execute_run_task(
+        runtime,
+        spec_path=str(tmp_path / "spec.md"),
+        run_dir=str(tmp_path / "run"),
+        run_id="run-healer-limit",
+        headless=True,
+        healer_max_attempts=1,
+    )
+
+    cmd = captured_env["_cmd"]
+    assert "--healer-max-attempts" in cmd
+    assert cmd[cmd.index("--healer-max-attempts") + 1] == "1"
+
+
 def test_execute_run_task_sets_headed_subprocess_env_for_vnc_runs(
     tmp_path,
     monkeypatch,
@@ -200,3 +265,23 @@ def test_resolve_effective_browser_parallelism_clamps_only_headed_vnc_runs():
     assert headless["headless"] is True
     assert headless["effective_parallelism"] == 5
     assert headless["parallelism_clamp_reason"] is None
+
+
+def test_resolve_effective_browser_parallelism_honors_headless_parallel_setting_over_headed_env():
+    effective_parallelism = test_run_runtime_support.resolve_effective_browser_parallelism
+
+    resolved = effective_parallelism(
+        requested_parallelism=5,
+        env={
+            "VNC_ENABLED": "true",
+            "DISPLAY": ":99",
+            "HEADLESS": "false",
+            "PLAYWRIGHT_HEADLESS": "false",
+        },
+        execution_settings=_Settings(headless_in_parallel=True),
+    )
+
+    assert resolved["headless"] is True
+    assert resolved["effective_parallelism"] == 5
+    assert resolved["browser_runtime_mode"] == "headless"
+    assert resolved["parallelism_clamp_reason"] is None

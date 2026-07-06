@@ -175,6 +175,7 @@ class AgentBrowserAuthPreflightError(AgentBrowserAuthResolutionError):
 @dataclass(frozen=True)
 class BrowserAuthPreflightResult:
     status: str
+    target_url: str | None = None
     url: str | None = None
     title: str | None = None
     failure_reason: str | None = None
@@ -315,6 +316,7 @@ def _run_browser_auth_preflight(
     except subprocess.TimeoutExpired:
         return BrowserAuthPreflightResult(
             status="failed",
+            target_url=_sanitize_preflight_url(target_url),
             failure_kind="timeout",
             failure_reason="Saved browser session validation timed out before the target page opened.",
         )
@@ -328,6 +330,7 @@ def _run_browser_auth_preflight(
         error = str(payload.get("error") or result.stderr or "Browser auth session validation failed.").strip()
         return BrowserAuthPreflightResult(
             status="failed",
+            target_url=_sanitize_preflight_url(target_url),
             failure_kind="preflight_error",
             failure_reason=f"Saved browser session validation failed before the target page opened: {error[:500]}",
         )
@@ -341,6 +344,7 @@ def _run_browser_auth_preflight(
     if failure_reason:
         return BrowserAuthPreflightResult(
             status="failed",
+            target_url=_sanitize_preflight_url(target_url),
             url=_sanitize_preflight_url(payload.get("url")),
             title=str(payload.get("title") or "")[:300],
             failure_kind=failure_kind,
@@ -348,6 +352,7 @@ def _run_browser_auth_preflight(
         )
     return BrowserAuthPreflightResult(
         status="passed",
+        target_url=_sanitize_preflight_url(target_url),
         url=_sanitize_preflight_url(payload.get("url")),
         title=str(payload.get("title") or "")[:300],
     )
@@ -360,8 +365,10 @@ def _preflight_progress_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "storage_state_attached": storage_state_attached,
+        "auth_preflight_target_url": _sanitize_preflight_url(result.target_url),
         "auth_preflight_status": result.status,
         "auth_preflight_url": _sanitize_preflight_url(result.url),
+        "auth_preflight_final_url": _sanitize_preflight_url(result.url),
         "auth_preflight_title": result.title,
     }
     if result.failure_reason:

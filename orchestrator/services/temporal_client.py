@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +14,12 @@ from typing import Any
 from orchestrator.config import settings
 
 logger = logging.getLogger(__name__)
+
+_TASK_QUEUE_DESCRIBE_CACHE_TTL_SECONDS = 5.0
+_TASK_QUEUE_DESCRIBE_STALE_TTL_SECONDS = 60.0
+_task_queue_describe_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_task_queue_describe_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+_task_queue_describe_lock = asyncio.Lock()
 
 
 class TemporalUnavailableError(RuntimeError):
@@ -174,6 +182,52 @@ def _domain_job_memo(job_type: str, job_id: str, payload: dict[str, Any]) -> dic
 
 async def describe_temporal_task_queue(task_queue: str) -> dict[str, Any]:
     """Return live Temporal task queue poller counts for workflow and activity tasks."""
+    now = time.monotonic()
+    cached = _task_queue_describe_cache.get(task_queue)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    async with _task_queue_describe_lock:
+        now = time.monotonic()
+        cached = _task_queue_describe_cache.get(task_queue)
+        if cached and cached[0] > now:
+            return cached[1]
+        task = _task_queue_describe_inflight.get(task_queue)
+        if task is None:
+            task = asyncio.create_task(_describe_temporal_task_queue_uncached(task_queue))
+            _task_queue_describe_inflight[task_queue] = task
+            owner = True
+        else:
+            owner = False
+
+    try:
+        status = await task
+    except TemporalUnavailableError as exc:
+        cached = _task_queue_describe_cache.get(task_queue)
+        if cached and cached[0] + _TASK_QUEUE_DESCRIBE_STALE_TTL_SECONDS > time.monotonic():
+            message = str(exc).lower()
+            if "rate limit" in message or "resource exhausted" in message:
+                logger.warning(
+                    "Temporal task queue describe for %s hit a rate limit; using recent cached status",
+                    task_queue,
+                )
+                return cached[1]
+        raise
+    finally:
+        if owner:
+            async with _task_queue_describe_lock:
+                if _task_queue_describe_inflight.get(task_queue) is task:
+                    _task_queue_describe_inflight.pop(task_queue, None)
+
+    _task_queue_describe_cache[task_queue] = (
+        time.monotonic() + _TASK_QUEUE_DESCRIBE_CACHE_TTL_SECONDS,
+        status,
+    )
+    return status
+
+
+async def _describe_temporal_task_queue_uncached(task_queue: str) -> dict[str, Any]:
+    """Return live Temporal task queue status without local coalescing/cache."""
     client = await _connect_client()
     try:
         from temporalio.api.enums.v1 import TaskQueueType

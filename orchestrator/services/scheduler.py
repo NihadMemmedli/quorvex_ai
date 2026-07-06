@@ -597,7 +597,12 @@ async def _execute_scheduled_batch(schedule_id: str, execution_id: int = None):
 
     # Build batch config and create the batch
     try:
-        from orchestrator.services.batch_executor import BatchConfig, create_regression_batch
+        from orchestrator.services.batch_executor import BatchConfig, create_regression_batch, select_regression_specs
+        from orchestrator.services.scheduled_batch_executor import (
+            create_scheduled_regression_batch,
+            dispatch_scheduled_batch,
+            should_schedule_bulk_run,
+        )
 
         config = BatchConfig(
             project_id=project_id,
@@ -612,6 +617,55 @@ async def _execute_scheduled_batch(schedule_id: str, execution_id: int = None):
         )
 
         with Session(engine) as session:
+            selected_spec_names = select_regression_specs(config, session)
+            if should_schedule_bulk_run(len(selected_spec_names)):
+                from orchestrator.api import main as main_module
+
+                scheduled_max_active_runs = None
+                if main_module.BROWSER_POOL is not None:
+                    scheduled_max_active_runs = getattr(
+                        main_module.BROWSER_POOL,
+                        "effective_max_browsers",
+                        getattr(main_module.BROWSER_POOL, "max_browsers", None),
+                    )
+
+                scheduled_result = create_scheduled_regression_batch(
+                    config,
+                    session,
+                    spec_names=selected_spec_names,
+                    browser_auth_session_id=None,
+                    use_project_default_browser_auth=False,
+                    model_tier=None,
+                    max_active_runs=scheduled_max_active_runs,
+                )
+                batch_id = scheduled_result.batch_id
+
+                execution = session.get(ScheduleExecution, execution_id)
+                if execution:
+                    execution.batch_id = batch_id
+                    execution.total_tests = scheduled_result.count
+                    session.add(execution)
+
+                schedule = session.get(CronSchedule, schedule_id)
+                if schedule:
+                    schedule.last_run_at = datetime.now(timezone.utc)
+                    schedule.last_batch_id = batch_id
+                    schedule.total_executions += 1
+                    schedule.last_error = None
+                    schedule.status = "active"
+                    session.add(schedule)
+                session.commit()
+
+                dispatched = await dispatch_scheduled_batch(main_module, batch_id)
+                logger.info(
+                    "Schedule %s created durable batch %s with %d planned tests; dispatched %d",
+                    schedule_id,
+                    batch_id,
+                    scheduled_result.count,
+                    dispatched,
+                )
+                return
+
             result = create_regression_batch(config, session)
 
         batch_id = result.batch_id

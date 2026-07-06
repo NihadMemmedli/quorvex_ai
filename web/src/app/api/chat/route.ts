@@ -13,7 +13,7 @@ import {
 import { buildSystemPrompt } from '@/lib/ai/system-prompt';
 import { createAssistantTools } from '@/lib/ai/tools';
 import { backendFetch } from '@/lib/ai/backend-client';
-import { routeAssistantIntent } from '@/lib/ai/intent-router';
+import { enforceMutatingActionApproval, routeAssistantIntent } from '@/lib/ai/intent-router';
 
 export const maxDuration = 120;
 const OPTIONAL_CONTEXT_TIMEOUT_MS = 1500;
@@ -1047,6 +1047,14 @@ export async function POST(req: Request) {
   const authHeader = req.headers.get('authorization');
   const authToken = authHeader?.replace('Bearer ', '') || undefined;
   const latestUserText = extractLatestUserText(messages);
+  const enforcedActionRoute = enforceMutatingActionApproval(messages);
+  if (enforcedActionRoute?.kind === 'clarify') {
+    return textToUIMessageResponse(enforcedActionRoute.text);
+  }
+  if (enforcedActionRoute?.kind === 'action') {
+    return toolInputUIMessageResponse(enforcedActionRoute.text, enforcedActionRoute.toolName, enforcedActionRoute.input);
+  }
+
   const runtimeSettings = await getChatRuntimeSettings(authToken);
   const useClaudeCode = usesClaudeCodeSubscription(runtimeSettings);
   const useAnthropic = !useClaudeCode && hasDirectAnthropicChatCredential(runtimeSettings);

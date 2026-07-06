@@ -109,6 +109,7 @@ class _NativeRunContext:
     skip_planning: bool
     existing_test_path: str | None
     source_test_path: str | None
+    healer_max_attempts: int | None
     force_api: bool
     handoff_manifest_path: Path
     spec_content: str
@@ -631,6 +632,7 @@ root_cause: one concise sentence, or "none" if passed
         max_iterations: int = 20,
         skip_planning: bool = False,
         existing_test_path: str | None = None,
+        healer_max_attempts: int | None = None,
         force_api: bool = False,
         storage_state_path: str | None = None,
         browser_auth_context: dict[str, Any] | None = None,
@@ -658,6 +660,7 @@ root_cause: one concise sentence, or "none" if passed
             max_iterations=max_iterations,
             skip_planning=skip_planning,
             existing_test_path=existing_test_path,
+            healer_max_attempts=healer_max_attempts,
             force_api=force_api,
             storage_state_path=storage_state_path,
             browser_auth_context=browser_auth_context,
@@ -743,6 +746,7 @@ root_cause: one concise sentence, or "none" if passed
         max_iterations: int,
         skip_planning: bool,
         existing_test_path: str | None,
+        healer_max_attempts: int | None,
         force_api: bool,
         storage_state_path: str | None,
         browser_auth_context: dict[str, Any] | None,
@@ -757,6 +761,7 @@ root_cause: one concise sentence, or "none" if passed
                 "browser": browser,
                 "skip_planning": skip_planning,
                 "existing_test_path": existing_test_path,
+                "healer_max_attempts": healer_max_attempts,
                 "force_api": force_api,
             },
         )
@@ -968,6 +973,7 @@ root_cause: one concise sentence, or "none" if passed
                 skip_planning=skip_planning,
                 existing_test_path=existing_test_path,
                 source_test_path=source_existing_test_path,
+                healer_max_attempts=healer_max_attempts,
                 force_api=force_api,
                 handoff_manifest_path=handoff_manifest_path,
                 spec_content=spec_content,
@@ -1069,6 +1075,7 @@ root_cause: one concise sentence, or "none" if passed
                 diagnosis=diagnosis,
                 plan_path=None,
                 handoff_manifest_path=ctx.handoff_manifest_path,
+                max_attempts=ctx.healer_max_attempts,
             )
         except Exception as e:
             error_msg = f"Healing-only pipeline crashed: {e}"
@@ -2052,6 +2059,7 @@ root_cause: one concise sentence, or "none" if passed
                 diagnosis=diagnosis,
                 plan_path=plan_path,
                 handoff_manifest_path=ctx.handoff_manifest_path,
+                max_attempts=ctx.healer_max_attempts,
             )
 
         cleanup_orphaned_browsers()
@@ -2407,6 +2415,18 @@ root_cause: one concise sentence, or "none" if passed
             return "Generated test file has no Playwright assertions or explicit test.fixme()"
         if test_type == "api" and " request " not in stripped and "{ request" not in stripped:
             return "Generated API test does not use the Playwright request fixture"
+        auth_context = self._load_browser_auth_context()
+        if test_type != "api" and self._auth_context_has_valid_target_session(auth_context):
+            if "test.fixme" in stripped:
+                return "Authenticated target preflight passed; generated browser test must not replace auth-dependent checks with test.fixme()"
+            if self._contains_unauthenticated_auth_downgrade(stripped):
+                return "Authenticated target preflight passed; generated browser test must not downgrade to unauthenticated/login-page assertions"
+            if (
+                re.search(r"\{\s*browser\s*\}", stripped)
+                or "browser.newContext(" in stripped
+                or "storageState: undefined" in stripped
+            ):
+                return "Authenticated target preflight passed; generated browser test must use the page fixture and preserve configured storageState"
 
         if not getattr(self, "generated_preflight_list_enabled", False):
             return None
@@ -2946,8 +2966,34 @@ Requirements:
         return (
             "## Browser Authentication Context\n"
             f"The browser starts authenticated with saved session `{session_name}`. "
-            "Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure."
+            f"Target preflight status: `{context.get('auth_preflight_status') or 'not_recorded'}`. "
+            f"Target URL: `{context.get('auth_preflight_target_url') or context.get('target_url') or 'not_recorded'}`. "
+            f"Final URL: `{context.get('auth_preflight_final_url') or context.get('auth_preflight_url') or 'not_recorded'}`. "
+            "Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure. "
+            "Use the Playwright `page` fixture so the configured storageState remains active. "
+            "Do not call `browser.newContext()` or pass `storageState: undefined` unless the spec explicitly requires an unauthenticated browser. "
+            "Do not convert authenticated assertions into unauthenticated assertions or `test.fixme()` unless target auth preflight failed and the run is auth-blocked."
         )
+
+    @staticmethod
+    def _auth_context_has_valid_target_session(context: dict[str, Any] | None) -> bool:
+        if not context or not context.get("storage_state_attached"):
+            return False
+        return str(context.get("auth_preflight_status") or "").lower() != "failed"
+
+    @staticmethod
+    def _contains_unauthenticated_auth_downgrade(content: str) -> bool:
+        lowered = (content or "").lower()
+        downgrade_patterns = [
+            r"storage state (?:does not|doesn't|did not|didn't) authenticate",
+            r"provided storage state (?:does not|doesn't|did not|didn't) authenticate",
+            r"saved browser session (?:does not|doesn't|did not|didn't) authenticate",
+            r"unauthenticated user",
+            r"not authenticated",
+            r"redirect(?:ed)? to (?:the )?login",
+            r"login page (?:is|should be) visible",
+        ]
+        return any(re.search(pattern, lowered) for pattern in downgrade_patterns)
 
     def _attribute_memory_outcome(
         self,
@@ -3121,6 +3167,7 @@ Requirements:
         error_category: str | None,
         failure_metadata: dict[str, Any] | None = None,
         triage_allows_fixme: bool = False,
+        auth_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tools = [str(call.get("tool") or self._normalized_tool_name(call.get("name"))) for call in tool_calls]
         tool_set = set(tools)
@@ -3160,10 +3207,21 @@ Requirements:
         fixme_before = self._has_test_fixme(content_before)
         fixme_explicit = self._has_test_fixme(content_after)
         newly_introduced_fixme = fixme_explicit and not fixme_before
+        authenticated_target = self._auth_context_has_valid_target_session(
+            auth_context or self._load_browser_auth_context()
+        )
         if assertion_removed and not (fixme_explicit and triage_allows_fixme):
             missing.append("assertion_preservation_or_explicit_test_fixme")
         if changed and newly_introduced_fixme and not triage_allows_fixme:
             missing.append("new_test_fixme_requires_non_healable_triage")
+        if changed and authenticated_target and newly_introduced_fixme:
+            missing.append("authenticated_auth_dependent_test_fixme_forbidden")
+        if (
+            changed
+            and authenticated_target
+            and self._contains_unauthenticated_auth_downgrade(content_after)
+        ):
+            missing.append("authenticated_intent_downgrade_forbidden")
 
         added, removed = self._diff_counts(content_before, content_after)
         before_lines = max(len(content_before.splitlines()), 1)
@@ -3601,12 +3659,16 @@ Requirements:
         diagnosis: dict | None = None,
         plan_path: Path | None = None,
         handoff_manifest_path: Path | None = None,
+        max_attempts: int | None = None,
     ) -> dict:
-        """Native healing: up to 3 attempts with test_run and diagnostic tools."""
-        logger.info("Stage 4: Native Healing (up to 3 attempts)...")
+        """Native healing with bounded attempts and diagnostic tools."""
+        try:
+            max_attempts = max(1, int(max_attempts or 3))
+        except (TypeError, ValueError):
+            max_attempts = 3
+        logger.info("Stage 4: Native Healing (up to %s attempts)...", max_attempts)
         report_progress("healing", "Starting native healing...", healing_attempt=1)
 
-        max_attempts = 3
         error_log = self._build_structured_failure_context(
             test_path=test_path, run_dir=run_dir, result=result
         )
@@ -3800,6 +3862,7 @@ Requirements:
                     memory_run_id=getattr(self, "_memory_run_id", None),
                     attempt_context=self._build_attempt_context(attempt_records),
                     attempt_number=attempt,
+                    max_attempts=max_attempts,
                     browser=browser,
                     failure_metadata=failure_metadata,
                 )
@@ -3824,6 +3887,7 @@ Requirements:
                             or (diagnosis or {}).get("fixme_allowed")
                             or (diagnosis or {}).get("non_healable")
                         ),
+                        auth_context=self._load_browser_auth_context(),
                     )
                     if fixed_code
                     else {
@@ -5780,6 +5844,7 @@ async def run_full_native_pipeline(
     hybrid_healing: bool = False,
     max_iterations: int = 20,
     existing_test_path: str | None = None,
+    healer_max_attempts: int | None = None,
     force_api: bool = False,
 ) -> dict:
     """Convenience function to run the full native pipeline."""
@@ -5791,6 +5856,7 @@ async def run_full_native_pipeline(
         hybrid_healing=hybrid_healing,
         max_iterations=max_iterations,
         existing_test_path=existing_test_path,
+        healer_max_attempts=healer_max_attempts,
         force_api=force_api,
     )
 

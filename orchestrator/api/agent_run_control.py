@@ -291,6 +291,7 @@ async def retry_agent_run(
     source.config = retry_config
     source.runtime = rt.normalize_agent_runtime(retry_config.get("runtime"))
     source.status = "queued"
+    source.result = None
     source.started_at = None
     source.completed_at = None
     source.agent_task_id = None

@@ -2528,9 +2528,19 @@ class AgentWorker:
                     for tool in effective_tools
                     if str(tool).startswith("mcp__") and mcp_config_path.exists()
                 ]
-                cli_tools = [*builtin_tools, *mcp_tools]
-                if cli_tools or effective_tools == []:
-                    cli_args.extend(["--tools", ",".join(cli_tools)])
+                # Claude CLI's --tools flag controls the built-in tool set. In
+                # current Claude Code builds, passing --tools with a restricted
+                # built-in list for an MCP task prevents MCP tools from being
+                # exposed to the model even when --mcp-config and --allowedTools
+                # are correct. For MCP-enabled queued tasks, leave built-in
+                # availability at the CLI default and rely on --allowedTools for
+                # the selected approval surface.
+                if mcp_tools:
+                    logger.info(
+                        "[CLI]   MCP tools requested; omitting --tools built-in restriction so MCP tools can load"
+                    )
+                elif builtin_tools or effective_tools == []:
+                    cli_args.extend(["--tools", ",".join(builtin_tools)])
             elif isinstance(effective_tools, dict) and effective_tools.get("preset") == "claude_code":
                 cli_args.extend(["--tools", "default"])
         if effective_allowed_tools:

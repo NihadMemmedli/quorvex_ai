@@ -26,6 +26,7 @@ from orchestrator.services.agent_run_events import list_agent_run_events
 from orchestrator.services.handoff_manifest import init_manifest, record_artifact
 from orchestrator.utils.agent_runner import AgentResult
 from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
+from orchestrator.workflows.native_healer import NativeHealer
 
 
 def _bare_pipeline() -> FullNativePipeline:
@@ -265,6 +266,84 @@ async def test_native_healing_writes_attempt_history(tmp_path, monkeypatch):
     assert "Attempt 1" in heal_calls[1]["attempt_context"]
     assert heal_calls[1]["attempt_number"] == 2
     assert heal_calls[1]["error_log"].startswith("## Failure After Previous Heal Attempt")
+
+
+@pytest.mark.asyncio
+async def test_native_healing_respects_single_attempt_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.workflows.full_native_pipeline.report_progress",
+        lambda *args, **kwargs: None,
+    )
+
+    pipeline = _bare_pipeline()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    test_path = tmp_path / "foo.spec.ts"
+    test_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('v1', async ({ page }) => { await expect(page.locator('#old')).toBeVisible(); });\n"
+    )
+
+    heal_calls: list[dict] = []
+
+    class FakeHealer:
+        last_agent_output = "strategy: replace selector"
+        last_tool_calls = [
+            {
+                "name": "mcp__playwright-test__test_debug",
+                "input": {
+                    "file": str(test_path),
+                    "project": "chromium",
+                    "grep": "v1",
+                },
+            },
+            {"name": "mcp__playwright-test__browser_snapshot"},
+        ]
+
+        async def heal_test(self, test_file, error_log, **kwargs):
+            heal_calls.append({"error_log": error_log, **kwargs})
+            content = Path(test_file).read_text().replace("#old", "#new")
+            Path(test_file).write_text(content)
+            return content
+
+    class FakeTriage:
+        def condensed_context(self, diagnosis):
+            return None
+
+    pipeline.native_healer = FakeHealer()
+    pipeline.failure_triage_agent = FakeTriage()
+    pipeline._run_test = lambda *args, **kwargs: TestResult(
+        passed=False,
+        exit_code=1,
+        output="still failing",
+        error_summary="locator timeout",
+    )
+    pipeline._build_structured_failure_context = lambda **kwargs: "STRUCTURED-CONTEXT"
+
+    async def _no_stability(**kwargs):
+        return None
+
+    pipeline._verify_stability_or_harden = _no_stability
+    pipeline._publish_agentic_summary = lambda run_dir: None
+
+    outcome = await pipeline._native_healing(
+        test_path,
+        run_dir,
+        "chromium",
+        TestResult(passed=False, exit_code=1, output="boom", error_summary="locator timeout"),
+        max_attempts=1,
+    )
+
+    assert outcome["success"] is False
+    assert outcome["attempts"] == 1
+    assert len(heal_calls) == 1
+    assert heal_calls[0]["attempt_number"] == 1
+    assert heal_calls[0]["max_attempts"] == 1
+    payload = json.loads((run_dir / "healing_attempts.json").read_text())
+    assert len(payload["attempts"]) == 1
+    validation = json.loads((run_dir / "validation.json").read_text())
+    assert validation["iterations"] == 1
+    assert "Failed after 1 native healing attempts" in validation["message"]
 
 
 @pytest.mark.asyncio
@@ -693,6 +772,96 @@ def test_assertion_removal_blocks_new_fixme_without_triage_override():
     )
     assert "assertion_preservation_or_explicit_test_fixme" not in fixme_allowed["missing_required_tools"]
     assert "new_test_fixme_requires_non_healable_triage" not in fixme_allowed["missing_required_tools"]
+
+
+def test_healer_guardrail_blocks_authenticated_intent_downgrade():
+    pipeline = _bare_pipeline()
+    before = "test('applications', async ({ page }) => { await expect(page.getByText('Applications')).toBeVisible(); });"
+    after = "test.fixme('provided storage state does not authenticate target', async () => {});"
+
+    result = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_run", "tool": "test_run"},
+            {"name": "mcp__playwright-test__browser_network_requests", "tool": "browser_network_requests"},
+        ],
+        error_category="auth",
+        triage_allows_fixme=True,
+        auth_context={
+            "storage_state_attached": True,
+            "auth_preflight_status": "passed",
+            "auth_preflight_target_url": "https://staging.my.gov.az/applications",
+        },
+    )
+
+    assert result["guardrail_status"] == "failed"
+    assert "authenticated_auth_dependent_test_fixme_forbidden" in result["missing_required_tools"]
+    assert "authenticated_intent_downgrade_forbidden" in result["missing_required_tools"]
+
+
+def test_native_healer_prompt_includes_browser_auth_context(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "QUORVEX_BROWSER_AUTH_CONTEXT",
+        json.dumps(
+            {
+                "storage_state_attached": True,
+                "browser_auth_session_name": "Nihad_Login",
+                "auth_preflight_status": "passed",
+                "auth_preflight_target_url": "https://staging.my.gov.az/applications",
+                "auth_preflight_final_url": "https://staging.my.gov.az/applications",
+            }
+        ),
+    )
+    test_file = tmp_path / "auth.spec.ts"
+    test_file.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('applications', async ({ page }) => { await expect(page.getByText('Applications')).toBeVisible(); });\n"
+    )
+
+    prompt = NativeHealer()._build_healer_prompt(
+        test_file=str(test_file),
+        test_content=test_file.read_text(),
+        error_log="Timeout waiting for Applications",
+    )
+
+    assert "## Browser Authentication Context" in prompt
+    assert "Nihad_Login" in prompt
+    assert "https://staging.my.gov.az/applications" in prompt
+    assert "Do not convert authenticated assertions" in prompt
+
+
+def test_generated_file_rejects_authenticated_unauthenticated_replacement(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "QUORVEX_BROWSER_AUTH_CONTEXT",
+        json.dumps(
+            {
+                "storage_state_attached": True,
+                "auth_preflight_status": "passed",
+                "auth_preflight_target_url": "https://staging.my.gov.az/applications",
+            }
+        ),
+    )
+    test_path = tmp_path / "generated.spec.ts"
+    test_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('applications', async ({ page }) => {\n"
+        "  await page.goto('https://staging.my.gov.az/applications');\n"
+        "  await expect(page.getByText('Login page is visible')).toBeVisible();\n"
+        "});\n"
+    )
+    pipeline = _bare_pipeline()
+    pipeline.generated_preflight_list_enabled = False
+
+    error = pipeline._validate_generated_test_file(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="browser",
+    )
+
+    assert error is not None
+    assert "must not downgrade" in error
 
 
 def test_assertion_guardrail_allows_equivalent_assertion_replacement():

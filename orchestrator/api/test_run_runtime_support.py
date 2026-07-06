@@ -10,6 +10,12 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from orchestrator.api.agent_run_runtime_support import (
+    BrowserAuthPreflightResult,
+    _preflight_progress_payload,
+    _run_browser_auth_preflight,
+    _sanitize_preflight_url,
+)
 from orchestrator.utils.playwright_mcp import (
     display_aware_headless,
     display_capable_vnc_enabled,
@@ -188,8 +194,14 @@ def resolve_run_headless_mode(
     *,
     env: dict[str, str] | None = None,
     execution_settings: Any | None = None,
+    requested_parallelism: int | None = None,
 ) -> bool:
     """Resolve browser visibility for server-triggered test runs."""
+    if requested_parallelism is not None and _positive_int(requested_parallelism, default=1) > 1:
+        settings_headless = getattr(execution_settings, "headless_in_parallel", None)
+        if settings_headless is not None:
+            return display_aware_headless(bool(settings_headless), env)
+
     explicit_headless = requested_headless_from_env(env)
     if explicit_headless is not None:
         return display_aware_headless(explicit_headless, env)
@@ -214,6 +226,23 @@ def _positive_int(value: Any, *, default: int, maximum: int | None = None) -> in
     return parsed
 
 
+def resolve_ai_pipeline_timeout_seconds(value: Any | None = None) -> int:
+    from orchestrator.services.execution_timeouts import (
+        clamp_ai_pipeline_timeout_seconds,
+        get_persisted_ai_pipeline_timeout_seconds,
+    )
+
+    if value is not None:
+        return clamp_ai_pipeline_timeout_seconds(value)
+    return get_persisted_ai_pipeline_timeout_seconds()
+
+
+def resolve_test_run_queue_wait_timeout_seconds(value: Any | None = None) -> int:
+    from orchestrator.services.execution_timeouts import get_test_run_queue_wait_timeout_seconds
+
+    return get_test_run_queue_wait_timeout_seconds(resolve_ai_pipeline_timeout_seconds(value))
+
+
 def resolve_test_run_playwright_workers(
     *,
     env: dict[str, str] | None = None,
@@ -234,7 +263,11 @@ def resolve_effective_browser_parallelism(
 ) -> dict[str, Any]:
     """Resolve browser pool capacity with shared VNC display safety applied."""
     requested = _positive_int(requested_parallelism, default=1)
-    headless = resolve_run_headless_mode(env=env, execution_settings=execution_settings)
+    headless = resolve_run_headless_mode(
+        env=env,
+        execution_settings=execution_settings,
+        requested_parallelism=requested,
+    )
     shared_vnc_display = display_capable_vnc_enabled(env) and not headless
     effective = 1 if shared_vnc_display else requested
     return {
@@ -285,6 +318,8 @@ def execute_run_task(
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
     test_data_refs: list[str] | None = None,
+    healer_max_attempts: int | None = None,
+    ai_pipeline_timeout_seconds: int | None = None,
 ):
     """Execute the native pipeline with optional hybrid healing mode."""
     headless = display_aware_headless(headless, runtime.os.environ)
@@ -326,6 +361,8 @@ def execute_run_task(
         cmd.extend(["--try-code", try_code_path])
     if hybrid:
         cmd.extend(["--hybrid", "--max-iterations", str(max_iterations)])
+    if healer_max_attempts is not None:
+        cmd.extend(["--healer-max-attempts", str(max(1, int(healer_max_attempts)))])
 
     run_dir_path = Path(run_dir)
     runtime._write_run_browser_metadata(
@@ -355,6 +392,23 @@ def execute_run_task(
         storage_state_path=storage_state_path,
         agent_run_id=run_id,
     )
+    if storage_state_path:
+        try:
+            config_has_storage_state = (
+                playwright_config_dst.exists()
+                and "storageState:" in playwright_config_dst.read_text()
+            )
+            with runtime.Session(runtime.engine) as session:
+                run = session.get(runtime.DBTestRun, run_id)
+                if run:
+                    auth_context = dict(run.browser_auth or {})
+                    auth_context["storage_state_file_written"] = Path(storage_state_path).exists()
+                    auth_context["playwright_config_storage_state_attached"] = config_has_storage_state
+                    run.browser_auth = auth_context
+                    session.add(run)
+                    session.commit()
+        except Exception as exc:
+            runtime.logger.debug("Could not record browser auth storage state config status for %s: %s", run_id, exc)
     runtime._write_run_browser_metadata(
         run_dir_path,
         runtime._merge_run_browser_metadata(
@@ -375,7 +429,11 @@ def execute_run_task(
     seed_dst = runtime._write_run_seed_spec(run_dir_path, target_url)
     runtime.logger.debug(f"Wrote run seed file: {seed_dst} (target_url={target_url or 'about:blank'})")
 
+    execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds(ai_pipeline_timeout_seconds)
     env = runtime.os.environ.copy()
+    from orchestrator.services.execution_timeouts import ai_pipeline_timeout_env_vars
+
+    env.update(ai_pipeline_timeout_env_vars(execution_timeout_seconds))
     env["HEADLESS"] = "true" if headless else "false"
     env["PLAYWRIGHT_HEADLESS"] = "true" if headless else "false"
     env["PLAYWRIGHT_WORKERS"] = str(resolve_test_run_playwright_workers(env=env, headless=headless))
@@ -412,7 +470,7 @@ def execute_run_task(
         spec_name=spec_name,
         batch_id=batch_id,
         append_workflow_log=_append_workflow_log,
-        timeout_seconds=3600,
+        timeout_seconds=execution_timeout_seconds,
     )
 
 
@@ -432,6 +490,7 @@ async def execute_run_task_wrapper(
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
     test_data_refs: list[str] | None = None,
+    healer_max_attempts: int | None = None,
 ):
     """Async wrapper for execute_run_task with unified browser queue management."""
 
@@ -453,9 +512,13 @@ async def execute_run_task_wrapper(
 
     headless = True
     memory_enabled = True
+    execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds()
     with runtime.Session(runtime.engine) as session:
         settings = session.get(runtime.DBExecutionSettings, 1)
         if settings:
+            execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds(
+                getattr(settings, "ai_pipeline_timeout_seconds", None)
+            )
             headless = resolve_run_headless_mode(
                 env=runtime.os.environ,
                 execution_settings=settings,
@@ -477,12 +540,25 @@ async def execute_run_task_wrapper(
     await check_system_available("test run")
 
     try:
-        _append_workflow_log("Waiting for browser slot.", browser_slot_request_id=run_id)
+        queue_wait_timeout_seconds = resolve_test_run_queue_wait_timeout_seconds(execution_timeout_seconds)
+        _append_workflow_log(
+            "Waiting for browser slot.",
+            browser_slot_request_id=run_id,
+            timeout_seconds=queue_wait_timeout_seconds,
+        )
+        with runtime.Session(runtime.engine) as session:
+            run = session.get(runtime.DBTestRun, run_id)
+            if run and run.status not in ("stopped", "cancelled", "passed", "failed", "error", "completed"):
+                run.status = "queued"
+                run.stage_message = "Waiting for browser slot"
+                session.add(run)
+                session.commit()
         async with pool.browser_slot(
             request_id=run_id,
             operation_type=runtime.BrowserOpType.TEST_RUN,
             description=f"Test: {spec_name or spec_path}",
-            max_operation_duration=7200,
+            timeout=queue_wait_timeout_seconds,
+            max_operation_duration=execution_timeout_seconds,
         ) as acquired:
             if not acquired:
                 runtime.logger.warning(f"Run {run_id} failed to acquire browser slot (timeout)")
@@ -515,6 +591,8 @@ async def execute_run_task_wrapper(
                     run.status = "running"
                     run.started_at = runtime.datetime.utcnow()
                     run.queue_position = None
+                    run.current_stage = "generating"
+                    run.stage_message = f"Running AI generation with timeout {execution_timeout_seconds} seconds"
                     session.add(run)
                     session.commit()
                     ensure_linked_agent_run_for_test_run(
@@ -549,6 +627,8 @@ async def execute_run_task_wrapper(
                 storage_state_path,
                 browser_auth_context,
                 test_data_refs,
+                healer_max_attempts,
+                execution_timeout_seconds,
             )
             _append_workflow_log("Native run executor returned.", run_id=run_id)
 
@@ -919,10 +999,39 @@ async def start_test_run_temporal_or_fail(
     task_queue: str | None = None,
 ) -> None:
     from orchestrator.config import settings as app_settings
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_test_run_workflow
+    from orchestrator.services.temporal_client import (
+        TemporalUnavailableError,
+        describe_temporal_task_queue,
+        start_test_run_workflow,
+    )
 
     selected_task_queue = task_queue or app_settings.temporal_browser_workflow_task_queue
+    execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds()
     try:
+        with runtime.Session(runtime.engine) as settings_session:
+            settings = settings_session.get(runtime.DBExecutionSettings, 1)
+            if settings:
+                execution_timeout_seconds = resolve_ai_pipeline_timeout_seconds(
+                    getattr(settings, "ai_pipeline_timeout_seconds", None)
+                )
+    except Exception:
+        pass
+    payload = {
+        **payload,
+        "ai_pipeline_timeout_seconds": execution_timeout_seconds,
+        "browser_slot_wait_timeout_seconds": resolve_test_run_queue_wait_timeout_seconds(
+            execution_timeout_seconds
+        ),
+    }
+    try:
+        task_queue_status = await describe_temporal_task_queue(selected_task_queue)
+        workflow_pollers = int((task_queue_status.get("workflow") or {}).get("poller_count") or 0)
+        activity_pollers = int((task_queue_status.get("activity") or {}).get("poller_count") or 0)
+        if workflow_pollers <= 0 or activity_pollers <= 0:
+            raise TemporalUnavailableError(
+                f"No Temporal pollers for task queue {selected_task_queue} "
+                f"(workflow={workflow_pollers}, activity={activity_pollers})"
+            )
         temporal = await start_test_run_workflow(run.id, payload, task_queue=selected_task_queue)
     except TemporalUnavailableError as exc:
         run.status = "error"
@@ -1005,6 +1114,8 @@ def resolve_browser_auth_storage_state_for_run(
     run_dir: Path,
     browser_auth_session_id: str | None,
     use_project_default_browser_auth: bool,
+    target_url: str | None = None,
+    preflight_runner: Any = _run_browser_auth_preflight,
 ) -> tuple[str | None, dict[str, Any]]:
     browser_auth_session_id = (browser_auth_session_id or "").strip() or None
     intent: dict[str, Any] = {
@@ -1015,6 +1126,8 @@ def resolve_browser_auth_storage_state_for_run(
         "use_project_default_browser_auth": bool(use_project_default_browser_auth),
         "project_default_used": False,
         "storage_state_attached": False,
+        "storage_state_file_written": False,
+        "playwright_config_storage_state_attached": False,
     }
     if not runtime._has_browser_auth_selection(
         browser_auth_session_id=browser_auth_session_id,
@@ -1039,8 +1152,58 @@ def resolve_browser_auth_storage_state_for_run(
             "browser_auth_session_name": resolved.session_name,
             "project_default_used": bool(use_project_default_browser_auth),
             "storage_state_attached": True,
+            "storage_state_file_written": Path(resolved.storage_state_path).exists(),
         }
     )
+    target_url = str(target_url or "").strip()
+    if target_url:
+        preflight: BrowserAuthPreflightResult = preflight_runner(
+            storage_state_path=Path(resolved.storage_state_path),
+            target_url=target_url,
+        )
+        preflight_payload = _preflight_progress_payload(
+            preflight,
+            storage_state_attached=True,
+        )
+        preflight_payload["auth_preflight_target_url"] = _sanitize_preflight_url(target_url)
+        preflight_payload["auth_preflight_final_url"] = preflight_payload.get(
+            "auth_preflight_url"
+        )
+        intent.update(preflight_payload)
+        try:
+            artifact = {
+                key: value
+                for key, value in preflight_payload.items()
+                if key
+                in {
+                    "storage_state_attached",
+                    "auth_preflight_status",
+                    "auth_preflight_target_url",
+                    "auth_preflight_final_url",
+                    "auth_preflight_title",
+                    "auth_preflight_failure_kind",
+                    "auth_preflight_failure_reason",
+                }
+            }
+            (run_dir / "browser_auth_preflight.json").write_text(
+                json.dumps(artifact, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            runtime.logger.debug(
+                "Could not write browser auth preflight artifact for %s: %s",
+                run_dir,
+                exc,
+            )
+        if not preflight.passed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    preflight.failure_reason
+                    or "Saved browser session does not authenticate the target URL. "
+                    "Recapture the selected browser auth session for the application target."
+                ),
+            )
     return str(resolved.storage_state_path), intent
 
 

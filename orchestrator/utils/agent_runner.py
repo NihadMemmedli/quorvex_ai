@@ -517,32 +517,44 @@ def _native_tool_suffix(tool_name: str) -> str:
     return tool_name.split("__")[-1] if "__" in tool_name else tool_name
 
 
-def _validate_native_setup_seed_file(tool_name: str, tool_input: dict[str, Any]) -> bool:
-    """Validate and normalize native setup seed input.
-
-    Returns True when the input was defaulted for an omitted seedFile.
-    """
+def _native_setup_seed_file_diagnostics(
+    tool_name: str, tool_input: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return native setup seed diagnostics without changing the tool input."""
     suffix = _native_tool_suffix(tool_name)
     if suffix not in {"planner_setup_page", "generator_setup_page"}:
-        return False
+        return None
     if not str(tool_name).startswith("mcp__playwright-test__"):
-        return False
+        return None
+    diagnostics: dict[str, Any] = {
+        "setup_tool": suffix,
+        "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+    }
     if "seedFile" not in tool_input:
-        tool_input["seedFile"] = NATIVE_SETUP_SEED_FILE
-        logger.warning(
-            "%s omitted seedFile; defaulting to %s for native browser run",
-            suffix,
-            NATIVE_SETUP_SEED_FILE,
-        )
-        return True
+        diagnostics["native_setup_seed_file_omitted"] = True
+        return diagnostics
     seed_file = tool_input.get("seedFile")
     if seed_file != NATIVE_SETUP_SEED_FILE:
-        raise NativeSetupSeedFileError(
-            f"{suffix} must be called with seedFile: \"{NATIVE_SETUP_SEED_FILE}\" "
-            "for native browser runs so the run-local seed test is used. "
-            f"Received seedFile={seed_file!r}."
+        diagnostics.update(
+            {
+                "native_setup_seed_file_invalid": True,
+                "received_seed_file": seed_file,
+            }
         )
-    return False
+        return diagnostics
+    diagnostics.update(
+        {
+            "native_setup_seed_file_valid": True,
+            "received_seed_file": seed_file,
+        }
+    )
+    return diagnostics
+
+
+def _validate_native_setup_seed_file(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    """Return True when setup omitted seedFile; kept for legacy callers/tests."""
+    diagnostics = _native_setup_seed_file_diagnostics(tool_name, tool_input)
+    return bool(diagnostics and diagnostics.get("native_setup_seed_file_omitted"))
 
 
 @dataclass(frozen=True)
@@ -1128,6 +1140,26 @@ class AgentRunner:
             return None
         return list(self.allowed_tools)
 
+    def _sdk_tools_option(self) -> list[str] | dict[str, str] | None:
+        """Return the SDK tools option without hiding run-local MCP tools.
+
+        Claude Code treats the tools availability option as the built-in tool
+        set. Passing a restricted list such as ["Read", "mcp__..."] can leave
+        the model with only the built-in Read tool even when mcp_servers is
+        attached. Keep the approval surface in allowed_tools, but omit the SDK
+        tools option for MCP-backed runs so the configured MCP servers can
+        publish their tools.
+        """
+        tools = self._effective_tools()
+        if isinstance(tools, list) and any(str(tool).startswith("mcp__") for tool in tools):
+            mcp_path = (self.cwd or Path.cwd()) / ".mcp.json"
+            if mcp_path.exists():
+                logger.info(
+                    "MCP tools requested; omitting SDK tools restriction so MCP tools can load"
+                )
+                return None
+        return tools
+
     def _browser_tool_timeout_seconds(self) -> float:
         raw_value = None
         if _has_planner_setup_tool(self.allowed_tools, self._effective_tools()):
@@ -1477,7 +1509,7 @@ class AgentRunner:
             "permission_mode": self._effective_permission_mode(),
         }
 
-        tools = self._effective_tools()
+        tools = self._sdk_tools_option()
         if tools is not None:
             kwargs["tools"] = tools
         if self.disallowed_tools:
@@ -2047,19 +2079,37 @@ class AgentRunner:
                 return
             pending_tool.input_json_fragments.append(delta.partial_json)
 
-        def _emit_native_setup_seed_defaulted(tool_name: str) -> None:
-            suffix = _native_tool_suffix(tool_name)
+        def _emit_native_setup_seed_diagnostics(
+            tool_name: str, diagnostics: dict[str, Any] | None
+        ) -> None:
+            if not diagnostics:
+                return
+            suffix = diagnostics.get("setup_tool") or _native_tool_suffix(tool_name)
+            if diagnostics.get("native_setup_seed_file_omitted"):
+                message = (
+                    f"{suffix} omitted seedFile; Playwright Test MCP will use "
+                    f"{NATIVE_SETUP_SEED_FILE}."
+                )
+                logger.info(message)
+                status = "info"
+            elif diagnostics.get("native_setup_seed_file_invalid"):
+                message = (
+                    f"{suffix} used seedFile={diagnostics.get('received_seed_file')!r}; "
+                    f"expected {NATIVE_SETUP_SEED_FILE}. Continuing so the agent can recover."
+                )
+                logger.warning(message)
+                status = "warning"
+            else:
+                message = f"{suffix} used the run-local setup seed file."
+                logger.debug(message)
+                status = "info"
             self._emit_progress(
                 {
                     "phase": "tool_use",
-                    "status": "warning",
-                    "message": (
-                        f"{suffix} omitted seedFile; defaulted to "
-                        f"{NATIVE_SETUP_SEED_FILE}."
-                    ),
+                    "status": status,
+                    "message": message,
                     "last_tool": tool_name,
-                    "native_setup_seed_file_defaulted": True,
-                    "seedFile": NATIVE_SETUP_SEED_FILE,
+                    **diagnostics,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -2068,10 +2118,12 @@ class AgentRunner:
             pending_tool = _pending_tool_from_delta(delta)
             if pending_tool:
                 pending_tool.input = pending_tool.best_input()
-                if _validate_native_setup_seed_file(
-                    pending_tool.name, pending_tool.input
-                ):
-                    _emit_native_setup_seed_defaulted(pending_tool.name)
+                _emit_native_setup_seed_diagnostics(
+                    pending_tool.name,
+                    _native_setup_seed_file_diagnostics(
+                        pending_tool.name, pending_tool.input
+                    ),
+                )
 
         def _flush_pending_tools(
             *,
@@ -2082,8 +2134,10 @@ class AgentRunner:
             for tool_use_id, pending_tool in list(pending_tools.items()):
                 is_browser_tool = _is_browser_tool_name(pending_tool.name)
                 tool_input = pending_tool.best_input()
-                if _validate_native_setup_seed_file(pending_tool.name, tool_input):
-                    _emit_native_setup_seed_defaulted(pending_tool.name)
+                _emit_native_setup_seed_diagnostics(
+                    pending_tool.name,
+                    _native_setup_seed_file_diagnostics(pending_tool.name, tool_input),
+                )
                 tool_calls.append(
                     ToolCall(
                         name=pending_tool.name,
@@ -2127,8 +2181,10 @@ class AgentRunner:
                     timeout_seconds=browser_tool_timeout_seconds,
                 )
                 tool_input = pending_tool.best_input()
-                if _validate_native_setup_seed_file(pending_tool.name, tool_input):
-                    _emit_native_setup_seed_defaulted(pending_tool.name)
+                _emit_native_setup_seed_diagnostics(
+                    pending_tool.name,
+                    _native_setup_seed_file_diagnostics(pending_tool.name, tool_input),
+                )
                 tool_calls.append(
                     ToolCall(
                         name=pending_tool.name,
@@ -2239,14 +2295,13 @@ class AgentRunner:
                     nonlocal pending_tool_counter
                     tool_name = tool_use.name
                     tool_input = dict(tool_use.input or {})
-                    seed_defaulted = _validate_native_setup_seed_file(
+                    seed_diagnostics = _native_setup_seed_file_diagnostics(
                         tool_name, tool_input
                     )
                     if tool_use.id and tool_use.id in pending_tools:
-                        if tool_input or seed_defaulted:
+                        if tool_input:
                             pending_tools[tool_use.id].input = tool_input
-                        if seed_defaulted:
-                            _emit_native_setup_seed_defaulted(tool_name)
+                        _emit_native_setup_seed_diagnostics(tool_name, seed_diagnostics)
                         if tool_use.index is not None:
                             stream_tool_ids_by_index[tool_use.index] = tool_use.id
                         return
@@ -2269,8 +2324,7 @@ class AgentRunner:
 
                     if self.on_tool_use:
                         self.on_tool_use(tool_name, tool_input)
-                    if seed_defaulted:
-                        _emit_native_setup_seed_defaulted(tool_name)
+                    _emit_native_setup_seed_diagnostics(tool_name, seed_diagnostics)
                     self._emit_progress(
                         {
                             "phase": "tool_use",
@@ -2296,8 +2350,10 @@ class AgentRunner:
                         tool_name = pending_tool.name
                         tool_start = pending_tool.started_at
                         tool_input = pending_tool.best_input()
-                        if _validate_native_setup_seed_file(tool_name, tool_input):
-                            _emit_native_setup_seed_defaulted(tool_name)
+                        _emit_native_setup_seed_diagnostics(
+                            tool_name,
+                            _native_setup_seed_file_diagnostics(tool_name, tool_input),
+                        )
                         duration = (datetime.now() - tool_start).total_seconds() * 1000
                         result_text = tool_result_text(tool_result.content)
                         tool_calls.append(
@@ -2969,7 +3025,6 @@ class AgentRunner:
                 fallback_counter += 1
                 tool_use_id = tool_use.id or f"recovered-tool-{fallback_counter}"
                 tool_input = dict(tool_use.input or {})
-                _validate_native_setup_seed_file(tool_use.name, tool_input)
                 pending[tool_use_id] = _PendingToolCall(
                     name=tool_use.name,
                     started_at=datetime.now(),
@@ -3003,9 +3058,6 @@ class AgentRunner:
                     pending_tool = next(iter(pending.values()))
                 if pending_tool:
                     pending_tool.input = pending_tool.best_input()
-                    _validate_native_setup_seed_file(
-                        pending_tool.name, pending_tool.input
-                    )
 
             for tool_result in event_tool_results(event):
                 pending_item = None
@@ -3653,9 +3705,14 @@ class AgentRunner:
                 token_telemetry=token_telemetry,
             )
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             duration = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Agent timed out after {timeout} seconds (queue mode)"
+            queue_timeout_detail = str(e).strip()
+            error_msg = (
+                f"Agent timed out after {timeout} seconds (queue mode): {queue_timeout_detail}"
+                if queue_timeout_detail
+                else f"Agent timed out after {timeout} seconds (queue mode)"
+            )
             logger.warning(error_msg)
             self._console_print(f"⚠️ {error_msg}", level="warning")
 
@@ -3869,5 +3926,5 @@ async def run_agent_with_logging(
 
 
 def get_default_timeout() -> int:
-    """Get the default agent timeout from environment or use 1800 seconds (30 min)."""
-    return int(os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))
+    """Get the default agent timeout from environment or use 7200 seconds (2 hours)."""
+    return int(os.environ.get("AGENT_TIMEOUT_SECONDS", "7200"))

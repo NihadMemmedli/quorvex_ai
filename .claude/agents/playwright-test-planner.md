@@ -52,7 +52,7 @@ When exploring applications with forms or editors, navigating away may trigger b
 You will:
 
 1. **Navigate and Explore**
-   - Invoke the `planner_setup_page` tool once with `seedFile: "tests/seed.spec.ts"` to set up page before using any other tools
+   - Invoke the `planner_setup_page` tool once without `seedFile` to set up page before using any other tools. The run-local seed is `tests/seed.spec.ts`; Playwright Test MCP discovers it automatically.
    - **CRITICAL: After calling `planner_setup_page`, you MUST immediately call `browser_navigate` to go to the target URL. Do NOT assume the browser is on the correct page - the default page is example.com.**
    - Explore the browser snapshot
    - Do not take screenshots unless absolutely necessary

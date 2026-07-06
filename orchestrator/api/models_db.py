@@ -98,6 +98,7 @@ class ExecutionSettings(SQLModel, table=True):
     parallel_mode_enabled: bool = Field(default=False)
     headless_in_parallel: bool = Field(default=True)  # Force headless when parallelism > 1
     memory_enabled: bool = Field(default=True)  # Disable memory in parallel mode
+    ai_pipeline_timeout_seconds: int = Field(default=7200, ge=900, le=86400)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -1585,6 +1586,23 @@ class RegressionBatch(SQLModel, table=True):
     actual_total_tests: int | None = None
     actual_passed: int | None = None
     actual_failed: int | None = None
+    actual_skipped: int | None = None
+    actual_other: int | None = None
+
+    # Durable scheduler state for large Run All batches. Small legacy batches
+    # leave these fields empty and continue to use immediate fan-out.
+    scheduler_status: str | None = Field(default=None, index=True)
+    scheduler_workflow_id: str | None = None
+    scheduler_run_id: str | None = None
+    chunk_size: int | None = None
+    max_active_runs: int | None = None
+    dispatch_total: int = 0
+    dispatch_started: int = 0
+    dispatch_completed: int = 0
+    dispatch_failed: int = 0
+    dispatch_cancelled: int = 0
+    next_spec_index: int = 0
+    scheduler_error: str | None = None
 
     @property
     def tags_used(self) -> list[str]:
@@ -1611,6 +1629,42 @@ class RegressionBatch(SQLModel, table=True):
         if self.started_at and self.completed_at:
             return int((self.completed_at - self.started_at).total_seconds())
         return None
+
+
+class RegressionBatchItem(SQLModel, table=True):
+    """Durable planned item for scheduled/chunked regression batches."""
+
+    __tablename__ = "regression_batch_items"
+    __table_args__ = (
+        Index("ix_regression_batch_items_batch_status", "batch_id", "status"),
+        Index("ix_regression_batch_items_batch_ordinal", "batch_id", "ordinal"),
+        Index("ix_regression_batch_items_run_id", "run_id"),
+        UniqueConstraint("batch_id", "ordinal", name="uq_regression_batch_items_batch_ordinal"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    batch_id: str = Field(foreign_key="regression_batches.id", index=True)
+    ordinal: int
+    spec_name: str
+    status: str = Field(default="pending", index=True)
+    run_id: str | None = Field(default=None, foreign_key="testrun.id")
+    payload_json: str = "{}"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.payload_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value or {})
 
 
 class RecordingSession(SQLModel, table=True):

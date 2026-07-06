@@ -66,6 +66,7 @@ class JiraConfigRequest(BaseModel):
     base_url: str
     email: str
     api_token: str | None = None  # None means keep existing token
+    auth_mode: str | None = None
     project_key: str | None = None
     issue_type_id: str | None = None
 
@@ -111,7 +112,7 @@ def _require_project(project_id: str, session: Session) -> Project:
 
 async def _build_client(project: Project):
     """Build a JiraClient from the project config. Raises 400 if not configured."""
-    from services.jira_client import JiraClient
+    from services.jira_client import JIRA_AUTH_CLOUD_BASIC, JiraClient
 
     config = _get_jira_config(project)
     if not config:
@@ -125,6 +126,7 @@ async def _build_client(project: Project):
         base_url=config["base_url"],
         email=config["email"],
         api_token=api_token,
+        auth_mode=config.get("auth_mode") or JIRA_AUTH_CLOUD_BASIC,
     )
 
 
@@ -148,6 +150,7 @@ def get_config(
         "configured": True,
         "base_url": config.get("base_url", ""),
         "email": config.get("email", ""),
+        "auth_mode": config.get("auth_mode", "cloud_basic"),
         "api_token_masked": mask_credential(api_token),
         "project_key": config.get("project_key"),
         "issue_type_id": config.get("issue_type_id"),
@@ -164,8 +167,14 @@ def save_config(
     """Save Jira config for a project."""
     project = _require_project(project_id, session)
 
-    if not request.base_url or not request.email:
-        raise HTTPException(status_code=400, detail="base_url and email are required")
+    auth_mode = request.auth_mode or "cloud_basic"
+    if auth_mode not in {"cloud_basic", "data_center_pat"}:
+        raise HTTPException(status_code=400, detail="Unsupported Jira auth mode")
+
+    if not request.base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+    if auth_mode == "cloud_basic" and not request.email:
+        raise HTTPException(status_code=400, detail="email is required for Jira Cloud Basic auth")
 
     existing = _get_jira_config(project)
 
@@ -179,6 +188,7 @@ def save_config(
     config = {
         "base_url": request.base_url.rstrip("/"),
         "email": request.email,
+        "auth_mode": auth_mode,
         "api_token_encrypted": api_token_encrypted,
         "project_key": request.project_key,
         "issue_type_id": request.issue_type_id,
@@ -217,9 +227,15 @@ async def test_connection(
     client = await _build_client(project)
     try:
         user_info = await client.test_connection()
+        if getattr(client, "used_bearer_fallback", False):
+            config = _get_jira_config(project)
+            if config and config.get("auth_mode") != "data_center_pat":
+                config["auth_mode"] = "data_center_pat"
+                _save_jira_config(project, config, session)
         return {
             "status": "ok",
             "user": user_info.get("displayName", user_info.get("name", "Unknown")),
+            "auth_mode": getattr(client, "auth_mode", None),
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Connection failed: {e}")

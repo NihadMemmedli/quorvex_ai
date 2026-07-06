@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -136,13 +137,31 @@ def run_test_cli_subprocess_with_retry(
             try:
                 process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
+                timeout_message = f"Test execution timed out after {timeout_seconds} seconds"
                 if logger:
                     logger.warning(
-                        "Process for %s timed out after %ss, killing process group",
+                        "%s for %s, killing process group",
+                        timeout_message,
                         run_id,
-                        timeout_seconds,
                     )
-                append_workflow_log("Subprocess timed out; killing process group.", pid=process.pid, attempt=attempt)
+                append_workflow_log(
+                    "Subprocess timed out; killing process group.",
+                    pid=process.pid,
+                    attempt=attempt,
+                    timeout_seconds=timeout_seconds,
+                    error=timeout_message,
+                )
+                try:
+                    (run_dir_path / "status.txt").write_text("error", encoding="utf-8")
+                    (run_dir_path / "pipeline_error.json").write_text(
+                        json.dumps(
+                            {"stage": "test_execution", "error": timeout_message},
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
                 import signal as _signal
 
                 try:

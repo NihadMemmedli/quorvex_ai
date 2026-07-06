@@ -19,6 +19,7 @@ from .db import engine, get_session
 from .models import BulkRunRequest, CreateBatchResponse, TestRun
 from .models_db import AgentRun
 from .models_db import TestRun as DBTestRun
+from orchestrator.utils.browser_auth_classification import is_login_logout_spec
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -179,8 +180,7 @@ def _validate_bulk_test_data_refs(
 
 
 def _is_login_specific_spec(spec_name: str, spec_content: str) -> bool:
-    haystack = f"{spec_name}\n{spec_content[:1000]}".lower()
-    return bool(re.search(r"\b(log\s*in|login|sign\s*in|signin|sign-in|logout|log\s*out|sign\s*out)\b", haystack))
+    return is_login_logout_spec(spec_name, spec_content)
 
 
 @router.get("/runs")
@@ -752,7 +752,23 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         "project_default_used": False,
         "storage_state_attached": False,
     }
+    run = DBTestRun(
+        id=run_id,
+        spec_name=request.spec_name,
+        test_name=request.spec_name,
+        status="queued",
+        browser=f"mobile-{platform}" if target == "mobile" else (request.browser or "chromium"),
+        test_type="mobile" if target == "mobile" else "browser",
+        queued_at=now,
+        queue_position=queue_position,
+        project_id=request.project_id,
+        browser_auth=browser_auth_intent,
+    )
+    session.add(run)
+    session.commit()
+
     if target == "browser":
+        target_url = run_files.extract_run_target_url_from_content(spec_content)
         requested_browser_auth_session_id = request.browser_auth_session_id
         requested_project_default_auth = bool(request.use_project_default_browser_auth)
         auth_conflict_warning: str | None = None
@@ -772,9 +788,33 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
                 run_dir=run_dir,
                 browser_auth_session_id=requested_browser_auth_session_id,
                 use_project_default_browser_auth=requested_project_default_auth,
+                target_url=target_url,
             )
-        except HTTPException:
+        except HTTPException as exc:
             await asyncio.to_thread((run_dir / "status.txt").write_text, "error")
+            failed_auth = dict(browser_auth_intent)
+            preflight_artifact = run_dir / "browser_auth_preflight.json"
+            if preflight_artifact.exists():
+                try:
+                    loaded = json.loads(preflight_artifact.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        failed_auth.update(loaded)
+                except Exception:
+                    pass
+            failed_auth.setdefault("auth_preflight_target_url", target_url)
+            failed_auth.setdefault("auth_preflight_status", "failed")
+            failed_auth.setdefault("storage_state_attached", bool(requested_browser_auth_session_id or requested_project_default_auth))
+            failed_auth["auth_preflight_failure_reason"] = str(exc.detail)
+            run.status = "failed"
+            run.completed_at = _utcnow()
+            run.browser_auth = failed_auth
+            run.result = {
+                **(run.result or {}),
+                "failure_reason": "browser_auth_preflight_failed",
+                "error": str(exc.detail),
+            }
+            session.add(run)
+            session.commit()
             raise
         if auth_conflict_warning:
             browser_auth_intent["auth_conflict_warning"] = auth_conflict_warning
@@ -782,21 +822,9 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
                 request.browser_auth_session_id or ""
             ).strip() or None
             browser_auth_intent["use_project_default_browser_auth"] = bool(request.use_project_default_browser_auth)
-
-    run = DBTestRun(
-        id=run_id,
-        spec_name=request.spec_name,
-        test_name=request.spec_name,
-        status="queued",
-        browser=f"mobile-{platform}" if target == "mobile" else (request.browser or "chromium"),
-        test_type="mobile" if target == "mobile" else "browser",
-        queued_at=now,
-        queue_position=queue_position,
-        project_id=request.project_id,
-        browser_auth=browser_auth_intent,
-    )
-    session.add(run)
-    session.commit()
+        run.browser_auth = browser_auth_intent
+        session.add(run)
+        session.commit()
 
     if target == "mobile":
         from orchestrator.config import settings as app_settings
@@ -837,6 +865,7 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         "spec_path": str(spec_path),
         "run_dir": str(run_dir),
         "try_code_path": try_code_path,
+        "healer_max_attempts": 1 if try_code_path else None,
         "browser": request.browser,
         "hybrid": hybrid_mode,
         "max_iterations": max_iterations,
@@ -1000,11 +1029,27 @@ async def stop_run(
 @router.post("/runs/bulk", response_model=CreateBatchResponse)
 async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(get_session)):
     """Create multiple test runs in bulk as a regression batch."""
-    from orchestrator.services.batch_executor import BatchConfig, create_regression_batch, select_regression_specs
+    from orchestrator.services.batch_executor import (
+        BatchConfig,
+        create_regression_batch,
+        select_regression_specs,
+    )
+    from orchestrator.services.scheduled_batch_executor import (
+        create_scheduled_regression_batch,
+        dispatch_scheduled_batch,
+        should_schedule_bulk_run,
+    )
 
     runtime = _runtime()
     hybrid_mode = request.hybrid or request.ralph or False
     max_iterations = request.max_iterations or 20
+    scheduled_max_active_runs = None
+    if runtime.BROWSER_POOL is not None:
+        scheduled_max_active_runs = getattr(
+            runtime.BROWSER_POOL,
+            "effective_max_browsers",
+            getattr(runtime.BROWSER_POOL, "max_browsers", None),
+        )
 
     runtime._validate_browser_auth_selection_for_project(
         session,
@@ -1035,6 +1080,28 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
             refs_by_spec=request.test_data_refs_by_spec,
         )
         config.test_data_refs_by_spec = resolved_refs_by_spec
+        if should_schedule_bulk_run(len(selected_spec_names)):
+            scheduled_result = create_scheduled_regression_batch(
+                config,
+                session,
+                spec_names=selected_spec_names,
+                browser_auth_session_id=request.browser_auth_session_id,
+                use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
+                model_tier=request.model_tier,
+                max_active_runs=scheduled_max_active_runs,
+            )
+            dispatched = await dispatch_scheduled_batch(runtime, scheduled_result.batch_id)
+            return CreateBatchResponse(
+                batch_id=scheduled_result.batch_id,
+                run_ids=[],
+                count=scheduled_result.count,
+                mode="scheduled",
+                max_iterations=max_iterations if hybrid_mode else None,
+                scheduled=True,
+                chunk_size=scheduled_result.chunk_size,
+                max_active_runs=scheduled_result.max_active_runs,
+                dispatched=dispatched,
+            )
         result = create_regression_batch(config, session)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1061,13 +1128,45 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
             )
             requested_browser_auth_session_id = None
             requested_project_default_auth = False
-        storage_state_path, browser_auth_intent = runtime._resolve_browser_auth_storage_state_for_run(
-            session,
-            task_args["project_id"],
-            run_dir=Path(task_args["run_dir"]),
-            browser_auth_session_id=requested_browser_auth_session_id,
-            use_project_default_browser_auth=requested_project_default_auth,
-        )
+        task_target_url = run_files.extract_run_target_url_from_content(task_spec_content)
+        try:
+            storage_state_path, browser_auth_intent = runtime._resolve_browser_auth_storage_state_for_run(
+                session,
+                task_args["project_id"],
+                run_dir=Path(task_args["run_dir"]),
+                browser_auth_session_id=requested_browser_auth_session_id,
+                use_project_default_browser_auth=requested_project_default_auth,
+                target_url=task_target_url,
+            )
+        except HTTPException as exc:
+            preflight_artifact = Path(task_args["run_dir"]) / "browser_auth_preflight.json"
+            failed_auth = {
+                "mode": "project_default" if requested_project_default_auth else ("session" if requested_browser_auth_session_id else "none"),
+                "requested_browser_auth_session_id": (requested_browser_auth_session_id or "").strip() or None,
+                "use_project_default_browser_auth": bool(requested_project_default_auth),
+                "storage_state_attached": bool(requested_browser_auth_session_id or requested_project_default_auth),
+                "auth_preflight_target_url": task_target_url,
+                "auth_preflight_status": "failed",
+                "auth_preflight_failure_reason": str(exc.detail),
+            }
+            if preflight_artifact.exists():
+                try:
+                    loaded = json.loads(preflight_artifact.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        failed_auth.update(loaded)
+                except Exception:
+                    pass
+            run.status = "failed"
+            run.completed_at = _utcnow()
+            run.browser_auth = failed_auth
+            run.result = {
+                **(run.result or {}),
+                "failure_reason": "browser_auth_preflight_failed",
+                "error": str(exc.detail),
+            }
+            session.add(run)
+            session.commit()
+            raise
         if auth_conflict_warning:
             browser_auth_intent["auth_conflict_warning"] = auth_conflict_warning
             browser_auth_intent["requested_browser_auth_session_id"] = (
@@ -1085,6 +1184,7 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
             "spec_path": task_args["spec_path"],
             "run_dir": task_args["run_dir"],
             "try_code_path": task_args["try_code_path"],
+            "healer_max_attempts": task_args.get("healer_max_attempts"),
             "browser": task_args["browser"],
             "hybrid": task_args["hybrid"],
             "max_iterations": task_args["max_iterations"],

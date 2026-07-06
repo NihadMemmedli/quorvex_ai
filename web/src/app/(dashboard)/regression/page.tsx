@@ -7,6 +7,7 @@ import { fetchWithAuth } from '@/contexts/AuthContext';
 import { useRequiredProject } from '@/contexts/ProjectContext';
 import { useProjectRole } from '@/hooks/useProjectRole';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
+import { bulkBatchHref, bulkRunErrorMessage, type BulkRunResponse } from '@/lib/bulk-runs';
 import { PageLayout } from '@/components/ui/page-layout';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
@@ -658,18 +659,21 @@ export default function RegressionPage() {
                 }, projectId))
             });
 
-            const data = await res.json();
+            const data = await res.json() as BulkRunResponse;
+            if (!res.ok) {
+                setRunSetupError(bulkRunErrorMessage(data, 'Failed to start regression tests'));
+                return;
+            }
             if (data.batch_id) {
                 clearSelection();
                 setRunSetupOpen(false);
-                router.push(`/regression/batches/${data.batch_id}`);
+                router.push(bulkBatchHref(data.batch_id, data));
             } else if (data.run_ids) {
                 clearSelection();
                 setRunSetupOpen(false);
                 router.push('/runs');
             } else if (data.detail) {
-                const detail = typeof data.detail === 'string' ? data.detail : data.detail?.message || 'Failed to start regression tests';
-                setRunSetupError(detail);
+                setRunSetupError(bulkRunErrorMessage(data, 'Failed to start regression tests'));
             }
         } catch (e) {
             console.error('Failed to start regression tests:', e);

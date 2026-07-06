@@ -299,7 +299,7 @@ You MUST open a browser and explore the live application.
 - **Target URL**: {target_url}
 
 Use the Playwright MCP tools to:
-1. Call `planner_setup_page` with `seedFile: "tests/seed.spec.ts"` to initialize the browser
+1. Call `planner_setup_page` without `seedFile` to initialize the browser. The run-local seed is `tests/seed.spec.ts`; Playwright Test MCP discovers it automatically.
 2. **IMMEDIATELY** call `browser_navigate` to go to: {target_url}
    (Do NOT rely on any default page - the default is example.com. Navigate explicitly!)
 3. Use `browser_snapshot` to see the current page state
@@ -942,8 +942,11 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             diagnostics.get("failure_category")
             == "planner_live_sequence_setup_seed_warning"
             and diagnostics.get("non_fatal") is True
-            and diagnostics.get("setup_tool") == "generator_setup_page"
-            and diagnostics.get("setup_seed_file_omitted") is True
+            and diagnostics.get("setup_tool") in {"planner_setup_page", "generator_setup_page"}
+            and (
+                diagnostics.get("setup_seed_file_omitted") is True
+                or diagnostics.get("native_setup_seed_file_invalid") is True
+            )
         )
 
     def _record_live_sequence_warning(
@@ -1009,7 +1012,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     "Start from a clean sequence: `planner_setup_page`, then `browser_navigate` to the exact Target URL "
                     f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`. "
                     "Use `planner_setup_page` only for planner setup, do not call `generator_setup_page` during planning, "
-                    f"and every setup call must include `seedFile: \"{NATIVE_SETUP_SEED_FILE}\"`. "
+                    "and omit `seedFile` on setup calls. "
                     "Use only the structured prior evidence below plus fresh browser observations from this retry."
                 )
             else:
@@ -1018,7 +1021,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     "`planner_setup_page`, then `browser_navigate` to the exact Target URL "
                     f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`. "
                     "Use `planner_setup_page` only for planner setup, do not call `generator_setup_page` during planning, "
-                    f"and every setup call must include `seedFile: \"{NATIVE_SETUP_SEED_FILE}\"`."
+                    "and omit `seedFile` on setup calls."
                 )
             if error.diagnostics.get("failure_category") in {
                 "planner_live_tool_call_contract_failure",
@@ -1378,7 +1381,7 @@ Original task follows. Obey it, but correct the failure above.
         navigate_seen = False
         snapshot_seen = False
         save_seen = False
-        omitted_generator_setup_seed_after_valid_sequence = False
+        setup_seed_warning: dict[str, Any] | None = None
 
         for tool_call in tool_calls:
             short_name = cls._tool_call_short_name(tool_call)
@@ -1388,24 +1391,23 @@ Original task follows. Obey it, but correct the failure above.
                 if "seedFile" in setup_input:
                     seed_file = setup_input.get("seedFile")
                     if seed_file != NATIVE_SETUP_SEED_FILE:
-                        raise SpecGenerationError(
-                            f"{short_name} used an invalid setup seed file for a native browser run.",
-                            diagnostics={
-                                "failure_category": "native_setup_seed_file_error",
-                                "setup_tool": short_name,
-                                "expected_seed_file": NATIVE_SETUP_SEED_FILE,
-                                "received_seed_file": seed_file,
-                                "expected_target_url": target_url,
-                                "planner_setup_page_observed": setup_seen,
-                                "browser_navigate_observed": navigate_attempt_seen,
-                                "target_navigation_observed": navigate_seen,
-                                "browser_snapshot_after_navigation_observed": snapshot_seen,
-                                "planner_save_plan_observed": save_seen,
-                            },
-                        )
+                        setup_seed_warning = {
+                            "failure_category": "planner_live_sequence_setup_seed_warning",
+                            "non_fatal": True,
+                            "setup_tool": short_name,
+                            "native_setup_seed_file_invalid": True,
+                            "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                            "received_seed_file": seed_file,
+                        }
                 elif short_name == "generator_setup_page":
                     if setup_seen and navigate_seen and snapshot_seen:
-                        omitted_generator_setup_seed_after_valid_sequence = True
+                        setup_seed_warning = {
+                            "failure_category": "planner_live_sequence_setup_seed_warning",
+                            "non_fatal": True,
+                            "setup_tool": "generator_setup_page",
+                            "setup_seed_file_omitted": True,
+                            "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                        }
 
             tool_error = str(getattr(tool_call, "error", "") or "")
             browser_failure = classify_browser_failure(
@@ -1491,15 +1493,11 @@ Original task follows. Obey it, but correct the failure above.
                 },
             )
 
-        if omitted_generator_setup_seed_after_valid_sequence:
+        if setup_seed_warning:
             raise SpecGenerationError(
-                "Live-browser planner produced valid setup/navigate/snapshot evidence but called generator_setup_page during planning without seedFile.",
+                "Live-browser planner produced valid setup/navigate/snapshot evidence but used recoverable setup seed input.",
                 diagnostics={
-                    "failure_category": "planner_live_sequence_setup_seed_warning",
-                    "non_fatal": True,
-                    "setup_tool": "generator_setup_page",
-                    "setup_seed_file_omitted": True,
-                    "expected_seed_file": NATIVE_SETUP_SEED_FILE,
+                    **setup_seed_warning,
                     "expected_target_url": target_url,
                     "planner_setup_page_observed": setup_seen,
                     "browser_navigate_observed": navigate_attempt_seen,
@@ -1756,6 +1754,18 @@ Original task follows. Obey it, but correct the failure above.
                 subject_name,
                 draft_failure,
             )
+            locally_repaired_path = self._attempt_local_draft_script_repair(
+                plan_path=plan_path,
+                expected_output_path=expected_output_path,
+                agent_result=agent_result,
+                draft_script_validation_failure=draft_failure,
+            )
+            if locally_repaired_path:
+                return self._finalize_plan_artifact(
+                    plan_path=locally_repaired_path,
+                    expected_output_path=expected_output_path,
+                    require_draft_script=require_draft_script,
+                )
             repaired_plan_path = await self._attempt_repair_plan(
                 subject_type=subject_type,
                 subject_name=subject_name,
@@ -1872,6 +1882,95 @@ Original task follows. Obey it, but correct the failure above.
         self.last_draft_script_path = draft_path
         logger.info("Planner draft script saved: %s", draft_path)
         return plan_path
+
+    @staticmethod
+    def _observed_navigation_url(agent_result: Any) -> str | None:
+        for tc in list(getattr(agent_result, "tool_calls", []) or []):
+            tool_name = str(getattr(tc, "name", "") or "")
+            if "browser_navigate" not in tool_name:
+                continue
+            tool_input = getattr(tc, "input", None)
+            if not isinstance(tool_input, dict):
+                continue
+            url = str(tool_input.get("url") or "").strip()
+            if url.startswith(("http://", "https://")):
+                return url
+        return None
+
+    @staticmethod
+    def _fallback_test_name(content: str) -> str:
+        match = re.search(r"(?m)^###\s+TC-\d{3}:\s+(.+?)\s*$", content or "")
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()[:80] or "planned flow"
+        return "planned flow"
+
+    @classmethod
+    def _build_fallback_draft_script(cls, content: str, target_url: str) -> str:
+        test_name = cls._fallback_test_name(content)
+        escaped_test_name = test_name.replace("\\", "\\\\").replace("'", "\\'")
+        escaped_url = target_url.replace("\\", "\\\\").replace("'", "\\'")
+        parsed = urlsplit(target_url)
+        path_pattern = re.escape(parsed.path or "/")
+        if parsed.query:
+            path_pattern = f"{path_pattern}(?:\\?{re.escape(parsed.query)})?"
+        path_pattern_literal = json.dumps(path_pattern)
+
+        return "\n".join(
+            [
+                "import { test, expect } from '@playwright/test';",
+                "",
+                f"test('{escaped_test_name}', async ({{ page }}) => {{",
+                f"  await page.goto('{escaped_url}');",
+                "  await expect(page.locator('body')).toBeVisible();",
+                f"  await expect(page).toHaveURL(new RegExp({path_pattern_literal}));",
+                "});",
+            ]
+        )
+
+    def _attempt_local_draft_script_repair(
+        self,
+        *,
+        plan_path: Path,
+        expected_output_path: Path,
+        agent_result: Any,
+        draft_script_validation_failure: str | None,
+    ) -> Path | None:
+        if draft_script_validation_failure != "missing Draft Playwright Script fenced TypeScript block":
+            return None
+        try:
+            content = plan_path.read_text()
+        except OSError:
+            return None
+        valid, _reason = self._validate_test_plan_schema(content)
+        if not valid or self._extract_draft_script(content):
+            return None
+        target_url = self._observed_navigation_url(agent_result)
+        if not target_url:
+            return None
+
+        repaired_content = (
+            content.rstrip()
+            + "\n\n## Draft Playwright Script\n"
+            + "```typescript\n"
+            + self._build_fallback_draft_script(content, target_url)
+            + "\n```\n"
+        )
+        draft_failure = self._draft_script_validation_failure(repaired_content)
+        if draft_failure:
+            logger.warning(
+                "Local draft script repair for %s was invalid: %s",
+                expected_output_path,
+                draft_failure,
+            )
+            return None
+
+        expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_output_path.write_text(repaired_content)
+        logger.info(
+            "Locally repaired missing planner draft script using observed navigation URL: %s",
+            target_url,
+        )
+        return expected_output_path
 
     @classmethod
     def _validate_test_plan_schema(cls, content: str) -> tuple[bool, str | None]:
@@ -2371,7 +2470,7 @@ Original task follows. Obey it, but correct the failure above.
         return "\n".join(parts)
 
     async def _query_repair_agent(self, prompt: str):
-        timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "180"))
+        timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "900"))
         runner = create_agent_runner(
             self,
             timeout_seconds=timeout,

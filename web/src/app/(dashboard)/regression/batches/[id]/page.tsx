@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
     Clock, CheckCircle2, XCircle, PlayCircle, ChevronRight,
     Calendar, Tag, Download, RefreshCw, ArrowLeft, Chrome,
@@ -10,12 +10,15 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
+import { deriveBatchDisplayCounts } from '@/lib/batch-counts';
 import { useRequiredProject } from '@/contexts/ProjectContext';
 import { useProjectRole } from '@/hooks/useProjectRole';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+const RUN_PAGE_SIZE = 100;
 
 interface BatchRun {
     id: string;
@@ -59,8 +62,24 @@ interface BatchDetail {
     actual_total_tests: number | null;
     actual_passed: number | null;
     actual_failed: number | null;
+    actual_skipped?: number | null;
+    actual_other?: number | null;
     project_id: string | null;
+    scheduler_status: string | null;
+    chunk_size: number | null;
+    max_active_runs: number | null;
+    dispatch_total: number;
+    dispatch_started: number;
+    dispatch_completed: number;
+    dispatch_failed: number;
+    dispatch_cancelled: number;
+    scheduler_error: string | null;
     runs: BatchRun[];
+    runs_total: number;
+    runs_limit: number;
+    runs_offset: number;
+    runs_has_more: boolean;
+    runs_status: string | null;
 }
 
 interface SyncPreview {
@@ -133,6 +152,7 @@ interface RecentBatchOption {
 export default function BatchDetailPage() {
     const params = useParams();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const batchId = params.id as string;
     const { projectId, isLoading: projectLoading } = useRequiredProject();
     const { canEdit } = useProjectRole(projectId);
@@ -142,6 +162,7 @@ export default function BatchDetailPage() {
     const [error, setError] = useState<string | null>(null);
     const [showFailuresOnly, setShowFailuresOnly] = useState(false);
     const [sortBy, setSortBy] = useState<'status' | 'name' | 'duration'>('status');
+    const [runsOffset, setRunsOffset] = useState(0);
 
     // TestRail sync state
     const [trConfig, setTrConfig] = useState<TrConfig | null>(null);
@@ -158,9 +179,14 @@ export default function BatchDetailPage() {
     // D5: Error analysis
     const [errorCategories, setErrorCategories] = useState<ErrorCategory[]>([]);
     const [totalErrors, setTotalErrors] = useState(0);
+    const [errorAnalysisLoaded, setErrorAnalysisLoaded] = useState(false);
+    const [errorAnalysisLoading, setErrorAnalysisLoading] = useState(false);
+    const [errorAnalysisError, setErrorAnalysisError] = useState<string | null>(null);
 
     // D6: Compare
     const [recentBatches, setRecentBatches] = useState<RecentBatchOption[]>([]);
+    const [recentBatchesLoaded, setRecentBatchesLoaded] = useState(false);
+    const [recentBatchesLoading, setRecentBatchesLoading] = useState(false);
     const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
     const [comparing, setComparing] = useState(false);
 
@@ -168,9 +194,21 @@ export default function BatchDetailPage() {
     const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
     const [specHistory, setSpecHistory] = useState<Record<string, SpecHistoryEntry[]>>({});
 
+    const [expandedFailureRunId, setExpandedFailureRunId] = useState<string | null>(null);
+    const [failureDetails, setFailureDetails] = useState<Record<string, BatchRun>>({});
+    const [failureDetailsLoading, setFailureDetailsLoading] = useState<Record<string, boolean>>({});
+    const [failureDetailsError, setFailureDetailsError] = useState<Record<string, string>>({});
+
     const fetchBatch = useCallback(() => {
         if (!projectId) return;
-        fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}`, projectId)}`)
+        const params = new URLSearchParams({
+            runs_limit: String(RUN_PAGE_SIZE),
+            runs_offset: String(runsOffset),
+            runs_sort: sortBy,
+            include_failure_details: 'false',
+        });
+        if (showFailuresOnly) params.set('runs_status', 'failures');
+        fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}?${params.toString()}`, projectId)}`)
             .then(res => {
                 if (!res.ok) throw new Error('Batch not found');
                 return res.json();
@@ -183,7 +221,7 @@ export default function BatchDetailPage() {
                 setError(err.message);
                 setLoading(false);
             });
-    }, [batchId, projectId]);
+    }, [batchId, projectId, runsOffset, showFailuresOnly, sortBy]);
 
     useEffect(() => {
         if (projectLoading || !projectId) return;
@@ -206,38 +244,77 @@ export default function BatchDetailPage() {
             .catch(() => {});
     }, [projectId, batch?.project_id]);
 
-    // D5: Load error analysis when batch is complete and has failures
-    useEffect(() => {
-        if (batch?.status === 'completed' && batch.failed > 0) {
-            fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/error-summary`, projectId)}`)
-                .then(res => res.json())
-                .then(data => {
-                    setErrorCategories(data.categories || []);
-                    setTotalErrors(data.total_errors || 0);
-                })
-                .catch(() => {});
+    const loadErrorAnalysis = useCallback(async () => {
+        if (!projectId || errorAnalysisLoading) return;
+        setErrorAnalysisLoading(true);
+        setErrorAnalysisError(null);
+        try {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/error-summary`, projectId)}`);
+            if (!res.ok) throw new Error('Failed to load failure analysis');
+            const data = await res.json();
+            setErrorCategories(data.categories || []);
+            setTotalErrors(data.total_errors || 0);
+            setErrorAnalysisLoaded(true);
+        } catch (e: any) {
+            setErrorAnalysisError(e.message || 'Failed to load failure analysis');
+        } finally {
+            setErrorAnalysisLoading(false);
         }
-    }, [batch?.status, batch?.failed, batchId, projectId]);
+    }, [batchId, errorAnalysisLoading, projectId]);
 
     // D6: Load recent batches for compare
     const loadedBatchId = batch?.id;
     const batchProjectId = batch?.project_id;
-    useEffect(() => {
+    const loadRecentBatches = useCallback(async () => {
+        if (recentBatchesLoaded || recentBatchesLoading) return;
         if (!loadedBatchId) return;
         const pid = projectId || batchProjectId;
         if (!pid) return;
+        setRecentBatchesLoading(true);
         const url = `${API_BASE}${withProjectQuery('/regression/batches?limit=10&status=completed', pid)}`;
-        fetch(url)
-            .then(res => res.json())
-            .then(data => {
-                setRecentBatches(
-                    (data.batches || [])
-                        .filter((b: RecentBatchOption) => b.id !== batchId)
-                        .map((b: RecentBatchOption) => ({ id: b.id, name: b.name, created_at: b.created_at }))
-                );
-            })
-            .catch(() => {});
-    }, [batchId, batchProjectId, projectId, loadedBatchId]);
+        try {
+            const res = await fetch(url);
+            const data = await res.json();
+            setRecentBatches(
+                (data.batches || [])
+                    .filter((b: RecentBatchOption) => b.id !== batchId)
+                    .map((b: RecentBatchOption) => ({ id: b.id, name: b.name, created_at: b.created_at }))
+            );
+            setRecentBatchesLoaded(true);
+        } catch {
+            setRecentBatches([]);
+        } finally {
+            setRecentBatchesLoading(false);
+        }
+    }, [batchId, batchProjectId, loadedBatchId, projectId, recentBatchesLoaded, recentBatchesLoading]);
+
+    const loadFailureDetails = async (run: BatchRun) => {
+        if (expandedFailureRunId === run.id) {
+            setExpandedFailureRunId(null);
+            return;
+        }
+        setExpandedFailureRunId(run.id);
+        if (failureDetails[run.id] || failureDetailsLoading[run.id]) return;
+
+        const pid = projectId || batch?.project_id;
+        if (!pid) return;
+        setFailureDetailsLoading(prev => ({ ...prev, [run.id]: true }));
+        setFailureDetailsError(prev => {
+            const next = { ...prev };
+            delete next[run.id];
+            return next;
+        });
+        try {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/regression/runs/${encodeURIComponent(run.id)}/failure-details`, pid)}`);
+            if (!res.ok) throw new Error('Failed to load failure details');
+            const data = await res.json();
+            setFailureDetails(prev => ({ ...prev, [run.id]: data }));
+        } catch (e: any) {
+            setFailureDetailsError(prev => ({ ...prev, [run.id]: e.message || 'Failed to load failure details' }));
+        } finally {
+            setFailureDetailsLoading(prev => ({ ...prev, [run.id]: false }));
+        }
+    };
 
     // D2: Re-run failed handler
     const handleRerunFailed = async () => {
@@ -489,32 +566,27 @@ export default function BatchDetailPage() {
     }
 
     const activeRunCount = batch.running + batch.queued;
-    const displayedTotal = batch.actual_total_tests ?? batch.total_tests;
-    const displayedPassed = batch.actual_passed ?? batch.passed;
-    const displayedFailed = batch.actual_failed ?? batch.failed;
-    const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
+    const isScheduledBulkBatch = Boolean(batch.scheduler_status) || searchParams.get('bulk') === 'scheduled' || searchParams.get('mode') === 'scheduled';
+    const scheduledCount = searchParams.get('count') || (batch.dispatch_total ? String(batch.dispatch_total) : null);
+    const scheduledChunkSize = searchParams.get('chunk_size') || (batch.chunk_size ? String(batch.chunk_size) : null);
+    const scheduledMaxActiveRuns = searchParams.get('max_active_runs') || (batch.max_active_runs ? String(batch.max_active_runs) : null);
+    const displayCounts = deriveBatchDisplayCounts(batch);
+    const displayedTotal = displayCounts.total;
+    const displayedPassed = displayCounts.passed;
+    const displayedFailed = displayCounts.failed;
+    const displayedSkipped = displayCounts.skipped;
+    const displayedOther = displayCounts.other;
+    const displayedSuccessRate = displayCounts.successRate;
 
-    const filteredRuns = showFailuresOnly
-        ? batch.runs.filter(r => r.status === 'failed' || r.status === 'stopped' || r.status === 'cancelled')
-        : batch.runs;
-
-    const sortedRuns = [...filteredRuns].sort((a, b) => {
-        if (sortBy === 'status') {
-            const o: Record<string, number> = { failed: 0, stopped: 1, cancelled: 1, running: 2, queued: 3, passed: 4, completed: 4 };
-            return (o[a.status] ?? 5) - (o[b.status] ?? 5);
-        }
-        if (sortBy === 'name') return (a.test_name || a.spec_name).localeCompare(b.test_name || b.spec_name);
-        if (sortBy === 'duration') return (b.duration_seconds || 0) - (a.duration_seconds || 0);
-        return 0;
-    });
+    const sortedRuns = batch.runs;
+    const runsStart = batch.runs_total === 0 ? 0 : batch.runs_offset + 1;
+    const runsEnd = Math.min(batch.runs_offset + batch.runs.length, batch.runs_total);
 
     const errorBarData = errorCategories.map(c => ({
         name: c.name,
         count: c.count,
         fill: getFailureCategoryColor(c.name),
     }));
-
-    const failureRuns = batch.runs.filter(r => isFailureStatus(r.status));
 
     return (
         <PageLayout tier="standard">
@@ -581,6 +653,37 @@ export default function BatchDetailPage() {
                 }
             />
 
+            {isScheduledBulkBatch && (
+                <div
+                    className="card animate-in stagger-1"
+                    style={{
+                        padding: '1rem 1.25rem',
+                        marginBottom: '1.25rem',
+                        borderLeft: '3px solid var(--primary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '1rem',
+                        flexWrap: 'wrap',
+                    }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', color: 'var(--text)' }}>
+                        <Hourglass size={18} color="var(--primary)" />
+                        <div>
+                            <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>Scheduled bulk run</div>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.15rem' }}>
+                                Runs are queued in chunks and this page will update as workers pick them up.
+                            </div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        {scheduledCount && <span style={{ padding: '0.25rem 0.55rem', borderRadius: 6, background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.8rem', fontWeight: 600 }}>{scheduledCount} tests</span>}
+                        {scheduledChunkSize && <span style={{ padding: '0.25rem 0.55rem', borderRadius: 6, background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.8rem', fontWeight: 600 }}>Chunk size {scheduledChunkSize}</span>}
+                        {scheduledMaxActiveRuns && <span style={{ padding: '0.25rem 0.55rem', borderRadius: 6, background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.8rem', fontWeight: 600 }}>Max active {scheduledMaxActiveRuns}</span>}
+                    </div>
+                </div>
+            )}
+
             {/* Batch metadata */}
             <div className="animate-in stagger-1" style={{ marginBottom: '2rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem', flexWrap: 'wrap' }}>
@@ -596,7 +699,7 @@ export default function BatchDetailPage() {
             </div>
 
             {/* Summary Cards */}
-            <div className="animate-in stagger-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
+            <div className="animate-in stagger-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))', gap: '1rem', marginBottom: '2rem' }}>
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center' }}>
                     <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{displayedTotal}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Total Tests</div>
@@ -609,6 +712,16 @@ export default function BatchDetailPage() {
                     <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--danger)' }}>{displayedFailed}</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Failed</div>
                 </div>
+                <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: '3px solid var(--warning)' }}>
+                    <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: 'var(--warning)' }}>{displayedSkipped}</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Skipped</div>
+                </div>
+                {displayedOther > 0 && (
+                    <div className="card" style={{ padding: '1.25rem', textAlign: 'center' }}>
+                        <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem' }}>{displayedOther}</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Other</div>
+                    </div>
+                )}
                 <div className="card" style={{ padding: '1.25rem', textAlign: 'center', borderLeft: `3px solid ${getSuccessRateColor(displayedSuccessRate)}` }}>
                     <div style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.25rem', color: getSuccessRateColor(displayedSuccessRate) }}>{displayedSuccessRate}%</div>
                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Success Rate</div>
@@ -632,68 +745,91 @@ export default function BatchDetailPage() {
             )}
 
             {/* D5: Error Analysis + D6: Compare side-by-side */}
-            {batch.status === 'completed' && (errorCategories.length > 0 || recentBatches.length > 0) && (
-                <div style={{ display: 'grid', gridTemplateColumns: errorCategories.length > 0 && recentBatches.length > 0 ? 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))' : 'minmax(0, 1fr)', gap: '1rem', marginBottom: '2rem', minWidth: 0 }}>
+            {batch.status === 'completed' && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 420px), 1fr))', gap: '1rem', marginBottom: '2rem', minWidth: 0 }}>
                     {/* D5: Error Analysis */}
-                    {errorCategories.length > 0 && (
+                    {batch.failed > 0 && (
                         <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
-                            <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
-                                <BarChart3 size={16} /> Failure Analysis ({totalErrors} errors)
-                            </h3>
-                            <div style={{ width: '100%', maxWidth: '100%', minWidth: 0, height: 180, overflow: 'hidden' }}>
-                                <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart data={errorBarData} layout="vertical" margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
-                                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                                        <XAxis type="number" stroke="var(--text-secondary)" fontSize={12} />
-                                        <YAxis
-                                            type="category"
-                                            dataKey="name"
-                                            stroke="var(--text-secondary)"
-                                            fontSize={12}
-                                            width={72}
-                                            tickFormatter={(value) => String(value).length > 10 ? `${String(value).slice(0, 10)}...` : String(value)}
-                                        />
-                                        <Tooltip
-                                            contentStyle={{
-                                                background: 'var(--surface)',
-                                                border: '1px solid var(--border)',
-                                                borderRadius: '8px',
-                                                color: 'var(--text)',
-                                                boxShadow: 'var(--shadow-lg)',
-                                            }}
-                                            labelStyle={{ color: 'var(--text)', fontWeight: 600, marginBottom: '0.25rem' }}
-                                            itemStyle={{ color: 'var(--text)', fontWeight: 500 }}
-                                            cursor={{ fill: 'rgba(255,255,255,0.04)' }}
-                                        />
-                                        <Bar dataKey="count" radius={[0, 4, 4, 0]} />
-                                    </BarChart>
-                                </ResponsiveContainer>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', marginBottom: errorAnalysisLoaded ? '1rem' : 0 }}>
+                                <h3 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
+                                    <BarChart3 size={16} /> Failure Analysis{errorAnalysisLoaded ? ` (${totalErrors} errors)` : ''}
+                                </h3>
+                                {!errorAnalysisLoaded && (
+                                    <button className="btn btn-secondary" onClick={loadErrorAnalysis} disabled={errorAnalysisLoading} style={{ padding: '0.45rem 0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                        {errorAnalysisLoading && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />}
+                                        {errorAnalysisLoading ? 'Loading...' : 'Load analysis'}
+                                    </button>
+                                )}
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem', minWidth: 0 }}>
-                                {errorCategories.map(category => (
-                                    <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', minWidth: 0 }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem', minWidth: 0 }}>
-                                            <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name), minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{category.name}</span>
-                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', flexShrink: 0 }}>{category.count} ({category.percentage}%)</span>
-                                        </div>
-                                        {(category.examples || []).map(example => (
-                                            <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)', minWidth: 0 }}>
-                                                <div style={{ fontSize: '0.85rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.test_name || example.spec_name}</div>
-                                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.summary || 'No detailed failure artifact was captured for this run.'}</div>
-                                            </Link>
+                            {errorAnalysisError && <div style={{ color: 'var(--danger)', fontSize: '0.85rem', marginTop: '0.75rem' }}>{errorAnalysisError}</div>}
+                            {errorAnalysisLoaded && errorCategories.length === 0 && (
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No failure categories were found.</div>
+                            )}
+                            {errorCategories.length > 0 && (
+                                <>
+                                    <div style={{ width: '100%', maxWidth: '100%', minWidth: 0, height: 180, overflow: 'hidden' }}>
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart data={errorBarData} layout="vertical" margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
+                                                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                                                <XAxis type="number" stroke="var(--text-secondary)" fontSize={12} />
+                                                <YAxis
+                                                    type="category"
+                                                    dataKey="name"
+                                                    stroke="var(--text-secondary)"
+                                                    fontSize={12}
+                                                    width={72}
+                                                    tickFormatter={(value) => String(value).length > 10 ? `${String(value).slice(0, 10)}...` : String(value)}
+                                                />
+                                                <Tooltip
+                                                    contentStyle={{
+                                                        background: 'var(--surface)',
+                                                        border: '1px solid var(--border)',
+                                                        borderRadius: '8px',
+                                                        color: 'var(--text)',
+                                                        boxShadow: 'var(--shadow-lg)',
+                                                    }}
+                                                    labelStyle={{ color: 'var(--text)', fontWeight: 600, marginBottom: '0.25rem' }}
+                                                    itemStyle={{ color: 'var(--text)', fontWeight: 500 }}
+                                                    cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                                                />
+                                                <Bar dataKey="count" radius={[0, 4, 4, 0]} />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem', minWidth: 0 }}>
+                                        {errorCategories.map(category => (
+                                            <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', minWidth: 0 }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem', minWidth: 0 }}>
+                                                    <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name), minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{category.name}</span>
+                                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', flexShrink: 0 }}>{category.count} ({category.percentage}%)</span>
+                                                </div>
+                                                {(category.examples || []).map(example => (
+                                                    <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)', minWidth: 0 }}>
+                                                        <div style={{ fontSize: '0.85rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.test_name || example.spec_name}</div>
+                                                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.summary || 'No detailed failure artifact was captured for this run.'}</div>
+                                                    </Link>
+                                                ))}
+                                            </div>
                                         ))}
                                     </div>
-                                ))}
-                            </div>
+                                </>
+                            )}
                         </div>
                     )}
 
                     {/* D6: Compare */}
-                    {recentBatches.length > 0 && (
-                        <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
-                            <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
-                                <GitCompare size={16} /> Compare with...
-                            </h3>
+                    <div className="card animate-in" style={{ padding: '1.25rem', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
+                        <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
+                            <GitCompare size={16} /> Compare with...
+                        </h3>
+                        {!recentBatchesLoaded && (
+                            <button className="btn btn-secondary" onClick={loadRecentBatches} disabled={recentBatchesLoading} style={{ padding: '0.45rem 0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                                {recentBatchesLoading && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />}
+                                {recentBatchesLoading ? 'Loading...' : 'Load batches'}
+                            </button>
+                        )}
+                        {recentBatchesLoaded && recentBatches.length === 0 && <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No completed batches to compare.</div>}
+                        {recentBatches.length > 0 && (
                             <select
                                 className="input"
                                 onChange={(e) => { if (e.target.value) handleCompare(e.target.value); }}
@@ -705,49 +841,70 @@ export default function BatchDetailPage() {
                                     <option key={b.id} value={b.id}>{b.name || b.id} - {new Date(b.created_at).toLocaleDateString()}</option>
                                 ))}
                             </select>
-                            {comparing && <div style={{ textAlign: 'center', padding: '1rem' }}><Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} /></div>}
-                            {compareResult && (
-                                <div style={{ fontSize: '0.9rem' }}>
-                                    {compareResult.regressions.length > 0 && (
-                                        <div style={{ marginBottom: '0.75rem' }}>
-                                            <div style={{ fontWeight: 600, color: 'var(--danger)', marginBottom: '0.35rem' }}>Regressions ({compareResult.regressions.length})</div>
-                                            {compareResult.regressions.map(r => (
-                                                <div key={r.spec_name} style={{ padding: '0.35rem 0.5rem', borderRadius: '4px', background: 'rgba(239,68,68,0.08)', marginBottom: '0.25rem', fontSize: '0.85rem' }}>
-                                                    {r.spec_name} <span style={{ color: 'var(--text-secondary)' }}>{r.old_status} &rarr; {r.new_status}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                    {compareResult.improvements.length > 0 && (
-                                        <div style={{ marginBottom: '0.75rem' }}>
-                                            <div style={{ fontWeight: 600, color: 'var(--success)', marginBottom: '0.35rem' }}>Improvements ({compareResult.improvements.length})</div>
-                                            {compareResult.improvements.map(r => (
-                                                <div key={r.spec_name} style={{ padding: '0.35rem 0.5rem', borderRadius: '4px', background: 'rgba(16,185,129,0.08)', marginBottom: '0.25rem', fontSize: '0.85rem' }}>
-                                                    {r.spec_name} <span style={{ color: 'var(--text-secondary)' }}>{r.old_status} &rarr; {r.new_status}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                        {compareResult.unchanged_passing} unchanged passing, {compareResult.unchanged_failing} unchanged failing
+                        )}
+                        {comparing && <div style={{ textAlign: 'center', padding: '1rem' }}><Loader2 size={20} style={{ animation: 'spin 1s linear infinite' }} /></div>}
+                        {compareResult && (
+                            <div style={{ fontSize: '0.9rem' }}>
+                                {compareResult.regressions.length > 0 && (
+                                    <div style={{ marginBottom: '0.75rem' }}>
+                                        <div style={{ fontWeight: 600, color: 'var(--danger)', marginBottom: '0.35rem' }}>Regressions ({compareResult.regressions.length})</div>
+                                        {compareResult.regressions.map(r => (
+                                            <div key={r.spec_name} style={{ padding: '0.35rem 0.5rem', borderRadius: '4px', background: 'rgba(239,68,68,0.08)', marginBottom: '0.25rem', fontSize: '0.85rem', overflowWrap: 'anywhere' }}>
+                                                {r.spec_name} <span style={{ color: 'var(--text-secondary)' }}>{r.old_status} &rarr; {r.new_status}</span>
+                                            </div>
+                                        ))}
                                     </div>
+                                )}
+                                {compareResult.improvements.length > 0 && (
+                                    <div style={{ marginBottom: '0.75rem' }}>
+                                        <div style={{ fontWeight: 600, color: 'var(--success)', marginBottom: '0.35rem' }}>Improvements ({compareResult.improvements.length})</div>
+                                        {compareResult.improvements.map(r => (
+                                            <div key={r.spec_name} style={{ padding: '0.35rem 0.5rem', borderRadius: '4px', background: 'rgba(16,185,129,0.08)', marginBottom: '0.25rem', fontSize: '0.85rem', overflowWrap: 'anywhere' }}>
+                                                {r.spec_name} <span style={{ color: 'var(--text-secondary)' }}>{r.old_status} &rarr; {r.new_status}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                    {compareResult.unchanged_passing} unchanged passing, {compareResult.unchanged_failing} unchanged failing
                                 </div>
-                            )}
-                        </div>
-                    )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 
             {/* Test Results Table */}
             <div className="card animate-in stagger-3" style={{ padding: 0, overflow: 'hidden', marginBottom: '2rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 1.25rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)' }}>
-                    <h3 style={{ fontWeight: 600 }}>Test Results</h3>
+                    <div>
+                        <h3 style={{ fontWeight: 600 }}>Test Results</h3>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.2rem' }}>
+                            Showing {runsStart}-{runsEnd} of {batch.runs_total}
+                        </div>
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
-                            <input type="checkbox" checked={showFailuresOnly} onChange={(e) => setShowFailuresOnly(e.target.checked)} style={{ cursor: 'pointer' }} />
+                            <input
+                                type="checkbox"
+                                checked={showFailuresOnly}
+                                onChange={(e) => {
+                                    setRunsOffset(0);
+                                    setShowFailuresOnly(e.target.checked);
+                                }}
+                                style={{ cursor: 'pointer' }}
+                            />
                             Show failures only
                         </label>
-                        <select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)} className="input" style={{ padding: '0.4rem 0.8rem', width: 'auto', fontSize: '0.9rem' }}>
+                        <select
+                            value={sortBy}
+                            onChange={(e) => {
+                                setRunsOffset(0);
+                                setSortBy(e.target.value as any);
+                            }}
+                            className="input"
+                            style={{ padding: '0.4rem 0.8rem', width: 'auto', fontSize: '0.9rem' }}
+                        >
                             <option value="status">Sort by Status</option>
                             <option value="name">Sort by Name</option>
                             <option value="duration">Sort by Duration</option>
@@ -788,7 +945,16 @@ export default function BatchDetailPage() {
                                     </div>
                                     <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>{run.steps_completed}/{run.total_steps}</div>
                                     <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>{formatDuration(run.duration_seconds)}</div>
-                                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isFailureStatus(run.status) ? 'var(--danger)' : 'var(--text-secondary)', fontSize: '0.85rem' }}>{isFailureStatus(run.status) ? getFailureSummary(run) : '-'}</div>
+                                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isFailureStatus(run.status) ? 'var(--danger)' : 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                        {isFailureStatus(run.status) ? (
+                                            <button
+                                                onClick={() => loadFailureDetails(run)}
+                                                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--danger)', cursor: 'pointer', fontSize: '0.85rem', textAlign: 'left', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                            >
+                                                {failureDetails[run.id] ? getFailureSummary(failureDetails[run.id]) : 'View failure details'}
+                                            </button>
+                                        ) : '-'}
+                                    </div>
                                     {/* D7: History toggle */}
                                     <div style={{ textAlign: 'center' }}>
                                         <button
@@ -825,61 +991,87 @@ export default function BatchDetailPage() {
                                         )}
                                     </div>
                                 )}
+                                {expandedFailureRunId === run.id && (
+                                    <div style={{ padding: '0.85rem 1.25rem 1rem 3rem', borderBottom: '1px solid var(--border)', background: 'var(--danger-muted)' }}>
+                                        {failureDetailsLoading[run.id] ? (
+                                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                                <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Loading failure details...
+                                            </div>
+                                        ) : failureDetailsError[run.id] ? (
+                                            <div style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{failureDetailsError[run.id]}</div>
+                                        ) : (() => {
+                                            const detail = failureDetails[run.id];
+                                            if (!detail) return <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No failure details loaded.</div>;
+                                            const stepText = formatFailureStep(detail.failing_step);
+                                            const categoryColor = getFailureCategoryColor(detail.failure_category);
+                                            return (
+                                                <div style={{ minWidth: 0 }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', marginBottom: '0.75rem' }}>
+                                                        <div style={{ minWidth: 0 }}>
+                                                            <div style={{ fontWeight: 600, fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail.test_name || detail.spec_name}</div>
+                                                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.4rem', fontSize: '0.78rem' }}>
+                                                                <span style={{ padding: '0.15rem 0.5rem', borderRadius: '9999px', background: 'rgba(0,0,0,0.18)', color: categoryColor, border: `1px solid ${categoryColor}55`, fontWeight: 600 }}>{detail.failure_category || 'Other'}</span>
+                                                                <span style={{ color: 'var(--text-secondary)' }}>Source: {detail.failure_source || 'run status'}</span>
+                                                            </div>
+                                                        </div>
+                                                        <Link href={`/runs/${detail.id}`} target="_blank" style={{ flexShrink: 0, fontSize: '0.85rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>View Details <ChevronRight size={14} /></Link>
+                                                    </div>
+                                                    {stepText && (
+                                                        <div style={{ marginBottom: '0.75rem', padding: '0.6rem 0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.16)', color: 'var(--text-secondary)', fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                            {stepText}
+                                                        </div>
+                                                    )}
+                                                    <pre style={{ margin: 0, padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.8rem', color: 'var(--danger)', overflow: 'auto', maxHeight: '180px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{getFailureSummary(detail)}</pre>
+                                                    {detail.error_stack && (
+                                                        <details style={{ marginTop: '0.75rem' }}>
+                                                            <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Stack trace</summary>
+                                                            <pre style={{ margin: '0.5rem 0 0', padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.78rem', color: 'var(--text-secondary)', overflow: 'auto', maxHeight: '220px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{detail.error_stack}</pre>
+                                                        </details>
+                                                    )}
+                                                    {(detail.artifact_links || []).length > 0 && (
+                                                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+                                                            {(detail.artifact_links || []).slice(0, 4).map(link => (
+                                                                <a key={link.url} href={`${API_BASE}${link.url}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)', fontSize: '0.8rem', textDecoration: 'none' }}>
+                                                                    {link.label}
+                                                                </a>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                )}
                             </div>
                         );
                     })
                 )}
-            </div>
-
-            {/* Failure Details */}
-            {failureRuns.length > 0 && (
-                <div className="card" style={{ padding: '1.25rem' }}>
-                    <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <AlertTriangle size={18} color="var(--danger)" /> Failure Details ({failureRuns.length} failed)
-                    </h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                        {failureRuns.map(run => {
-                            const stepText = formatFailureStep(run.failing_step);
-                            const categoryColor = getFailureCategoryColor(run.failure_category);
-                            return (
-                                <div key={run.id} style={{ padding: '1rem', borderRadius: 'var(--radius)', background: 'var(--danger-muted)', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', marginBottom: '0.75rem' }}>
-                                        <div style={{ minWidth: 0 }}>
-                                            <div style={{ fontWeight: 600, fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{run.test_name || run.spec_name}</div>
-                                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.4rem', fontSize: '0.78rem' }}>
-                                                <span style={{ padding: '0.15rem 0.5rem', borderRadius: '9999px', background: 'rgba(0,0,0,0.18)', color: categoryColor, border: `1px solid ${categoryColor}55`, fontWeight: 600 }}>{run.failure_category || 'Other'}</span>
-                                                <span style={{ color: 'var(--text-secondary)' }}>Source: {run.failure_source || 'run status'}</span>
-                                            </div>
-                                        </div>
-                                        <Link href={`/runs/${run.id}`} target="_blank" style={{ flexShrink: 0, fontSize: '0.85rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>View Details <ChevronRight size={14} /></Link>
-                                    </div>
-                                    {stepText && (
-                                        <div style={{ marginBottom: '0.75rem', padding: '0.6rem 0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.16)', color: 'var(--text-secondary)', fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                            {stepText}
-                                        </div>
-                                    )}
-                                    <pre style={{ margin: 0, padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.8rem', color: 'var(--danger)', overflow: 'auto', maxHeight: '180px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{getFailureSummary(run)}</pre>
-                                    {run.error_stack && (
-                                        <details style={{ marginTop: '0.75rem' }}>
-                                            <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Stack trace</summary>
-                                            <pre style={{ margin: '0.5rem 0 0', padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.78rem', color: 'var(--text-secondary)', overflow: 'auto', maxHeight: '220px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{run.error_stack}</pre>
-                                        </details>
-                                    )}
-                                    {(run.artifact_links || []).length > 0 && (
-                                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
-                                            {(run.artifact_links || []).slice(0, 4).map(link => (
-                                                <a key={link.url} href={`${API_BASE}${link.url}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)', fontSize: '0.8rem', textDecoration: 'none' }}>
-                                                    {link.label}
-                                                </a>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
+                {batch.runs_total > RUN_PAGE_SIZE && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', padding: '1rem 1.25rem', borderTop: '1px solid var(--border)', background: 'var(--surface)' }}>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                            Page {Math.floor(batch.runs_offset / RUN_PAGE_SIZE) + 1} of {Math.ceil(batch.runs_total / RUN_PAGE_SIZE)}
+                        </span>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <button
+                                className="btn btn-secondary"
+                                disabled={batch.runs_offset === 0}
+                                onClick={() => setRunsOffset(Math.max(0, batch.runs_offset - RUN_PAGE_SIZE))}
+                                style={{ padding: '0.45rem 0.8rem', opacity: batch.runs_offset === 0 ? 0.5 : 1 }}
+                            >
+                                Previous
+                            </button>
+                            <button
+                                className="btn btn-secondary"
+                                disabled={!batch.runs_has_more}
+                                onClick={() => setRunsOffset(batch.runs_offset + RUN_PAGE_SIZE)}
+                                style={{ padding: '0.45rem 0.8rem', opacity: batch.runs_has_more ? 1 : 0.5 }}
+                            >
+                                Next
+                            </button>
+                        </div>
                     </div>
-                </div>
-            )}
+                )}
+            </div>
 
             {/* TestRail Sync Modal */}
             {canEdit && syncModalOpen && (

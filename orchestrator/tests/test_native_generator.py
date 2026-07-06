@@ -41,7 +41,8 @@ def test_generator_prompt_accepts_memory_run_id(monkeypatch):
 
     assert "https://example.test" in prompt
     assert "<test-file>/tmp/recorded-flow.spec.ts</test-file>" in prompt
-    assert 'generator_setup_page` with `seedFile: "tests/seed.spec.ts"`' in prompt
+    assert "Call `generator_setup_page` without `seedFile`" in prompt
+    assert "The run-local seed is `tests/seed.spec.ts`" in prompt
     assert "## Robust Synchronization Requirements" in prompt
     assert "Do not use `page.waitForTimeout()`" in prompt
     assert "await expect(locator).toBeVisible()" in prompt
@@ -421,7 +422,7 @@ async def test_generator_skips_format_retry_for_unrecoverable_provider_overload(
         )
 
 
-def test_generator_agent_definition_requires_seed_file():
+def test_generator_agent_definition_instructs_setup_seed_file_omission():
     content = (
         Path(__file__).resolve().parents[2]
         / ".claude"
@@ -429,7 +430,8 @@ def test_generator_agent_definition_requires_seed_file():
         / "playwright-test-generator.md"
     ).read_text()
 
-    assert 'generator_setup_page` tool with `seedFile: "tests/seed.spec.ts"`' in content
+    assert "generator_setup_page` tool without `seedFile`" in content
+    assert "The run-local seed is `tests/seed.spec.ts`" in content
     assert (
         "Include every test case from the provided spec in that single file" in content
     )
@@ -546,6 +548,78 @@ async def test_generator_runner_does_not_inject_memory_twice(monkeypatch):
     assert not any(tool.endswith("__browser_run_code") for tool in captured["tools"])
     assert not any(tool.endswith("__browser_file_upload") for tool in captured["tools"])
     assert not any(tool.endswith("__browser_close") for tool in captured["tools"])
+
+
+@pytest.mark.asyncio
+async def test_generator_retries_once_after_bad_setup_seed_file(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+    calls: list[dict] = []
+    prompts: list[str] = []
+    valid_code = (
+        "import { test, expect } from '@playwright/test';\n"
+        "test('generated', async ({ page }) => {\n"
+        "  await expect(page.locator('body')).toBeVisible();\n"
+        "});\n"
+    )
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def run(self, prompt):
+            prompts.append(prompt)
+            if len(calls) == 1:
+                return AgentResult(
+                    success=False,
+                    error="seed test not found",
+                    tool_calls=[
+                        ToolCall(
+                            name="mcp__playwright-test__generator_setup_page",
+                            timestamp=datetime.utcnow(),
+                            input={"seedFile": "tests/generated/generated.spec.ts"},
+                            success=False,
+                            error="seed test not found",
+                        )
+                    ],
+                    session_id="bad-seed-session",
+                )
+            return AgentResult(
+                success=True,
+                output=f"```typescript\n{valid_code}```",
+                session_id="retry-session",
+            )
+
+    monkeypatch.setattr(
+        "orchestrator.workflows.native_generator.AgentRunner", FakeRunner
+    )
+    generator = NativeGenerator()
+    generator.tests_dir = tmp_path
+    generator._extract_credential_placeholders = lambda _content: {}
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("# Test\n1. Navigate to https://example.test")
+
+    output = await generator.generate_test(
+        str(spec_path),
+        target_url="https://example.test",
+        output_name="generated",
+        enable_self_run=False,
+    )
+
+    assert output == tmp_path / "generated.spec.ts"
+    assert output.read_text() == valid_code
+    assert len(calls) == 2
+    assert (
+        "Call `generator_setup_page` without `seedFile`; do not pass the generated spec path as seed."
+        in prompts[1]
+    )
+    assert calls[1]["requires_live_browser"] is True
+    assert calls[1]["resume_session_id"] is None
+    assert calls[1]["continue_conversation"] is False
+    assert calls[1]["allowed_tools"] == calls[0]["allowed_tools"]
+    assert any(tool.endswith("__generator_setup_page") for tool in calls[1]["tools"])
+    assert any(tool.endswith("__browser_snapshot") for tool in calls[1]["tools"])
 
 
 @pytest.mark.asyncio

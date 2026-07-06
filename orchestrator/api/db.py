@@ -209,6 +209,17 @@ def _run_migrations():
     inspector = inspect(engine)
 
     with engine.begin() as conn:
+        if "execution_settings" in inspector.get_table_names():
+            existing_columns = {col["name"] for col in inspector.get_columns("execution_settings")}
+            if "ai_pipeline_timeout_seconds" not in existing_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE execution_settings "
+                        "ADD COLUMN ai_pipeline_timeout_seconds INTEGER NOT NULL DEFAULT 7200"
+                    )
+                )
+                logger.info("Added column: execution_settings.ai_pipeline_timeout_seconds")
+
         # Check and add new columns to testrun table
         if "testrun" in inspector.get_table_names():
             existing_columns = {col["name"] for col in inspector.get_columns("testrun")}
@@ -309,6 +320,11 @@ def _run_migrations():
                         stopped INTEGER NOT NULL DEFAULT 0,
                         running INTEGER NOT NULL DEFAULT 0,
                         queued INTEGER NOT NULL DEFAULT 0,
+                        actual_total_tests INTEGER,
+                        actual_passed INTEGER,
+                        actual_failed INTEGER,
+                        actual_skipped INTEGER,
+                        actual_other INTEGER,
                         status VARCHAR NOT NULL DEFAULT 'pending'
                     )
                 """)
@@ -333,6 +349,11 @@ def _run_migrations():
                         stopped INTEGER NOT NULL DEFAULT 0,
                         running INTEGER NOT NULL DEFAULT 0,
                         queued INTEGER NOT NULL DEFAULT 0,
+                        actual_total_tests INTEGER,
+                        actual_passed INTEGER,
+                        actual_failed INTEGER,
+                        actual_skipped INTEGER,
+                        actual_other INTEGER,
                         status VARCHAR NOT NULL DEFAULT 'pending'
                     )
                 """)
@@ -355,6 +376,52 @@ def _run_migrations():
             if "actual_failed" not in batch_columns:
                 conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_failed INTEGER"))
                 logger.info("Added column: regression_batches.actual_failed")
+            if "actual_skipped" not in batch_columns:
+                conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_skipped INTEGER"))
+                logger.info("Added column: regression_batches.actual_skipped")
+            if "actual_other" not in batch_columns:
+                conn.execute(text("ALTER TABLE regression_batches ADD COLUMN actual_other INTEGER"))
+                logger.info("Added column: regression_batches.actual_other")
+            scheduled_batch_columns = {
+                "scheduler_status": "VARCHAR",
+                "scheduler_workflow_id": "VARCHAR",
+                "scheduler_run_id": "VARCHAR",
+                "chunk_size": "INTEGER",
+                "max_active_runs": "INTEGER",
+                "dispatch_total": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_started": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_completed": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_failed": "INTEGER NOT NULL DEFAULT 0",
+                "dispatch_cancelled": "INTEGER NOT NULL DEFAULT 0",
+                "next_spec_index": "INTEGER NOT NULL DEFAULT 0",
+                "scheduler_error": "TEXT",
+            }
+            for column_name, column_type in scheduled_batch_columns.items():
+                if column_name not in batch_columns:
+                    conn.execute(text(f"ALTER TABLE regression_batches ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: regression_batches.%s", column_name)
+
+        if "regression_batch_items" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            conn.execute(
+                text(f"""
+                CREATE TABLE regression_batch_items (
+                    id VARCHAR PRIMARY KEY,
+                    batch_id VARCHAR NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    spec_name VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    run_id VARCHAR,
+                    payload_json TEXT NOT NULL DEFAULT '{{}}',
+                    created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    started_at {timestamp_type},
+                    completed_at {timestamp_type},
+                    error_message TEXT,
+                    UNIQUE(batch_id, ordinal)
+                )
+            """)
+            )
+            logger.info("Created table: regression_batch_items")
 
         # Add project_id to specmetadata table
         if "specmetadata" in inspector.get_table_names():
@@ -2037,9 +2104,26 @@ def _run_migrations():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_testrun_status_date ON testrun (status, created_at)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_testrun_test_type ON testrun (test_type)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_testrun_type_spec ON testrun (test_type, spec_name)"))
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_testrun_batch_status_spec_id ON testrun (batch_id, status, spec_name, id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_testrun_batch_spec_id ON testrun (batch_id, spec_name, id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_testrun_project_spec_created ON testrun (project_id, spec_name, created_at)")
+                )
                 logger.info("Created performance indexes on testrun table")
             except Exception as e:
                 logger.debug(f"Indexes may already exist on testrun: {e}")
+
+        if "regression_batches" in inspector.get_table_names():
+            try:
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_regression_batches_status_created ON regression_batches (status, created_at)")
+                )
+            except Exception as e:
+                logger.debug(f"Indexes may already exist on regression_batches: {e}")
 
         # Add indexes for run_artifacts table
         if "run_artifacts" in inspector.get_table_names():
@@ -2650,6 +2734,11 @@ def init_db():
 
     # Initialize execution settings with defaults if not exists
     with Session(engine) as session:
+        from orchestrator.services.execution_timeouts import (
+            apply_ai_pipeline_timeout_to_process,
+            clamp_ai_pipeline_timeout_seconds,
+        )
+
         settings = session.get(ExecutionSettings, 1)
         if not settings:
             # Use environment defaults for initial settings
@@ -2660,13 +2749,22 @@ def init_db():
             parallel_enabled = env_parallel_enabled and is_parallel_mode_available()
 
             settings = ExecutionSettings(
-                id=1, parallelism=max(1, min(10, env_parallelism)), parallel_mode_enabled=parallel_enabled
+                id=1,
+                parallelism=max(1, min(10, env_parallelism)),
+                parallel_mode_enabled=parallel_enabled,
             )
             session.add(settings)
             session.commit()
             logger.info(
                 f"Created execution settings: parallelism={settings.parallelism}, parallel_mode={settings.parallel_mode_enabled}"
             )
+        else:
+            normalized_timeout = clamp_ai_pipeline_timeout_seconds(settings.ai_pipeline_timeout_seconds)
+            if settings.ai_pipeline_timeout_seconds != normalized_timeout:
+                settings.ai_pipeline_timeout_seconds = normalized_timeout
+                session.add(settings)
+                session.commit()
+        apply_ai_pipeline_timeout_to_process(settings.ai_pipeline_timeout_seconds)
 
         # Ensure default project exists
         default_project = session.get(Project, "default")

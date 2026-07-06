@@ -1787,6 +1787,18 @@ def test_custom_workflow_worker_registers_only_step_level_temporal_activities():
     assert "execute_custom_workflow_run" not in custom_workflow_worker.main.__code__.co_names
 
 
+def test_custom_workflow_worker_accepts_multiple_task_queues(monkeypatch):
+    monkeypatch.setenv(
+        "TEMPORAL_WORKFLOW_TASK_QUEUES",
+        "quorvex-custom-workflows, quorvex-browser-workflows, quorvex-custom-workflows",
+    )
+
+    assert custom_workflow_worker._configured_task_queues() == [
+        "quorvex-custom-workflows",
+        "quorvex-browser-workflows",
+    ]
+
+
 def test_temporal_activity_history_parser_summarizes_attempts_and_failure():
     from google.protobuf.timestamp_pb2 import Timestamp
     from temporalio.api.common.v1 import ActivityType

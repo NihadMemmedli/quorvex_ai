@@ -93,13 +93,13 @@ class AppSettings(BaseSettings):
 
     # --- Browser Pool ---
     max_browser_instances: int = 5
-    browser_slot_timeout: int = 3600
+    browser_slot_timeout: int = 7200
 
     # --- Agent Timeouts ---
-    agent_timeout_seconds: int = 1800
-    exploration_timeout_seconds: int | None = None
-    planner_timeout_seconds: int | None = None
-    generator_timeout_seconds: int | None = None
+    agent_timeout_seconds: int = 7200
+    exploration_timeout_seconds: int | None = 7200
+    planner_timeout_seconds: int | None = 7200
+    generator_timeout_seconds: int | None = 7200
 
     # --- Agent Runtimes ---
     quorvex_agent_runtime: str = "claude_sdk"
@@ -213,7 +213,7 @@ class AppSettings(BaseSettings):
         try:
             v = int(v)
         except (TypeError, ValueError):
-            return 3600
+            return 7200
         return max(60, v)
 
     def validate_production_config(self):

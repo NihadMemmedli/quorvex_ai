@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SPECS_DIR = BASE_DIR / "specs"
 RUNS_DIR = BASE_DIR / "runs"
+DEFAULT_MAX_BULK_RUN_SPECS = 50
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +256,30 @@ def _test_data_refs_for_spec(config: BatchConfig, spec_name: str) -> list[str]:
     return [str(ref).strip() for ref in refs if str(ref).strip()]
 
 
+def _max_bulk_run_specs() -> int:
+    raw_value = os.environ.get("QUORVEX_MAX_BULK_RUN_SPECS")
+    if raw_value is None or raw_value.strip() == "":
+        return DEFAULT_MAX_BULK_RUN_SPECS
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        logger.warning(
+            "Invalid QUORVEX_MAX_BULK_RUN_SPECS=%r; using default %s",
+            raw_value,
+            DEFAULT_MAX_BULK_RUN_SPECS,
+        )
+        return DEFAULT_MAX_BULK_RUN_SPECS
+
+
+def _enforce_bulk_run_limit(spec_names: list[str]) -> None:
+    max_specs = _max_bulk_run_specs()
+    if len(spec_names) > max_specs:
+        raise ValueError(
+            f"Bulk regression run is limited to {max_specs} spec files; "
+            f"request matched {len(spec_names)}. Use filters or select a smaller set."
+        )
+
+
 def create_regression_batch(config: BatchConfig, session: Session) -> BatchResult:
     """
     Create a regression batch: discover specs, create DB records, prepare tasks.
@@ -267,6 +292,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
         ValueError: If no specs match the specified filters.
     """
     spec_names_to_run = select_regression_specs(config, session)
+    _enforce_bulk_run_limit(spec_names_to_run)
 
     # ------------------------------------------------------------------
     # 2. Create the RegressionBatch record
@@ -291,6 +317,8 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
         actual_total_tests=actual_total_tests,
         actual_passed=0,
         actual_failed=0,
+        actual_skipped=0,
+        actual_other=0,
         status="pending",
     )
     session.add(batch)
@@ -317,6 +345,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
         (run_dir / "status.txt").write_text("queued")
 
         try_code_path = _get_try_code_path(spec_name, spec_path)
+        healer_max_attempts = 1 if try_code_path else None
 
         run = DBTestRun(
             id=run_id,
@@ -337,6 +366,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
                 "run_dir": str(run_dir),
                 "run_id": run_id,
                 "try_code_path": try_code_path,
+                "healer_max_attempts": healer_max_attempts,
                 "browser": config.browser,
                 "hybrid": config.hybrid_mode,
                 "max_iterations": config.max_iterations,

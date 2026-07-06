@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone, Copy, Bot } from 'lucide-react';
+import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone, Copy, Bot, Clock } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { CredentialsManager } from '@/components/CredentialsManager';
@@ -18,6 +18,7 @@ interface ExecutionSettings {
     parallel_mode_enabled: boolean;
     headless_in_parallel: boolean;
     memory_enabled: boolean;
+    ai_pipeline_timeout_seconds: number;
     database_type: string;
     parallel_mode_available: boolean;
 }
@@ -75,6 +76,8 @@ interface AssistantSettings {
     assistant_runtime: string;
 }
 
+type JiraAuthMode = 'cloud_basic' | 'data_center_pat';
+
 type ClaudeTokenSetupPhase = 'idle' | 'checking_cli' | 'running_claude' | 'saving_token' | 'success' | 'manual_fallback';
 
 interface ClaudeTokenSetupState {
@@ -83,6 +86,26 @@ interface ClaudeTokenSetupState {
     fallbackCommand?: string;
     maskedToken?: string;
 }
+
+const DEFAULT_AI_PIPELINE_TIMEOUT_MINUTES = 120;
+const MIN_AI_PIPELINE_TIMEOUT_MINUTES = 15;
+const MAX_AI_PIPELINE_TIMEOUT_MINUTES = 1440;
+
+const clampAiPipelineTimeoutMinutes = (minutes: number) => {
+    if (!Number.isFinite(minutes)) {
+        return DEFAULT_AI_PIPELINE_TIMEOUT_MINUTES;
+    }
+    return Math.min(MAX_AI_PIPELINE_TIMEOUT_MINUTES, Math.max(MIN_AI_PIPELINE_TIMEOUT_MINUTES, Math.round(minutes)));
+};
+
+const secondsToAiPipelineTimeoutMinutes = (seconds: number | undefined) => {
+    if (typeof seconds !== 'number') {
+        return DEFAULT_AI_PIPELINE_TIMEOUT_MINUTES;
+    }
+    return clampAiPipelineTimeoutMinutes(seconds / 60);
+};
+
+const minutesToAiPipelineTimeoutSeconds = (minutes: number) => clampAiPipelineTimeoutMinutes(minutes) * 60;
 
 function githubActionsQualityGateYaml(owner: string, repo: string): string {
     const projectIdExpression = '${{ vars.QUORVEX_PROJECT_ID || \'default\' }}';
@@ -145,6 +168,7 @@ export default function SettingsPage() {
         parallel_mode_enabled: false,
         headless_in_parallel: true,
         memory_enabled: true,
+        ai_pipeline_timeout_seconds: DEFAULT_AI_PIPELINE_TIMEOUT_MINUTES * 60,
         database_type: 'sqlite',
         parallel_mode_available: false
     });
@@ -184,6 +208,7 @@ export default function SettingsPage() {
     // Jira integration state
     const [jiraUrl, setJiraUrl] = useState('');
     const [jiraEmail, setJiraEmail] = useState('');
+    const [jiraAuthMode, setJiraAuthMode] = useState<JiraAuthMode>('cloud_basic');
     const [jiraApiToken, setJiraApiToken] = useState('');
     const [jiraApiTokenMasked, setJiraApiTokenMasked] = useState('');
     const [showJiraApiToken, setShowJiraApiToken] = useState(false);
@@ -253,7 +278,13 @@ export default function SettingsPage() {
                     ...settingsData,
                     assistant_runtime: settingsData.assistant_runtime || prev.assistant_runtime,
                 }));
-                setExecutionSettings(execData);
+                setExecutionSettings(prev => ({
+                    ...prev,
+                    ...execData,
+                    ai_pipeline_timeout_seconds: minutesToAiPipelineTimeoutSeconds(
+                        secondsToAiPipelineTimeoutMinutes(execData.ai_pipeline_timeout_seconds)
+                    ),
+                }));
                 setLoading(false);
             })
             .catch(err => {
@@ -355,6 +386,7 @@ export default function SettingsPage() {
                 if (data.configured) {
                     setJiraUrl(data.base_url || '');
                     setJiraEmail(data.email || '');
+                    setJiraAuthMode(data.auth_mode === 'data_center_pat' ? 'data_center_pat' : 'cloud_basic');
                     setJiraApiToken('');
                     setJiraApiTokenMasked(data.api_token_masked || '');
                     setJiraProjectKey(data.project_key || null);
@@ -383,6 +415,7 @@ export default function SettingsPage() {
                 } else {
                     setJiraUrl('');
                     setJiraEmail('');
+                    setJiraAuthMode('cloud_basic');
                     setJiraApiToken('');
                     setJiraProjectKey(null);
                     setJiraIssueTypeId(null);
@@ -644,6 +677,10 @@ export default function SettingsPage() {
         setExecutionSettings(prev => ({ ...prev, [field]: value }));
     };
 
+    const handleAiPipelineTimeoutMinutesChange = (minutes: number) => {
+        handleExecutionChange('ai_pipeline_timeout_seconds', minutesToAiPipelineTimeoutSeconds(minutes));
+    };
+
     const handleExecutionSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setSavingExecution(true);
@@ -657,13 +694,22 @@ export default function SettingsPage() {
                     parallelism: executionSettings.parallelism,
                     parallel_mode_enabled: executionSettings.parallel_mode_enabled,
                     headless_in_parallel: executionSettings.headless_in_parallel,
-                    memory_enabled: executionSettings.memory_enabled
+                    memory_enabled: executionSettings.memory_enabled,
+                    ai_pipeline_timeout_seconds: minutesToAiPipelineTimeoutSeconds(
+                        secondsToAiPipelineTimeoutMinutes(executionSettings.ai_pipeline_timeout_seconds)
+                    )
                 })
             });
             const data = await res.json();
 
             if (res.ok) {
-                setExecutionSettings(data);
+                setExecutionSettings(prev => ({
+                    ...prev,
+                    ...data,
+                    ai_pipeline_timeout_seconds: minutesToAiPipelineTimeoutSeconds(
+                        secondsToAiPipelineTimeoutMinutes(data.ai_pipeline_timeout_seconds)
+                    ),
+                }));
                 try {
                     const statusRes = await fetch(`${API_BASE}/api/browser-pool/status`);
                     if (statusRes.ok) {
@@ -856,23 +902,30 @@ export default function SettingsPage() {
     // ── Jira handlers ────────────────────────────────────────────
 
     const handleJiraTestConnection = async () => {
-        if (!currentProject?.id || !jiraUrl || !jiraEmail || (!jiraApiToken && !jiraConfigured)) return;
+        const jiraEmailRequired = jiraAuthMode === 'cloud_basic';
+        if (!currentProject?.id || !jiraUrl || (jiraEmailRequired && !jiraEmail) || (!jiraApiToken && !jiraConfigured)) return;
         setJiraTesting(true);
         setJiraConnectionStatus(null);
 
         try {
+            const configBody: any = {
+                base_url: jiraUrl,
+                email: jiraEmail,
+                auth_mode: jiraAuthMode,
+                project_key: jiraProjectKey,
+                issue_type_id: jiraIssueTypeId,
+            };
             if (jiraApiToken) {
-                await fetch(`${API_BASE}/jira/${encodeURIComponent(currentProject.id)}/config`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        base_url: jiraUrl,
-                        email: jiraEmail,
-                        api_token: jiraApiToken,
-                        project_key: jiraProjectKey,
-                        issue_type_id: jiraIssueTypeId,
-                    })
-                });
+                configBody.api_token = jiraApiToken;
+            }
+            const configRes = await fetch(`${API_BASE}/jira/${encodeURIComponent(currentProject.id)}/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(configBody),
+            });
+            if (!configRes.ok) {
+                const configData = await configRes.json();
+                throw new Error(configData.detail || 'Failed to save Jira config before testing');
             }
 
             const res = await fetch(`${API_BASE}/jira/${encodeURIComponent(currentProject.id)}/test-connection`, {
@@ -936,6 +989,7 @@ export default function SettingsPage() {
             const body: any = {
                 base_url: jiraUrl,
                 email: jiraEmail,
+                auth_mode: jiraAuthMode,
                 project_key: jiraProjectKey,
                 issue_type_id: jiraIssueTypeId,
             };
@@ -971,6 +1025,7 @@ export default function SettingsPage() {
             setJiraConfigured(false);
             setJiraUrl('');
             setJiraEmail('');
+            setJiraAuthMode('cloud_basic');
             setJiraApiToken('');
             setJiraApiTokenMasked('');
             setJiraProjectKey(null);
@@ -1814,6 +1869,41 @@ export default function SettingsPage() {
                         </p>
                     </div>
 
+                    {/* AI Pipeline Timeout */}
+                    <div className="form-group">
+                        <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Clock size={18} />
+                            AI Pipeline Timeout
+                        </label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                            <input
+                                type="range"
+                                min={MIN_AI_PIPELINE_TIMEOUT_MINUTES}
+                                max={MAX_AI_PIPELINE_TIMEOUT_MINUTES}
+                                step="5"
+                                value={secondsToAiPipelineTimeoutMinutes(executionSettings.ai_pipeline_timeout_seconds)}
+                                onChange={(e) => handleAiPipelineTimeoutMinutesChange(parseInt(e.target.value, 10))}
+                                style={{ flex: '1 1 220px' }}
+                            />
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <input
+                                    type="number"
+                                    min={MIN_AI_PIPELINE_TIMEOUT_MINUTES}
+                                    max={MAX_AI_PIPELINE_TIMEOUT_MINUTES}
+                                    step="5"
+                                    value={secondsToAiPipelineTimeoutMinutes(executionSettings.ai_pipeline_timeout_seconds)}
+                                    onChange={(e) => handleAiPipelineTimeoutMinutesChange(parseInt(e.target.value, 10))}
+                                    className="input"
+                                    style={{ width: '96px' }}
+                                />
+                                <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>minutes</span>
+                            </div>
+                        </div>
+                        <p className="helper-text">
+                            Maximum wait for long AI generation, planning, exploration, and browser slot waiting. This does not change short browser action watchdogs.
+                        </p>
+                    </div>
+
                     {/* Headless Mode Toggle */}
                     <div className="form-group">
                         <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -2216,9 +2306,34 @@ export default function SettingsPage() {
                             </div>
                         </div>
 
+                        {/* Auth Mode */}
+                        <div className="form-group">
+                            <label className="label">Authentication</label>
+                            <div className="input-group">
+                                <div className="input-icon">
+                                    <Shield size={18} />
+                                </div>
+                                <select
+                                    value={jiraAuthMode}
+                                    onChange={e => setJiraAuthMode(e.target.value === 'data_center_pat' ? 'data_center_pat' : 'cloud_basic')}
+                                    className="input has-icon"
+                                >
+                                    <option value="cloud_basic">Jira Cloud API token</option>
+                                    <option value="data_center_pat">Jira Data Center personal access token</option>
+                                </select>
+                            </div>
+                        </div>
+
                         {/* Email */}
                         <div className="form-group">
-                            <label className="label">Email</label>
+                            <label className="label">
+                                Email
+                                {jiraAuthMode === 'data_center_pat' && (
+                                    <span style={{ color: 'var(--text-secondary)', fontWeight: 400, marginLeft: '0.5rem', fontSize: '0.85rem' }}>
+                                        (not used for Data Center PAT)
+                                    </span>
+                                )}
+                            </label>
                             <div className="input-group">
                                 <div className="input-icon">
                                     <Mail size={18} />
@@ -2229,6 +2344,7 @@ export default function SettingsPage() {
                                     onChange={e => setJiraEmail(e.target.value)}
                                     placeholder="user@company.com"
                                     className="input has-icon"
+                                    disabled={jiraAuthMode === 'data_center_pat'}
                                 />
                             </div>
                         </div>
@@ -2265,7 +2381,11 @@ export default function SettingsPage() {
                                 </button>
                             </div>
                             <p className="helper-text">
-                                Generate an API token at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>Atlassian Account Settings</a>
+                                {jiraAuthMode === 'cloud_basic' ? (
+                                    <>Generate an API token at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>Atlassian Account Settings</a></>
+                                ) : (
+                                    <>Use a Jira Data Center personal access token. Quorvex sends it as a Bearer token.</>
+                                )}
                             </p>
                         </div>
 
@@ -2275,7 +2395,7 @@ export default function SettingsPage() {
                                 type="button"
                                 className="btn btn-secondary"
                                 onClick={handleJiraTestConnection}
-                                disabled={jiraTesting || !jiraUrl || !jiraEmail || (!jiraApiToken && !jiraConfigured)}
+                                disabled={jiraTesting || !jiraUrl || (jiraAuthMode === 'cloud_basic' && !jiraEmail) || (!jiraApiToken && !jiraConfigured)}
                                 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                             >
                                 {jiraTesting ? <Loader2 size={16} className="animate-spin" style={{ animation: 'spin 1s linear infinite' }} /> : <Link2 size={16} />}
@@ -2366,7 +2486,7 @@ export default function SettingsPage() {
                                     type="button"
                                     className="btn btn-primary"
                                     onClick={handleJiraSave}
-                                    disabled={jiraSaving || !jiraUrl || !jiraEmail}
+                                    disabled={jiraSaving || !jiraUrl || (jiraAuthMode === 'cloud_basic' && !jiraEmail)}
                                     style={{
                                         minWidth: '140px',
                                         justifyContent: 'center',

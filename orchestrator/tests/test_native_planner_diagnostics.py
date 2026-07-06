@@ -223,6 +223,37 @@ def _live_save_result(plan: str) -> AgentResult:
 
 
 @pytest.mark.asyncio
+async def test_repair_agent_default_timeout_covers_queue_contention(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    monkeypatch.delenv("PLANNER_REPAIR_TIMEOUT_SECONDS", raising=False)
+    captured: dict[str, Any] = {}
+
+    class FakeRunner:
+        async def run(self, prompt: str) -> AgentResult:
+            captured["prompt"] = prompt
+            return AgentResult(success=True, output=VALID_PLAN)
+
+    def fake_create_agent_runner(*_args: Any, **kwargs: Any) -> FakeRunner:
+        captured["timeout_seconds"] = kwargs["timeout_seconds"]
+        captured["requires_live_browser"] = kwargs["requires_live_browser"]
+        return FakeRunner()
+
+    import orchestrator.workflows.native_planner as native_planner_module
+
+    monkeypatch.setattr(
+        native_planner_module, "create_agent_runner", fake_create_agent_runner
+    )
+
+    result = await planner._query_repair_agent("repair this")
+
+    assert result.output == VALID_PLAN
+    assert captured["timeout_seconds"] == 900
+    assert captured["requires_live_browser"] is False
+
+
+@pytest.mark.asyncio
 async def test_live_native_planner_does_not_attach_permission_guard_by_default(
     tmp_path, monkeypatch
 ):
@@ -1571,9 +1602,11 @@ async def test_live_plan_repairs_missing_draft_without_browser_retry(
         planner,
         [_live_save_result(VALID_PLAN_WITHOUT_DRAFT)],
     )
-    _patch_repair_agent(
-        monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN)
-    )
+
+    async def fail_if_called(_prompt: str) -> AgentResult:
+        raise AssertionError("repair agent should not run for local draft fallback")
+
+    monkeypatch.setattr(planner, "_query_repair_agent", fail_if_called)
 
     path = await planner.generate_spec_from_flow_context(
         flow_title="Checkout",
@@ -1584,22 +1617,14 @@ async def test_live_plan_repairs_missing_draft_without_browser_retry(
 
     draft_path = path.with_suffix(".draft.spec.ts")
     assert len(prompts) == 1
-    assert path.read_text().strip() == VALID_PLAN.strip()
+    content = path.read_text()
+    assert VALID_PLAN_WITHOUT_DRAFT.strip() in content
+    assert "## Draft Playwright Script" in content
+    assert "page.goto('https://example.test/checkout')" in content
     assert planner.last_draft_script_path == draft_path
     assert draft_path.exists()
-    attempt = json.loads(
-        (planner.session_dir / "planner_repair_attempt.json").read_text()
-    )
-    assert attempt["attempted"] is True
-    assert attempt["accepted"] is True
-    assert (
-        attempt["draft_script_validation_failure"]
-        == "missing Draft Playwright Script fenced TypeScript block"
-    )
-    assert (
-        attempt["rejected_artifacts"][0]["validation_failure_reason"]
-        == "missing Draft Playwright Script fenced TypeScript block"
-    )
+    assert "page.goto('https://example.test/checkout')" in draft_path.read_text()
+    assert not (planner.session_dir / "planner_repair_attempt.json").exists()
 
 
 @pytest.mark.asyncio
@@ -1671,14 +1696,14 @@ async def test_live_plan_draft_repair_failure_retries_until_max_attempts(
         monkeypatch,
         planner,
         [
-            _live_save_result(VALID_PLAN_WITHOUT_DRAFT),
-            _live_save_result(VALID_PLAN_WITHOUT_DRAFT),
+            _live_save_result(VALID_PLAN_WITH_BAD_DRAFT),
+            _live_save_result(VALID_PLAN_WITH_BAD_DRAFT),
         ],
     )
     _patch_repair_agent(
         monkeypatch,
         planner,
-        AgentResult(success=True, output=VALID_PLAN_WITHOUT_DRAFT),
+        AgentResult(success=True, output=VALID_PLAN_WITH_BAD_DRAFT),
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
@@ -1696,7 +1721,7 @@ async def test_live_plan_draft_repair_failure_retries_until_max_attempts(
     assert exc_info.value.diagnostics["planner_repair_accepted"] is False
     assert (
         exc_info.value.diagnostics["planner_draft_script_validation_failure"]
-        == "missing Draft Playwright Script fenced TypeScript block"
+        == "draft script uses page.waitForTimeout()"
     )
 
 
@@ -1905,7 +1930,7 @@ async def test_live_plan_rejects_missing_target_navigation_despite_generator_see
 
 
 @pytest.mark.asyncio
-async def test_live_plan_rejects_explicitly_wrong_generator_setup_seed(
+async def test_live_plan_accepts_valid_saved_plan_with_wrong_generator_setup_seed_warning(
     tmp_path, monkeypatch
 ):
     planner = _planner(tmp_path)
@@ -1919,21 +1944,25 @@ async def test_live_plan_rejects_explicitly_wrong_generator_setup_seed(
             input={"seedFile": "tests/not-seed.spec.ts"},
         )
     )
-    _patch_agent_sequence(monkeypatch, planner, [result])
+    prompts = _patch_agent_sequence(monkeypatch, planner, [result])
 
-    with pytest.raises(SpecGenerationError) as exc_info:
-        await planner.generate_spec_from_flow_context(
-            flow_title="Checkout",
-            flow_context="Checkout flow",
-            target_url="https://example.test/checkout",
-            output_dir=tmp_path / "run",
-        )
+    path = await planner.generate_spec_from_flow_context(
+        flow_title="Checkout",
+        flow_context="Checkout flow",
+        target_url="https://example.test/checkout",
+        output_dir=tmp_path / "run",
+    )
 
-    assert "invalid setup seed file" in str(exc_info.value)
-    assert exc_info.value.diagnostics["failure_category"] == "native_setup_seed_file_error"
-    assert exc_info.value.diagnostics["received_seed_file"] == "tests/not-seed.spec.ts"
-    assert not (planner.session_dir / "planner_live_sequence_warning.json").exists()
-    assert not (tmp_path / "run" / "checkout.md").exists()
+    warning = json.loads(
+        (planner.session_dir / "planner_live_sequence_warning.json").read_text()
+    )
+    assert path.read_text().strip() == VALID_PLAN.strip()
+    assert len(prompts) == 1
+    assert warning["failure_category"] == "planner_live_sequence_setup_seed_warning"
+    assert warning["setup_tool"] == "generator_setup_page"
+    assert warning["native_setup_seed_file_invalid"] is True
+    assert warning["expected_seed_file"] == "tests/seed.spec.ts"
+    assert warning["received_seed_file"] == "tests/not-seed.spec.ts"
 
 
 @pytest.mark.asyncio

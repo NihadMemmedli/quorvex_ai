@@ -144,11 +144,28 @@ async def get_agent_queue_status():
                 task for task in running_task_summaries if task.get("orphaned")
             ]
             worker_process_count = int(health.get("worker_count") or 0)
+            live_worker_process_count = int(
+                health.get("live_browser_worker_count")
+                or metrics.get("live_browser_workers_alive")
+                or 0
+            )
             alive_running_tasks = int(health.get("alive_tasks") or 0)
             raw_running_count = int(metrics.get("running", 0) or 0)
             running_count = active_run_count + len(redis_tasks_not_backed_by_active_runs)
             workers_busy = min(worker_process_count, running_count)
             workers_idle = max(0, worker_process_count - workers_busy)
+            live_running_count = len(live_running_tasks)
+            live_workers_busy = min(live_worker_process_count, live_running_count)
+            live_workers_idle = max(0, live_worker_process_count - live_workers_busy)
+            live_queued_count = int(metrics.get("live_queued", 0) or 0)
+            if live_queued_count > 0 and live_worker_process_count <= 0:
+                live_browser_capacity_state = "no_live_browser_workers"
+            elif live_queued_count > 0 and live_workers_idle == 0:
+                live_browser_capacity_state = "live_browser_workers_saturated"
+            elif live_worker_process_count > 0:
+                live_browser_capacity_state = "live_browser_workers_available"
+            else:
+                live_browser_capacity_state = "no_live_browser_demand"
             if worker_process_count > 0:
                 capacity_state = "workers_saturated" if workers_idle == 0 and running_count > 0 else "workers_available"
             elif running_count > 0 and alive_running_tasks > 0:
@@ -168,10 +185,17 @@ async def get_agent_queue_status():
                 "worker_processes_alive": worker_process_count,
                 "workers_busy": workers_busy,
                 "workers_idle": workers_idle,
+                "live_browser_workers_alive": live_worker_process_count,
+                "live_browser_workers_busy": live_workers_busy,
+                "live_browser_workers_idle": live_workers_idle,
+                "live_browser_running": live_running_count,
+                "live_browser_queued": live_queued_count,
+                "live_browser_capacity_state": live_browser_capacity_state,
                 "running_task_heartbeats_alive": alive_running_tasks,
                 "capacity_state": capacity_state,
                 "stale_running": metrics.get("stale_running", 0),
                 "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
+                "oldest_live_queued_age_seconds": metrics.get("oldest_live_queued_age_seconds"),
                 "by_status": metrics.get("by_status", {}),
                 "worker_health": health,
                 "running_tasks": merged_running_tasks,
@@ -248,6 +272,13 @@ async def get_agent_queue_status():
         "worker_processes_alive": temporal_workers_alive,
         "workers_busy": min(temporal_workers_alive, active_temporal_agent_runs),
         "workers_idle": max(0, temporal_workers_alive - min(temporal_workers_alive, active_temporal_agent_runs)),
+        "live_browser_workers_alive": temporal_workers_alive,
+        "live_browser_workers_busy": min(temporal_workers_alive, active_temporal_agent_runs),
+        "live_browser_workers_idle": max(0, temporal_workers_alive - min(temporal_workers_alive, active_temporal_agent_runs)),
+        "live_browser_running": len(running_tasks),
+        "live_browser_queued": temporal_queued_agent_runs,
+        "live_browser_capacity_state": "workers_alive" if temporal_workers_alive > 0 else "no_temporal_workers",
+        "oldest_live_queued_age_seconds": None,
         "capacity_state": "workers_alive" if temporal_workers_alive > 0 else "no_temporal_workers",
         "temporal": temporal_health,
         "pool_status": {"total_running": status["running"], "by_type": status["by_type"]},
