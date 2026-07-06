@@ -116,10 +116,13 @@ def create_scheduled_regression_batch(
     session.add(batch)
 
     for ordinal, spec_name in enumerate(spec_names):
+        spec_path = spec_files.SPECS_DIR / spec_name
+        try_code_path = _get_try_code_path(spec_name, spec_path) if spec_path.exists() else None
         payload = {
             "browser": config.browser,
             "hybrid": config.hybrid_mode,
             "max_iterations": config.max_iterations,
+            "healer_max_attempts": 1 if try_code_path else None,
             "project_id": config.project_id,
             "spec_name": spec_name,
             "test_data_refs": _test_data_refs_for_spec(config, spec_name),
@@ -300,6 +303,9 @@ async def _materialize_and_start_item(
     (run_dir / "spec.md").write_text(spec_content, encoding="utf-8")
     (run_dir / "status.txt").write_text("queued", encoding="utf-8")
     try_code_path = _get_try_code_path(spec_name, spec_path)
+    healer_max_attempts = payload_config.get("healer_max_attempts")
+    if healer_max_attempts is None and try_code_path:
+        healer_max_attempts = 1
 
     queued_count = int(
         session.exec(select(func.count()).select_from(DBTestRun).where(DBTestRun.status == "queued")).one() or 0
@@ -372,6 +378,7 @@ async def _materialize_and_start_item(
         "spec_path": str(spec_path),
         "run_dir": str(run_dir),
         "try_code_path": try_code_path,
+        "healer_max_attempts": healer_max_attempts,
         "browser": payload_config.get("browser") or batch.browser,
         "hybrid": bool(payload_config.get("hybrid")),
         "max_iterations": payload_config.get("max_iterations") or 20,

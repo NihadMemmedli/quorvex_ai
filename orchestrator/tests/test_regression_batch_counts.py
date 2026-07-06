@@ -143,6 +143,8 @@ test.skip('third flow', async () => {});
             assert batch.actual_failed == 0
             assert batch.actual_skipped == 0
             assert batch.actual_other == 0
+            assert result.tasks_to_start[0]["try_code_path"]
+            assert result.tasks_to_start[0]["healer_max_attempts"] == 1
 
         import orchestrator.api.regression as regression_module
 

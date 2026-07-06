@@ -1,6 +1,8 @@
 import { generateObject, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import { backendFetch } from './backend-client';
+import { ASSISTANT_ACTION_CONFIGS } from './action-registry';
+import { MUTATING_TOOL_NAMES } from './tools';
 
 export type AssistantIntentName =
   | 'startExplorerAgent'
@@ -15,6 +17,7 @@ export type AssistantIntentName =
   | 'generateApiTest'
   | 'generateDatabaseSpec'
   | 'prdFeatureLookup'
+  | 'mutatingAction'
   | 'unknown';
 
 export interface IntentRouterContext {
@@ -67,6 +70,9 @@ const DEFAULT_CHAT_CUSTOM_AGENT_TOOL_IDS = [
   'browser_navigate_back',
   'browser_close',
 ];
+const CONFIRMATION_ONLY_PATTERN = /^(approved?|confirmed?|yes|yep|yeah|ok|okay|go ahead|proceed|do it|run it|start it)$/i;
+const MUTATING_VERB_PATTERN = /\b(create|add|update|edit|delete|remove|run|start|stop|sync|import|dispatch|trigger|cancel|rerun|retry|pause|resume|archive|duplicate|quarantine|unquarantine|assign|move|rename|split|generate|heal|triage|save|set|toggle|execute|open|push)\b/i;
+const READ_ONLY_QUESTION_PATTERN = /^\s*(how|what|why|when|where|who|can you explain|show me how|tell me about)\b/i;
 
 const intentSchema = z.object({
   intent: z.enum([
@@ -119,6 +125,15 @@ function extractLatestUserText(messages: unknown[]): string {
   return extractMessageText(latestUser);
 }
 
+function extractLatestNonConfirmationUserText(messages: unknown[]): string {
+  const users = [...messages].reverse().filter((m: any) => m?.role === 'user') as any[];
+  for (const message of users) {
+    const text = extractMessageText(message).trim();
+    if (text && !CONFIRMATION_ONLY_PATTERN.test(text)) return text;
+  }
+  return '';
+}
+
 function compactConversation(messages: unknown[]) {
   return messages
     .slice(-8)
@@ -138,6 +153,259 @@ function asString(value: unknown): string | undefined {
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
+}
+
+function asToolInputRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function validateMutatingToolName(toolName: string | undefined): string | null {
+  if (!toolName) return null;
+  return MUTATING_TOOL_NAMES.has(toolName) && ASSISTANT_ACTION_CONFIGS[toolName] ? toolName : null;
+}
+
+function manualRoute(toolName: string, input: Record<string, unknown>, text?: string): AssistantIntentRoute | null {
+  const validToolName = validateMutatingToolName(toolName);
+  if (!validToolName) return null;
+  const label = ASSISTANT_ACTION_CONFIGS[validToolName]?.label || validToolName;
+  return {
+    kind: 'action',
+    text: text || `I prepared the ${label} approval action below. Approve it to continue.`,
+    intent: 'mutatingAction',
+    toolName: validToolName,
+    input,
+    confidence: 1,
+    reason: 'server-side mutating action enforcement',
+  };
+}
+
+function manualClarify(missingFields: string[], text?: string): AssistantIntentRoute {
+  return {
+    kind: 'clarify',
+    text: text || 'I could not create an approval card because required fields are missing.',
+    intent: 'mutatingAction',
+    confidence: 1,
+    missingFields,
+    reason: 'server-side mutating action enforcement',
+  };
+}
+
+function textParts(message: any): any[] {
+  if (!message) return [];
+  if (Array.isArray(message.parts)) return message.parts;
+  if (Array.isArray(message.content)) return message.content;
+  return [];
+}
+
+function recoverPendingApproval(messages: unknown[]): AssistantIntentRoute | null {
+  for (const message of [...messages].reverse() as any[]) {
+    for (const part of textParts(message)) {
+      const toolName = validateMutatingToolName(part?.toolName);
+      const input = asToolInputRecord(part?.input);
+      if (toolName && input) return manualRoute(toolName, input);
+    }
+  }
+  return null;
+}
+
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return asToolInputRecord(JSON.parse(text.slice(start, end + 1)));
+  } catch {
+    return null;
+  }
+}
+
+function extractQuotedValues(text: string): string[] {
+  return [...text.matchAll(/["'`]([^"'`]+)["'`]/g)].map(match => match[1].trim()).filter(Boolean);
+}
+
+function extractSpecName(text: string): string | undefined {
+  const quoted = extractQuotedValues(text).find(value => /\.(md|spec|test|ts|js)$/i.test(value) || value.includes('/'));
+  if (quoted) return quoted;
+  const match = text.match(/\b(?:spec|test)\s+(?:named|called)?\s*([A-Za-z0-9_./-]+\.(?:md|spec|test|ts|js))/i)
+    || text.match(/\brun\s+([A-Za-z0-9_./-]+\.(?:md|spec|test|ts|js))/i);
+  return match?.[1];
+}
+
+function extractId(text: string, names: string[]): string | undefined {
+  const label = names.join('|');
+  const match = text.match(new RegExp(`\\b(?:${label})\\s*(?:id)?\\s*[:#-]?\\s*([A-Za-z0-9_.:-]{3,})`, 'i'));
+  return match?.[1];
+}
+
+function extractCiWorkflowId(text: string): string | undefined {
+  return extractId(text, ['workflow', 'pipeline'])
+    || text.match(/\b([A-Za-z0-9_.-]+\.ya?ml)\b/i)?.[1];
+}
+
+function timezoneFromText(text: string): string | undefined {
+  if (/\bbaku\b|\bazerbaijan\b/i.test(text)) return 'Asia/Baku';
+  if (/\butc\b/i.test(text)) return 'UTC';
+  if (/\bnew\s*york\b|\beastern\b/i.test(text)) return 'America/New_York';
+  if (/\blondon\b/i.test(text)) return 'Europe/London';
+  return undefined;
+}
+
+function cronFromText(text: string): string | undefined {
+  const time = text.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (!time) return undefined;
+  const hour = Number(time[1]);
+  const minute = Number(time[2]);
+  if (/\bevery\s+day\b|\bdaily\b|\bnightly\b/i.test(text)) return `${minute} ${hour} * * *`;
+  if (/\bweekday|weekdays|business days\b/i.test(text)) return `${minute} ${hour} * * 1-5`;
+  if (/\bweekly\b/i.test(text)) return `${minute} ${hour} * * 1`;
+  return `${minute} ${hour} * * *`;
+}
+
+function scheduleSpecNames(text: string): string[] | undefined {
+  if (/\b(full|all)\s+(regression|suite|tests?)\b|\bfull\s+regression\s+suite\b/i.test(text)) return undefined;
+  const specs = extractQuotedValues(text).filter(value => /\.(md|spec|test|ts|js)$/i.test(value) || value.includes('/'));
+  return specs.length > 0 ? specs : undefined;
+}
+
+function directToolRoute(text: string): AssistantIntentRoute | null {
+  const jsonInput = extractJsonObject(text);
+  if (!jsonInput || Object.keys(jsonInput).length === 0) return null;
+  for (const toolName of MUTATING_TOOL_NAMES) {
+    if (!ASSISTANT_ACTION_CONFIGS[toolName]) continue;
+    const label = ASSISTANT_ACTION_CONFIGS[toolName].label;
+    const labelPattern = label
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\s+/g, '\\s+');
+    if (new RegExp(`\\b${toolName}\\b`, 'i').test(text) || new RegExp(`\\b${labelPattern}\\b`, 'i').test(text)) {
+      return manualRoute(toolName, jsonInput);
+    }
+  }
+  return null;
+}
+
+function deterministicMutatingRouteFromText(text: string): AssistantIntentRoute | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const direct = directToolRoute(trimmed);
+  if (direct) return direct;
+
+  if (/\b(dispatch|run|start)\b/i.test(trimmed) && /\b(ci|workflow|pipeline|github actions|gitlab)\b/i.test(trimmed)) {
+    return manualRoute(
+      'dispatchCiWorkflow',
+      { provider: /\bgitlab\b/i.test(trimmed) ? 'gitlab' : 'github', workflowId: extractCiWorkflowId(trimmed), ref: extractId(trimmed, ['ref', 'branch']) },
+      'I prepared the CI dispatch approval action below. Approve it to dispatch the workflow.'
+    );
+  }
+
+  if (/\bschedule\b|\bcron\b|\bnightly\b|\bevery\s+day\b|\bdaily\b/i.test(trimmed)) {
+    if (/\bdelete|remove\b/i.test(trimmed)) {
+      const scheduleId = extractId(trimmed, ['schedule']);
+      if (!scheduleId) return manualClarify(['scheduleId']);
+      return manualRoute('deleteSchedule', { scheduleId }, 'I prepared the delete schedule approval action below. Approve it to delete the schedule.');
+    }
+
+    if (/\bcreate|add|set|schedule|nightly|daily|every\s+day\b/i.test(trimmed)) {
+      const cronExpression = cronFromText(trimmed);
+      if (!cronExpression) return manualClarify(['cronExpression']);
+      return manualRoute(
+        'createSchedule',
+        {
+          name: /\bnightly\b/i.test(trimmed) ? 'Nightly regression' : 'Chat schedule',
+          cronExpression,
+          timezone: timezoneFromText(trimmed) || 'UTC',
+          specNames: scheduleSpecNames(trimmed),
+          enabled: true,
+        },
+        'I prepared the schedule approval action below. Approve it to create the recurring run.'
+      );
+    }
+  }
+
+  if (!MUTATING_VERB_PATTERN.test(trimmed)) return null;
+
+  if (/\b(regression\s+batch|full\s+regression|regression\s+suite)\b/i.test(trimmed) && /\brun|start|execute\b/i.test(trimmed)) {
+    return manualRoute(
+      'runRegressionBatch',
+      { specNames: scheduleSpecNames(trimmed) },
+      'I prepared the regression batch approval action below. Approve it to start the run.'
+    );
+  }
+
+  if (/\brun\b/i.test(trimmed) && /\b(spec|test)\b/i.test(trimmed)) {
+    const specName = extractSpecName(trimmed);
+    if (!specName) return manualClarify(['specName']);
+    return manualRoute('runTestSpec', { specName }, 'I prepared the test spec run approval action below. Approve it to start the run.');
+  }
+
+  if (/\bcreate|add|write|generate\b/i.test(trimmed) && /\b(spec|test spec)\b/i.test(trimmed)) {
+    const specName = extractSpecName(trimmed) || extractQuotedValues(trimmed)[0];
+    if (!specName) return manualClarify(['specName', 'content']);
+    return manualRoute(
+      'createTestSpec',
+      { specName, content: trimmed },
+      'I prepared the test spec creation approval action below. Approve it to create the spec.'
+    );
+  }
+
+  if (/\b(explorer\s+agent|exploration agent)\b/i.test(trimmed) && /\bstart|run|launch\b/i.test(trimmed)) {
+    const url = firstUrlFromInput({ url: [...trimmed.matchAll(/https?:\/\/[^\s"'<>),]+/g)].at(-1)?.[0] });
+    if (!url) return manualClarify(['url'], 'Which target URL should I use?');
+    return manualRoute(
+      'startExplorerAgent',
+      { url, timeLimitMinutes: 15, instructions: trimmed, authType: 'none', focusAreas: [] },
+      'I prepared the Explorer Agent approval action below. Approve it to start the run.'
+    );
+  }
+
+  if (/\bsync\b/i.test(trimmed) && /\btestrail\b/i.test(trimmed)) {
+    const batchId = extractId(trimmed, ['batch', 'run']);
+    if (!batchId) return manualClarify(['batchId']);
+    return manualRoute('syncTestRailResults', { batchId }, 'I prepared the TestRail sync approval action below. Approve it to sync the results.');
+  }
+
+  if (/\bcreate|open|file\b/i.test(trimmed) && /\bjira\b/i.test(trimmed)) {
+    const runId = extractId(trimmed, ['run']);
+    const title = extractQuotedValues(trimmed)[0] || trimmed.match(/\btitle\s*[:=-]\s*([^.\n]+)/i)?.[1]?.trim();
+    if (!runId || !title) return manualClarify([!runId ? 'runId' : '', !title ? 'title' : ''].filter(Boolean));
+    return manualRoute(
+      'createJiraIssue',
+      { runId, title, description: trimmed, attachScreenshots: true },
+      'I prepared the Jira issue approval action below. Approve it to create the issue.'
+    );
+  }
+
+  if (/\b(start|run)\b/i.test(trimmed) && /\bcoding agent\b/i.test(trimmed)) {
+    return manualRoute(
+      'startCodingAgent',
+      { prompt: trimmed, timeoutSeconds: 1800, modelTier: 'tool_deep' },
+      'I prepared a coding agent approval action below. It will inspect the current repository and propose a diff only; applying the diff is a separate approval step.'
+    );
+  }
+
+  if (!READ_ONLY_QUESTION_PATTERN.test(trimmed)) {
+    return manualClarify([]);
+  }
+
+  return null;
+}
+
+export function enforceMutatingActionApproval(messages: unknown[]): AssistantIntentRoute | null {
+  const latestUserText = extractLatestUserText(messages).trim();
+  if (!latestUserText) return null;
+
+  if (CONFIRMATION_ONLY_PATTERN.test(latestUserText)) {
+    return recoverPendingApproval(messages) || deterministicMutatingRouteFromText(extractLatestNonConfirmationUserText(messages));
+  }
+
+  const route = deterministicMutatingRouteFromText(latestUserText);
+  if (route) return route;
+
+  if ((MUTATING_VERB_PATTERN.test(latestUserText) || /\bcreation|execution|approval\b/i.test(latestUserText)) && /\b(approve|confirm|approval|please confirm|created|executed|started|creation|execution)\b/i.test(latestUserText)) {
+    return manualClarify([]);
+  }
+
+  return null;
 }
 
 function asNumber(value: unknown, fallback: number): number {

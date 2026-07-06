@@ -345,6 +345,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
         (run_dir / "status.txt").write_text("queued")
 
         try_code_path = _get_try_code_path(spec_name, spec_path)
+        healer_max_attempts = 1 if try_code_path else None
 
         run = DBTestRun(
             id=run_id,
@@ -365,6 +366,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
                 "run_dir": str(run_dir),
                 "run_id": run_id,
                 "try_code_path": try_code_path,
+                "healer_max_attempts": healer_max_attempts,
                 "browser": config.browser,
                 "hybrid": config.hybrid_mode,
                 "max_iterations": config.max_iterations,

@@ -146,6 +146,23 @@ def test_healer_prompt_includes_attempt_context_and_number(monkeypatch):
     assert "STDOUT-TAIL" in prompt
 
 
+def test_healer_prompt_uses_configured_attempt_total(monkeypatch):
+    monkeypatch.delenv("MEMORY_PROJECT_ID", raising=False)
+    monkeypatch.delenv("PROJECT_ID", raising=False)
+
+    healer = NativeHealer()
+    prompt = healer._build_healer_prompt(
+        test_file="tests/generated/foo.spec.ts",
+        test_content="test('foo', async ({ page }) => {});",
+        error_log="boom",
+        attempt_context=None,
+        attempt_number=1,
+        max_attempts=1,
+    )
+
+    assert "This is healing attempt 1 of 1." in prompt
+
+
 def test_healer_prompt_omits_attempt_section_on_first_attempt(monkeypatch):
     monkeypatch.delenv("MEMORY_PROJECT_ID", raising=False)
     monkeypatch.delenv("PROJECT_ID", raising=False)

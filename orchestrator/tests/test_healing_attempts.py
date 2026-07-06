@@ -269,6 +269,84 @@ async def test_native_healing_writes_attempt_history(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_native_healing_respects_single_attempt_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.workflows.full_native_pipeline.report_progress",
+        lambda *args, **kwargs: None,
+    )
+
+    pipeline = _bare_pipeline()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    test_path = tmp_path / "foo.spec.ts"
+    test_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('v1', async ({ page }) => { await expect(page.locator('#old')).toBeVisible(); });\n"
+    )
+
+    heal_calls: list[dict] = []
+
+    class FakeHealer:
+        last_agent_output = "strategy: replace selector"
+        last_tool_calls = [
+            {
+                "name": "mcp__playwright-test__test_debug",
+                "input": {
+                    "file": str(test_path),
+                    "project": "chromium",
+                    "grep": "v1",
+                },
+            },
+            {"name": "mcp__playwright-test__browser_snapshot"},
+        ]
+
+        async def heal_test(self, test_file, error_log, **kwargs):
+            heal_calls.append({"error_log": error_log, **kwargs})
+            content = Path(test_file).read_text().replace("#old", "#new")
+            Path(test_file).write_text(content)
+            return content
+
+    class FakeTriage:
+        def condensed_context(self, diagnosis):
+            return None
+
+    pipeline.native_healer = FakeHealer()
+    pipeline.failure_triage_agent = FakeTriage()
+    pipeline._run_test = lambda *args, **kwargs: TestResult(
+        passed=False,
+        exit_code=1,
+        output="still failing",
+        error_summary="locator timeout",
+    )
+    pipeline._build_structured_failure_context = lambda **kwargs: "STRUCTURED-CONTEXT"
+
+    async def _no_stability(**kwargs):
+        return None
+
+    pipeline._verify_stability_or_harden = _no_stability
+    pipeline._publish_agentic_summary = lambda run_dir: None
+
+    outcome = await pipeline._native_healing(
+        test_path,
+        run_dir,
+        "chromium",
+        TestResult(passed=False, exit_code=1, output="boom", error_summary="locator timeout"),
+        max_attempts=1,
+    )
+
+    assert outcome["success"] is False
+    assert outcome["attempts"] == 1
+    assert len(heal_calls) == 1
+    assert heal_calls[0]["attempt_number"] == 1
+    assert heal_calls[0]["max_attempts"] == 1
+    payload = json.loads((run_dir / "healing_attempts.json").read_text())
+    assert len(payload["attempts"]) == 1
+    validation = json.loads((run_dir / "validation.json").read_text())
+    assert validation["iterations"] == 1
+    assert "Failed after 1 native healing attempts" in validation["message"]
+
+
+@pytest.mark.asyncio
 async def test_native_healing_persists_runtime_notes_and_tool_trace(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "orchestrator.workflows.full_native_pipeline.report_progress",

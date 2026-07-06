@@ -109,6 +109,7 @@ class _NativeRunContext:
     skip_planning: bool
     existing_test_path: str | None
     source_test_path: str | None
+    healer_max_attempts: int | None
     force_api: bool
     handoff_manifest_path: Path
     spec_content: str
@@ -631,6 +632,7 @@ root_cause: one concise sentence, or "none" if passed
         max_iterations: int = 20,
         skip_planning: bool = False,
         existing_test_path: str | None = None,
+        healer_max_attempts: int | None = None,
         force_api: bool = False,
         storage_state_path: str | None = None,
         browser_auth_context: dict[str, Any] | None = None,
@@ -658,6 +660,7 @@ root_cause: one concise sentence, or "none" if passed
             max_iterations=max_iterations,
             skip_planning=skip_planning,
             existing_test_path=existing_test_path,
+            healer_max_attempts=healer_max_attempts,
             force_api=force_api,
             storage_state_path=storage_state_path,
             browser_auth_context=browser_auth_context,
@@ -743,6 +746,7 @@ root_cause: one concise sentence, or "none" if passed
         max_iterations: int,
         skip_planning: bool,
         existing_test_path: str | None,
+        healer_max_attempts: int | None,
         force_api: bool,
         storage_state_path: str | None,
         browser_auth_context: dict[str, Any] | None,
@@ -757,6 +761,7 @@ root_cause: one concise sentence, or "none" if passed
                 "browser": browser,
                 "skip_planning": skip_planning,
                 "existing_test_path": existing_test_path,
+                "healer_max_attempts": healer_max_attempts,
                 "force_api": force_api,
             },
         )
@@ -968,6 +973,7 @@ root_cause: one concise sentence, or "none" if passed
                 skip_planning=skip_planning,
                 existing_test_path=existing_test_path,
                 source_test_path=source_existing_test_path,
+                healer_max_attempts=healer_max_attempts,
                 force_api=force_api,
                 handoff_manifest_path=handoff_manifest_path,
                 spec_content=spec_content,
@@ -1069,6 +1075,7 @@ root_cause: one concise sentence, or "none" if passed
                 diagnosis=diagnosis,
                 plan_path=None,
                 handoff_manifest_path=ctx.handoff_manifest_path,
+                max_attempts=ctx.healer_max_attempts,
             )
         except Exception as e:
             error_msg = f"Healing-only pipeline crashed: {e}"
@@ -2052,6 +2059,7 @@ root_cause: one concise sentence, or "none" if passed
                 diagnosis=diagnosis,
                 plan_path=plan_path,
                 handoff_manifest_path=ctx.handoff_manifest_path,
+                max_attempts=ctx.healer_max_attempts,
             )
 
         cleanup_orphaned_browsers()
@@ -3651,12 +3659,16 @@ Requirements:
         diagnosis: dict | None = None,
         plan_path: Path | None = None,
         handoff_manifest_path: Path | None = None,
+        max_attempts: int | None = None,
     ) -> dict:
-        """Native healing: up to 3 attempts with test_run and diagnostic tools."""
-        logger.info("Stage 4: Native Healing (up to 3 attempts)...")
+        """Native healing with bounded attempts and diagnostic tools."""
+        try:
+            max_attempts = max(1, int(max_attempts or 3))
+        except (TypeError, ValueError):
+            max_attempts = 3
+        logger.info("Stage 4: Native Healing (up to %s attempts)...", max_attempts)
         report_progress("healing", "Starting native healing...", healing_attempt=1)
 
-        max_attempts = 3
         error_log = self._build_structured_failure_context(
             test_path=test_path, run_dir=run_dir, result=result
         )
@@ -3850,6 +3862,7 @@ Requirements:
                     memory_run_id=getattr(self, "_memory_run_id", None),
                     attempt_context=self._build_attempt_context(attempt_records),
                     attempt_number=attempt,
+                    max_attempts=max_attempts,
                     browser=browser,
                     failure_metadata=failure_metadata,
                 )
@@ -5831,6 +5844,7 @@ async def run_full_native_pipeline(
     hybrid_healing: bool = False,
     max_iterations: int = 20,
     existing_test_path: str | None = None,
+    healer_max_attempts: int | None = None,
     force_api: bool = False,
 ) -> dict:
     """Convenience function to run the full native pipeline."""
@@ -5842,6 +5856,7 @@ async def run_full_native_pipeline(
         hybrid_healing=hybrid_healing,
         max_iterations=max_iterations,
         existing_test_path=existing_test_path,
+        healer_max_attempts=healer_max_attempts,
         force_api=force_api,
     )
 

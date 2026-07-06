@@ -96,6 +96,7 @@ class NativeHealer:
         memory_run_id: str | None = None,
         attempt_context: str | None = None,
         attempt_number: int | None = None,
+        max_attempts: int | None = None,
         browser: str | None = None,
         failure_metadata: dict[str, Any] | None = None,
     ) -> str | None:
@@ -128,6 +129,7 @@ class NativeHealer:
             memory_run_id=memory_run_id,
             attempt_context=attempt_context,
             attempt_number=attempt_number,
+            max_attempts=max_attempts,
             browser=browser,
             failure_metadata=failure_metadata,
         )
@@ -326,6 +328,7 @@ Rules:
         memory_run_id: str | None = None,
         attempt_context: str | None = None,
         attempt_number: int | None = None,
+        max_attempts: int | None = None,
         browser: str | None = None,
         failure_metadata: dict[str, Any] | None = None,
     ) -> str:
@@ -343,7 +346,8 @@ Rules:
 
         attempt_section = ""
         if attempt_number:
-            attempt_section = f"\nThis is healing attempt {attempt_number} of 3.\n"
+            total_attempts = max_attempts or 3
+            attempt_section = f"\nThis is healing attempt {attempt_number} of {total_attempts}.\n"
         if attempt_context:
             attempt_section += f"""
 ## Prior Healing Attempts (do not repeat failed fixes)

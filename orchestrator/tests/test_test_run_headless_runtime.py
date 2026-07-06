@@ -98,6 +98,7 @@ def _fake_runtime(tmp_path, captured_env):
 
     def capture_subprocess(**kwargs):
         captured_env.update(kwargs["env"])
+        captured_env["_cmd"] = kwargs["cmd"]
         captured_env["_timeout_seconds"] = kwargs["timeout_seconds"]
 
     return SimpleNamespace(
@@ -196,6 +197,28 @@ def test_execute_run_task_injects_ai_timeout_env_and_subprocess_timeout(
     assert captured_env["PLANNER_TIMEOUT_SECONDS"] == "86400"
     assert captured_env["HEALER_TIMEOUT_SECONDS"] == "86400"
     assert captured_env["BROWSER_SLOT_TIMEOUT"] == "86400"
+
+
+def test_execute_run_task_passes_healer_attempt_limit_to_cli(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    captured_env = {}
+    runtime = _fake_runtime(tmp_path, captured_env)
+
+    execute_run_task(
+        runtime,
+        spec_path=str(tmp_path / "spec.md"),
+        run_dir=str(tmp_path / "run"),
+        run_id="run-healer-limit",
+        headless=True,
+        healer_max_attempts=1,
+    )
+
+    cmd = captured_env["_cmd"]
+    assert "--healer-max-attempts" in cmd
+    assert cmd[cmd.index("--healer-max-attempts") + 1] == "1"
 
 
 def test_execute_run_task_sets_headed_subprocess_env_for_vnc_runs(

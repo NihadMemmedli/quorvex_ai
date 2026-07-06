@@ -318,6 +318,7 @@ def execute_run_task(
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
     test_data_refs: list[str] | None = None,
+    healer_max_attempts: int | None = None,
     ai_pipeline_timeout_seconds: int | None = None,
 ):
     """Execute the native pipeline with optional hybrid healing mode."""
@@ -360,6 +361,8 @@ def execute_run_task(
         cmd.extend(["--try-code", try_code_path])
     if hybrid:
         cmd.extend(["--hybrid", "--max-iterations", str(max_iterations)])
+    if healer_max_attempts is not None:
+        cmd.extend(["--healer-max-attempts", str(max(1, int(healer_max_attempts)))])
 
     run_dir_path = Path(run_dir)
     runtime._write_run_browser_metadata(
@@ -487,6 +490,7 @@ async def execute_run_task_wrapper(
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
     test_data_refs: list[str] | None = None,
+    healer_max_attempts: int | None = None,
 ):
     """Async wrapper for execute_run_task with unified browser queue management."""
 
@@ -623,6 +627,7 @@ async def execute_run_task_wrapper(
                 storage_state_path,
                 browser_auth_context,
                 test_data_refs,
+                healer_max_attempts,
                 execution_timeout_seconds,
             )
             _append_workflow_log("Native run executor returned.", run_id=run_id)
