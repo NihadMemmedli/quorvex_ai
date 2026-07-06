@@ -147,22 +147,22 @@ def create_scheduled_regression_batch(
 
 
 def refresh_scheduled_batch_counts(session: Session, batch: RegressionBatch) -> None:
-    items = session.exec(
-        select(RegressionBatchItem).where(RegressionBatchItem.batch_id == batch.id)
+    active_items = session.exec(
+        select(RegressionBatchItem).where(
+            RegressionBatchItem.batch_id == batch.id,
+            RegressionBatchItem.run_id != None,  # noqa: E711 - SQLAlchemy needs this
+            RegressionBatchItem.status.notin_(list(TERMINAL_RUN_STATUSES)),
+        )
     ).all()
-    if not items:
-        return
 
-    run_ids = [item.run_id for item in items if item.run_id]
+    run_ids = [item.run_id for item in active_items if item.run_id]
     runs_by_id: dict[str, DBTestRun] = {}
     if run_ids:
         runs = session.exec(select(DBTestRun).where(DBTestRun.id.in_(run_ids))).all()
         runs_by_id = {run.id: run for run in runs}
 
     now = datetime.utcnow()
-    for item in items:
-        if not item.run_id:
-            continue
+    for item in active_items:
         run = runs_by_id.get(item.run_id)
         if not run:
             continue
@@ -179,19 +179,33 @@ def refresh_scheduled_batch_counts(session: Session, batch: RegressionBatch) -> 
             item.status = "queued"
             session.add(item)
 
-    pending = sum(1 for item in items if item.status == "pending")
-    active = sum(1 for item in items if item.status in ACTIVE_ITEM_STATUSES)
-    passed = sum(1 for item in items if item.status in {"passed", "completed"})
-    failed = sum(1 for item in items if item.status in {"failed", "error"})
-    cancelled = sum(1 for item in items if item.status in {"stopped", "cancelled"})
+    rows = session.exec(
+        select(RegressionBatchItem.status, func.count(RegressionBatchItem.id))
+        .where(RegressionBatchItem.batch_id == batch.id)
+        .group_by(RegressionBatchItem.status)
+    ).all()
+    if not rows:
+        return
+    counts = {status: int(count or 0) for status, count in rows}
+    pending = counts.get("pending", 0)
+    passed = counts.get("passed", 0) + counts.get("completed", 0)
+    failed = counts.get("failed", 0) + counts.get("error", 0)
+    cancelled = counts.get("stopped", 0) + counts.get("cancelled", 0)
+    active = sum(counts.get(status, 0) for status in ACTIVE_ITEM_STATUSES)
+    started = session.exec(
+        select(func.count(RegressionBatchItem.id)).where(
+            RegressionBatchItem.batch_id == batch.id,
+            RegressionBatchItem.run_id != None,  # noqa: E711 - SQLAlchemy needs this
+        )
+    ).one()
 
-    batch.total_tests = len(items)
+    batch.total_tests = sum(counts.values())
     batch.passed = passed
     batch.failed = failed
     batch.stopped = cancelled
     batch.running = active
     batch.queued = pending
-    batch.dispatch_started = sum(1 for item in items if item.run_id)
+    batch.dispatch_started = int(started or 0)
     batch.dispatch_completed = passed + failed + cancelled
     batch.dispatch_failed = failed
     batch.dispatch_cancelled = cancelled

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import case, func, text
 
 
 def update_batch_stats(runtime: Any, batch_id: str) -> None:
@@ -30,48 +30,106 @@ def update_batch_stats(runtime: Any, batch_id: str) -> None:
                 )
                 session.refresh(batch)
 
-            runs = session.exec(runtime.select(runtime.DBTestRun).where(runtime.DBTestRun.batch_id == batch_id)).all()
-
             scheduled_batch = bool(getattr(batch, "scheduler_status", None))
             if scheduled_batch:
                 from orchestrator.services.scheduled_batch_executor import refresh_scheduled_batch_counts
 
                 refresh_scheduled_batch_counts(session, batch)
             else:
-                batch.total_tests = len(runs)
-                batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
-                batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
-                batch.stopped = sum(1 for r in runs if r.status in ("stopped", "cancelled"))
-                batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
-                batch.queued = sum(1 for r in runs if r.status == "queued")
+                aggregates = session.exec(
+                    runtime.select(
+                        func.count(runtime.DBTestRun.id),
+                        func.coalesce(
+                            func.sum(case((runtime.DBTestRun.status.in_(("passed", "completed")), 1), else_=0)),
+                            0,
+                        ),
+                        func.coalesce(
+                            func.sum(case((runtime.DBTestRun.status.in_(("failed", "error")), 1), else_=0)),
+                            0,
+                        ),
+                        func.coalesce(
+                            func.sum(case((runtime.DBTestRun.status.in_(("stopped", "cancelled")), 1), else_=0)),
+                            0,
+                        ),
+                        func.coalesce(
+                            func.sum(case((runtime.DBTestRun.status.in_(("running", "in_progress")), 1), else_=0)),
+                            0,
+                        ),
+                        func.coalesce(func.sum(case((runtime.DBTestRun.status == "queued", 1), else_=0)), 0),
+                        func.min(runtime.DBTestRun.started_at),
+                        func.max(runtime.DBTestRun.completed_at),
+                    ).where(runtime.DBTestRun.batch_id == batch_id)
+                ).one()
+                (
+                    total_tests,
+                    passed,
+                    failed,
+                    stopped,
+                    running,
+                    queued,
+                    first_started_at,
+                    last_completed_at,
+                ) = aggregates
+                batch.total_tests = int(total_tests or 0)
+                batch.passed = int(passed or 0)
+                batch.failed = int(failed or 0)
+                batch.stopped = int(stopped or 0)
+                batch.running = int(running or 0)
+                batch.queued = int(queued or 0)
 
             if batch.running > 0 or batch.queued > 0:
                 batch.status = "running"
-                if not batch.started_at:
-                    started_runs = [r for r in runs if r.started_at]
-                    if started_runs:
-                        batch.started_at = min(r.started_at for r in started_runs)
+                if not batch.started_at and not scheduled_batch and first_started_at:
+                    batch.started_at = first_started_at
             elif batch.total_tests > 0 and (batch.passed + batch.failed + batch.stopped) == batch.total_tests:
                 batch.status = "completed"
-                completed_runs = [r for r in runs if r.completed_at]
-                if completed_runs:
-                    batch.completed_at = max(r.completed_at for r in completed_runs)
+                if not scheduled_batch and last_completed_at:
+                    batch.completed_at = last_completed_at
                 else:
                     batch.completed_at = runtime.datetime.utcnow()
 
+                if (
+                    not scheduled_batch
+                    and (
+                        batch.actual_total_tests is None
+                        or batch.actual_passed is None
+                        or batch.actual_failed is None
+                    )
+                ):
+                    runs = session.exec(runtime.select(runtime.DBTestRun).where(runtime.DBTestRun.batch_id == batch_id)).all()
+                    try:
+                        from .regression import _calculate_actual_test_counts
+
+                        actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
+                        batch.actual_total_tests = actual_total
+                        batch.actual_passed = actual_passed
+                        batch.actual_failed = actual_failed
+                    except Exception as count_err:
+                        runtime.logger.warning(f"Failed to cache actual test counts for {batch_id}: {count_err}")
+            elif batch.total_tests == 0:
+                batch.status = "completed"
+                if not batch.completed_at:
+                    batch.completed_at = runtime.datetime.utcnow()
+
+            if (
+                scheduled_batch
+                and batch.status == "completed"
+                and (
+                    batch.actual_total_tests is None
+                    or batch.actual_passed is None
+                    or batch.actual_failed is None
+                )
+            ):
                 try:
                     from .regression import _calculate_actual_test_counts
 
+                    runs = session.exec(runtime.select(runtime.DBTestRun).where(runtime.DBTestRun.batch_id == batch_id)).all()
                     actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
                     batch.actual_total_tests = actual_total
                     batch.actual_passed = actual_passed
                     batch.actual_failed = actual_failed
                 except Exception as count_err:
                     runtime.logger.warning(f"Failed to cache actual test counts for {batch_id}: {count_err}")
-            elif batch.total_tests == 0:
-                batch.status = "completed"
-                if not batch.completed_at:
-                    batch.completed_at = runtime.datetime.utcnow()
 
             session.add(batch)
             session.commit()

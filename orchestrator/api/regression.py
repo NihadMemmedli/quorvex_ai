@@ -856,6 +856,31 @@ def get_batch_detail(
     )
 
 
+@router.get("/runs/{run_id}/failure-details", response_model=BatchRunInList)
+def get_run_failure_details(
+    run_id: str,
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    """Return normalized failure details for a single run.
+
+    Large batch reports use this endpoint lazily so opening the batch page does
+    not parse artifacts for every visible failed run.
+    """
+    run = session.get(DBTestRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if project_id:
+        if project_id == "default":
+            if run.project_id not in (None, "default"):
+                raise HTTPException(status_code=404, detail="Run not found")
+        elif run.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+    return _run_to_batch_item(run, include_failure_details=True)
+
+
 @router.patch("/batches/{batch_id}/refresh")
 def refresh_batch_stats(batch_id: str, session: Session = Depends(get_session)):
     """

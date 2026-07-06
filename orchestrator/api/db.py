@@ -2088,9 +2088,26 @@ def _run_migrations():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_testrun_status_date ON testrun (status, created_at)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_testrun_test_type ON testrun (test_type)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_testrun_type_spec ON testrun (test_type, spec_name)"))
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_testrun_batch_status_spec_id ON testrun (batch_id, status, spec_name, id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_testrun_batch_spec_id ON testrun (batch_id, spec_name, id)")
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_testrun_project_spec_created ON testrun (project_id, spec_name, created_at)")
+                )
                 logger.info("Created performance indexes on testrun table")
             except Exception as e:
                 logger.debug(f"Indexes may already exist on testrun: {e}")
+
+        if "regression_batches" in inspector.get_table_names():
+            try:
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_regression_batches_status_created ON regression_batches (status, created_at)")
+                )
+            except Exception as e:
+                logger.debug(f"Indexes may already exist on regression_batches: {e}")
 
         # Add indexes for run_artifacts table
         if "run_artifacts" in inspector.get_table_names():
