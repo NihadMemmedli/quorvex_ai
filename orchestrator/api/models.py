@@ -256,6 +256,11 @@ class RegressionBatchDetail(RegressionBatchSummary):
     triggered_by: str | None = None
     started_at: str | None = None
     runs: list[BatchRunInList] = []
+    runs_total: int = 0
+    runs_limit: int = 100
+    runs_offset: int = 0
+    runs_has_more: bool = False
+    runs_status: str | None = None
 
 
 class RegressionBatchListResponse(BaseModel):

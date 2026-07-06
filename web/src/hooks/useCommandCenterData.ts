@@ -140,6 +140,20 @@ export interface AgentQueueTaskSummary {
     };
 }
 
+export interface RuntimeHealthSummary {
+    status?: string;
+    checks?: {
+        processes?: {
+            status?: string;
+            active_count?: number;
+            api_process_count?: number;
+            orphaned_api_process_count?: number;
+            warning?: string;
+        };
+        [key: string]: unknown;
+    };
+}
+
 const DEFAULT_DASHBOARD_STATS: DashboardStats = {
     total_specs: 0,
     total_runs: 0,
@@ -179,6 +193,7 @@ export function useCommandCenterData() {
     const [sessions, setSessions] = useState<AutoPilotSessionSummary[]>([]);
     const [questionsBySession, setQuestionsBySession] = useState<Record<string, AutoPilotQuestionSummary[]>>({});
     const [queue, setQueue] = useState<AgentQueueSummary | null>(null);
+    const [health, setHealth] = useState<RuntimeHealthSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const shouldPollRef = useRef(false);
@@ -196,18 +211,21 @@ export function useCommandCenterData() {
         }
 
         try {
-            const [dashboardRes, sessionsRes, queueRes] = await Promise.all([
+            const [dashboardRes, sessionsRes, queueRes, healthRes] = await Promise.all([
                 fetchWithAuth(`${API_BASE}/dashboard${projectParam}`),
                 fetchWithAuth(`${API_BASE}/autopilot/sessions${projectParam}`),
                 fetchWithAuth(`${API_BASE}/api/agents/queue-status`),
+                fetchWithAuth(`${API_BASE}/health`),
             ]);
 
             const dashboardData = dashboardRes.ok ? await dashboardRes.json() : DEFAULT_DASHBOARD_STATS;
             const sessionsData = sessionsRes.ok ? await sessionsRes.json() : [];
             const queueData = queueRes.ok ? await queueRes.json() : null;
+            const healthData = healthRes.ok ? await healthRes.json() : null;
             const visibleSessions: AutoPilotSessionSummary[] = Array.isArray(sessionsData) ? sessionsData.slice(0, 12) : [];
             const liveSessions = visibleSessions.some(isRuntimeActiveSession);
             const liveQueue = Boolean((queueData?.active ?? 0) > 0 || (queueData?.queued ?? 0) > 0);
+            const degradedHealth = healthData?.status && healthData.status !== 'healthy';
 
             const questionPairs = await Promise.all(
                 visibleSessions
@@ -227,7 +245,8 @@ export function useCommandCenterData() {
             })));
             setQuestionsBySession(Object.fromEntries(questionPairs));
             setQueue(queueData);
-            shouldPollRef.current = liveSessions || liveQueue;
+            setHealth(healthData);
+            shouldPollRef.current = liveSessions || liveQueue || Boolean(degradedHealth);
             hasLoadedRef.current = true;
         } catch (err) {
             console.error(err);
@@ -286,6 +305,7 @@ export function useCommandCenterData() {
         sessions,
         questionsBySession,
         queue,
+        health,
         loading,
         error,
         reload: load,

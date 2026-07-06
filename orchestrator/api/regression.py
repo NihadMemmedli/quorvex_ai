@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlmodel import Session, desc, select
 
 from .db import get_session
@@ -626,12 +626,27 @@ def _apply_batch_status_counts(batch: RegressionBatch, runs: list[DBTestRun]) ->
         batch.completed_at = max(completed_runs, key=lambda r: r.completed_at).completed_at if completed_runs else datetime.utcnow()
 
 
-def _run_to_batch_item(run: DBTestRun, test_count: int = 1) -> BatchRunInList:
+def _run_to_batch_item(
+    run: DBTestRun,
+    test_count: int = 1,
+    include_failure_details: bool = True,
+) -> BatchRunInList:
     """Convert database run to batch run item."""
     duration = None
     if run.started_at and run.completed_at:
         duration = int((run.completed_at - run.started_at).total_seconds())
-    failure_details = _get_run_failure_details(run)
+    failure_details = (
+        _get_run_failure_details(run)
+        if include_failure_details
+        else {
+            "failure_category": None,
+            "failure_summary": run.error_message,
+            "failure_source": "database error_message" if run.error_message else None,
+            "failing_step": None,
+            "error_stack": None,
+            "artifact_links": [],
+        }
+    )
 
     return BatchRunInList(
         id=run.id,
@@ -695,16 +710,20 @@ def list_batches(
     for batch in batches:
         actual_total, actual_passed, actual_failed = None, None, None
 
-        # Use cached values from DB if available and no longer creation-time stale.
-        if _has_fresh_actual_test_count_cache(batch):
-            actual_total = batch.actual_total_tests
-            actual_passed = batch.actual_passed
-            actual_failed = batch.actual_failed
-        elif include_actual_counts or batch.actual_total_tests is not None:
-            # Fallback: compute from disk (expensive)
+        # Use cached values from DB by default. Full artifact recounts are
+        # intentionally opt-in because large batches can contain 100k+ runs.
+        if include_actual_counts:
             runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch.id)).all()
             actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
             _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
+        elif (
+            batch.actual_total_tests is not None
+            and batch.actual_passed is not None
+            and batch.actual_failed is not None
+        ):
+            actual_total = batch.actual_total_tests
+            actual_passed = batch.actual_passed
+            actual_failed = batch.actual_failed
 
         summaries.append(
             _batch_to_summary(
@@ -721,10 +740,25 @@ def list_batches(
 def get_batch_detail(
     batch_id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    runs_limit: int = Query(default=100, ge=1, le=500, description="Maximum runs to include"),
+    runs_offset: int = Query(default=0, ge=0, description="Run offset for pagination"),
+    runs_status: str | None = Query(
+        default=None,
+        description="Run status filter. Use failures for failed/error/stopped/cancelled runs.",
+    ),
+    runs_sort: str = Query(default="status", description="Run sort: status, name, duration"),
+    include_actual_counts: bool = Query(
+        default=False,
+        description="Recalculate actual per-test counts from artifacts. Expensive for large batches.",
+    ),
+    include_failure_details: bool = Query(
+        default=True,
+        description="Include failure artifact summaries for the returned page only.",
+    ),
     session: Session = Depends(get_session),
 ):
     """
-    Get detailed batch information including all runs.
+    Get detailed batch information and a paginated run page.
     """
     batch = session.get(RegressionBatch, batch_id)
     if not batch:
@@ -733,24 +767,53 @@ def get_batch_detail(
     if not _batch_allows_project(batch, project_id):
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    # Get all runs for this batch
+    normalized_status = runs_status.strip().lower() if runs_status else None
     runs_query = select(DBTestRun).where(DBTestRun.batch_id == batch_id)
-    runs = session.exec(runs_query).all()
+    runs_count_query = select(func.count()).select_from(DBTestRun).where(DBTestRun.batch_id == batch_id)
 
-    # Calculate actual test counts
-    actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
-    _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
+    if normalized_status:
+        if normalized_status in {"failure", "failures", "failed"}:
+            failure_statuses = ["failed", "error", "stopped", "cancelled"]
+            runs_query = runs_query.where(DBTestRun.status.in_(failure_statuses))
+            runs_count_query = runs_count_query.where(DBTestRun.status.in_(failure_statuses))
+        else:
+            runs_query = runs_query.where(DBTestRun.status == normalized_status)
+            runs_count_query = runs_count_query.where(DBTestRun.status == normalized_status)
+
+    runs_total = session.exec(runs_count_query).one()
+
+    actual_total = batch.actual_total_tests
+    actual_passed = batch.actual_passed
+    actual_failed = batch.actual_failed
+    if include_actual_counts and runs_total <= 5000:
+        all_runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all()
+        actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(all_runs)
+        _cache_actual_test_counts(batch, actual_total, actual_passed, actual_failed, session)
+    elif actual_total is None or actual_passed is None or actual_failed is None:
+        actual_total = batch.total_tests
+        actual_passed = batch.passed
+        actual_failed = batch.failed
+
     actual_success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0
 
-    # Sort runs: failed first, then by status, then by name
     status_order = {"failed": 0, "stopped": 1, "cancelled": 1, "running": 2, "queued": 3, "passed": 4, "completed": 4}
-    runs_sorted = sorted(runs, key=lambda r: (status_order.get(r.status, 5), r.spec_name))
+    status_order_expr = case(status_order, value=DBTestRun.status, else_=5)
+    if runs_sort == "name":
+        runs_query = runs_query.order_by(DBTestRun.spec_name, DBTestRun.id)
+    elif runs_sort == "duration":
+        duration_expr = func.coalesce(func.extract("epoch", DBTestRun.completed_at - DBTestRun.started_at), 0)
+        runs_query = runs_query.order_by(desc(duration_expr), DBTestRun.spec_name, DBTestRun.id)
+    else:
+        runs_query = runs_query.order_by(status_order_expr, DBTestRun.spec_name, DBTestRun.id)
 
-    # Build run items with actual test counts
+    runs = session.exec(runs_query.offset(runs_offset).limit(runs_limit)).all()
+
     run_items = []
-    for run in runs_sorted:
-        test_count = _count_tests_for_run(run)
-        run_items.append(_run_to_batch_item(run, test_count=test_count))
+    for run in runs:
+        test_count = _count_tests_for_run(run) if include_actual_counts else 1
+        run_items.append(
+            _run_to_batch_item(run, test_count=test_count, include_failure_details=include_failure_details)
+        )
 
     return RegressionBatchDetail(
         id=batch.id,
@@ -775,7 +838,21 @@ def get_batch_detail(
         actual_passed=actual_passed,
         actual_failed=actual_failed,
         project_id=batch.project_id,
+        scheduler_status=batch.scheduler_status,
+        chunk_size=batch.chunk_size,
+        max_active_runs=batch.max_active_runs,
+        dispatch_total=batch.dispatch_total,
+        dispatch_started=batch.dispatch_started,
+        dispatch_completed=batch.dispatch_completed,
+        dispatch_failed=batch.dispatch_failed,
+        dispatch_cancelled=batch.dispatch_cancelled,
+        scheduler_error=batch.scheduler_error,
         runs=run_items,
+        runs_total=runs_total,
+        runs_limit=runs_limit,
+        runs_offset=runs_offset,
+        runs_has_more=(runs_offset + len(run_items)) < runs_total,
+        runs_status=normalized_status,
     )
 
 
@@ -2067,14 +2144,14 @@ def batch_trend(
     trend = []
     for b in reversed(batches):  # oldest first for chart
         actual_total, actual_passed, actual_failed = None, None, None
-        if _has_fresh_actual_test_count_cache(b):
+        if (
+            b.actual_total_tests is not None
+            and b.actual_passed is not None
+            and b.actual_failed is not None
+        ):
             actual_total = b.actual_total_tests
             actual_passed = b.actual_passed
             actual_failed = b.actual_failed
-        elif b.actual_total_tests is not None or b.failed > 0:
-            runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == b.id)).all()
-            actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
-            _cache_actual_test_counts(b, actual_total, actual_passed, actual_failed, session)
         success_rate = b.success_rate
         if actual_total is not None and actual_passed is not None:
             success_rate = round((actual_passed / actual_total) * 100, 1) if actual_total else 0.0

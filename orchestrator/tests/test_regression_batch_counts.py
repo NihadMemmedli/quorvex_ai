@@ -148,7 +148,9 @@ test.skip('third flow', async () => {});
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            detail_response = client.get(f"/regression/batches/{created_batch_id}?project_id={project_id}")
+            detail_response = client.get(
+                f"/regression/batches/{created_batch_id}?project_id={project_id}&include_actual_counts=true"
+            )
             assert detail_response.status_code == 200
             detail = detail_response.json()
             assert detail["total_tests"] == 1
@@ -176,7 +178,7 @@ test.skip('third flow', async () => {});
             session.commit()
 
 
-def test_list_batches_refreshes_stale_actual_pass_fail_cache(tmp_path, monkeypatch):
+def test_list_batches_refreshes_stale_actual_pass_fail_cache_when_requested(tmp_path, monkeypatch):
     from orchestrator.api.db import engine
     from orchestrator.api.models_db import Project, RegressionBatch
     from orchestrator.api.models_db import TestRun as DBTestRun
@@ -233,7 +235,7 @@ test('third flow', async () => {});
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.get(f"/regression/batches?project_id={project_id}")
+            response = client.get(f"/regression/batches?project_id={project_id}&include_actual_counts=true")
             assert response.status_code == 200
             batch = response.json()["batches"][0]
             assert batch["actual_total_tests"] == 3
@@ -335,7 +337,9 @@ def test_failed_batch_uses_playwright_json_for_mixed_per_test_counts(tmp_path, m
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            detail_response = client.get(f"/regression/batches/{batch_id}?project_id={project_id}")
+            detail_response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_actual_counts=true"
+            )
             assert detail_response.status_code == 200
             detail = detail_response.json()
             assert detail["actual_total_tests"] == 10
@@ -436,13 +440,129 @@ test('third flow', async () => {});
         app = FastAPI()
         app.include_router(regression_router)
         with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.get(f"/regression/batches/{batch_id}?project_id={project_id}")
+            response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&include_actual_counts=true"
+            )
             assert response.status_code == 200
             detail = response.json()
             assert detail["actual_total_tests"] == 3
             assert detail["actual_passed"] == 0
             assert detail["actual_failed"] == 3
             assert detail["success_rate"] == 0.0
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            project = session.get(Project, project_id)
+            if project:
+                session.delete(project)
+            session.commit()
+
+
+def test_batch_detail_paginates_runs_without_full_count_recalculation(monkeypatch):
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import Project, RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router as regression_router
+    import orchestrator.api.regression as regression_module
+
+    project_id = f"paged-detail-{uuid4().hex}"
+    batch_id = f"batch_{uuid4().hex}"
+
+    def fail_if_recounted(runs):
+        raise AssertionError("detail should not recalculate all actual counts by default")
+
+    monkeypatch.setattr(regression_module, "_calculate_actual_test_counts", fail_if_recounted)
+
+    SQLModel.metadata.create_all(engine)
+    try:
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Paged Detail"))
+            session.add(
+                RegressionBatch(
+                    id=batch_id,
+                    name="Paged Detail",
+                    project_id=project_id,
+                    total_tests=3,
+                    passed=1,
+                    failed=1,
+                    running=1,
+                    status="running",
+                    actual_total_tests=3,
+                    actual_passed=1,
+                    actual_failed=1,
+                    scheduler_status="dispatching",
+                    chunk_size=50,
+                    max_active_runs=5,
+                    dispatch_total=3,
+                    dispatch_started=2,
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="z-running.md",
+                    status="running",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            failed_run_id = f"run_{uuid4().hex}"
+            session.add(
+                DBTestRun(
+                    id=failed_run_id,
+                    spec_name="a-failed.md",
+                    status="failed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                    error_message="failed",
+                )
+            )
+            session.add(
+                DBTestRun(
+                    id=f"run_{uuid4().hex}",
+                    spec_name="m-passed.md",
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.commit()
+
+        app = FastAPI()
+        app.include_router(regression_router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&runs_limit=2&include_failure_details=false"
+            )
+            assert response.status_code == 200
+            detail = response.json()
+            assert detail["runs_total"] == 3
+            assert detail["runs_limit"] == 2
+            assert detail["runs_offset"] == 0
+            assert detail["runs_has_more"] is True
+            assert [run["status"] for run in detail["runs"]] == ["failed", "running"]
+            assert detail["runs"][0]["id"] == failed_run_id
+            assert detail["actual_total_tests"] == 3
+            assert detail["actual_passed"] == 1
+            assert detail["actual_failed"] == 1
+            assert detail["scheduler_status"] == "dispatching"
+            assert detail["chunk_size"] == 50
+            assert detail["max_active_runs"] == 5
+            assert detail["dispatch_total"] == 3
+            assert detail["dispatch_started"] == 2
+
+            failures = client.get(
+                f"/regression/batches/{batch_id}?project_id={project_id}&runs_status=failures"
+            )
+            assert failures.status_code == 200
+            failure_detail = failures.json()
+            assert failure_detail["runs_total"] == 1
+            assert failure_detail["runs_status"] == "failures"
+            assert [run["id"] for run in failure_detail["runs"]] == [failed_run_id]
     finally:
         with Session(engine) as session:
             for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():

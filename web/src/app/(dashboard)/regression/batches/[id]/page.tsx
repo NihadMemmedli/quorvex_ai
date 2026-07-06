@@ -17,6 +17,8 @@ import { PageHeader } from '@/components/ui/page-header';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
+const RUN_PAGE_SIZE = 100;
+
 interface BatchRun {
     id: string;
     spec_name: string;
@@ -70,6 +72,11 @@ interface BatchDetail {
     dispatch_cancelled: number;
     scheduler_error: string | null;
     runs: BatchRun[];
+    runs_total: number;
+    runs_limit: number;
+    runs_offset: number;
+    runs_has_more: boolean;
+    runs_status: string | null;
 }
 
 interface SyncPreview {
@@ -152,6 +159,7 @@ export default function BatchDetailPage() {
     const [error, setError] = useState<string | null>(null);
     const [showFailuresOnly, setShowFailuresOnly] = useState(false);
     const [sortBy, setSortBy] = useState<'status' | 'name' | 'duration'>('status');
+    const [runsOffset, setRunsOffset] = useState(0);
 
     // TestRail sync state
     const [trConfig, setTrConfig] = useState<TrConfig | null>(null);
@@ -180,7 +188,14 @@ export default function BatchDetailPage() {
 
     const fetchBatch = useCallback(() => {
         if (!projectId) return;
-        fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}`, projectId)}`)
+        const params = new URLSearchParams({
+            runs_limit: String(RUN_PAGE_SIZE),
+            runs_offset: String(runsOffset),
+            runs_sort: sortBy,
+            include_failure_details: 'true',
+        });
+        if (showFailuresOnly) params.set('runs_status', 'failures');
+        fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}?${params.toString()}`, projectId)}`)
             .then(res => {
                 if (!res.ok) throw new Error('Batch not found');
                 return res.json();
@@ -193,7 +208,7 @@ export default function BatchDetailPage() {
                 setError(err.message);
                 setLoading(false);
             });
-    }, [batchId, projectId]);
+    }, [batchId, projectId, runsOffset, showFailuresOnly, sortBy]);
 
     useEffect(() => {
         if (projectLoading || !projectId) return;
@@ -508,19 +523,9 @@ export default function BatchDetailPage() {
     const displayedFailed = batch.actual_failed ?? batch.failed;
     const displayedSuccessRate = displayedTotal ? Math.round((displayedPassed / displayedTotal) * 1000) / 10 : 0;
 
-    const filteredRuns = showFailuresOnly
-        ? batch.runs.filter(r => r.status === 'failed' || r.status === 'stopped' || r.status === 'cancelled')
-        : batch.runs;
-
-    const sortedRuns = [...filteredRuns].sort((a, b) => {
-        if (sortBy === 'status') {
-            const o: Record<string, number> = { failed: 0, stopped: 1, cancelled: 1, running: 2, queued: 3, passed: 4, completed: 4 };
-            return (o[a.status] ?? 5) - (o[b.status] ?? 5);
-        }
-        if (sortBy === 'name') return (a.test_name || a.spec_name).localeCompare(b.test_name || b.spec_name);
-        if (sortBy === 'duration') return (b.duration_seconds || 0) - (a.duration_seconds || 0);
-        return 0;
-    });
+    const sortedRuns = batch.runs;
+    const runsStart = batch.runs_total === 0 ? 0 : batch.runs_offset + 1;
+    const runsEnd = Math.min(batch.runs_offset + batch.runs.length, batch.runs_total);
 
     const errorBarData = errorCategories.map(c => ({
         name: c.name,
@@ -786,13 +791,34 @@ export default function BatchDetailPage() {
             {/* Test Results Table */}
             <div className="card animate-in stagger-3" style={{ padding: 0, overflow: 'hidden', marginBottom: '2rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1rem 1.25rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)' }}>
-                    <h3 style={{ fontWeight: 600 }}>Test Results</h3>
+                    <div>
+                        <h3 style={{ fontWeight: 600 }}>Test Results</h3>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.2rem' }}>
+                            Showing {runsStart}-{runsEnd} of {batch.runs_total}
+                        </div>
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.9rem' }}>
-                            <input type="checkbox" checked={showFailuresOnly} onChange={(e) => setShowFailuresOnly(e.target.checked)} style={{ cursor: 'pointer' }} />
+                            <input
+                                type="checkbox"
+                                checked={showFailuresOnly}
+                                onChange={(e) => {
+                                    setRunsOffset(0);
+                                    setShowFailuresOnly(e.target.checked);
+                                }}
+                                style={{ cursor: 'pointer' }}
+                            />
                             Show failures only
                         </label>
-                        <select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)} className="input" style={{ padding: '0.4rem 0.8rem', width: 'auto', fontSize: '0.9rem' }}>
+                        <select
+                            value={sortBy}
+                            onChange={(e) => {
+                                setRunsOffset(0);
+                                setSortBy(e.target.value as any);
+                            }}
+                            className="input"
+                            style={{ padding: '0.4rem 0.8rem', width: 'auto', fontSize: '0.9rem' }}
+                        >
                             <option value="status">Sort by Status</option>
                             <option value="name">Sort by Name</option>
                             <option value="duration">Sort by Duration</option>
@@ -874,13 +900,38 @@ export default function BatchDetailPage() {
                         );
                     })
                 )}
+                {batch.runs_total > RUN_PAGE_SIZE && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', padding: '1rem 1.25rem', borderTop: '1px solid var(--border)', background: 'var(--surface)' }}>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                            Page {Math.floor(batch.runs_offset / RUN_PAGE_SIZE) + 1} of {Math.ceil(batch.runs_total / RUN_PAGE_SIZE)}
+                        </span>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <button
+                                className="btn btn-secondary"
+                                disabled={batch.runs_offset === 0}
+                                onClick={() => setRunsOffset(Math.max(0, batch.runs_offset - RUN_PAGE_SIZE))}
+                                style={{ padding: '0.45rem 0.8rem', opacity: batch.runs_offset === 0 ? 0.5 : 1 }}
+                            >
+                                Previous
+                            </button>
+                            <button
+                                className="btn btn-secondary"
+                                disabled={!batch.runs_has_more}
+                                onClick={() => setRunsOffset(batch.runs_offset + RUN_PAGE_SIZE)}
+                                style={{ padding: '0.45rem 0.8rem', opacity: batch.runs_has_more ? 1 : 0.5 }}
+                            >
+                                Next
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Failure Details */}
             {failureRuns.length > 0 && (
                 <div className="card" style={{ padding: '1.25rem' }}>
                     <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <AlertTriangle size={18} color="var(--danger)" /> Failure Details ({failureRuns.length} failed)
+                        <AlertTriangle size={18} color="var(--danger)" /> Failure Details ({failureRuns.length} shown)
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                         {failureRuns.map(run => {

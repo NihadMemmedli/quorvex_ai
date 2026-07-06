@@ -129,11 +129,13 @@ def health():
     except Exception:
         checks["redis"] = {"status": "ok", "configured": False}
 
-    checks["processes"] = {
+    process_check = {
         "status": "ok",
         "active_count": runtime.get_active_process_count(),
         "process_manager": runtime.PROCESS_MANAGER is not None,
     }
+    process_check.update(_api_process_health())
+    checks["processes"] = process_check
 
     critical_checks = ["database", "filesystem"]
     has_critical = any(checks.get(k, {}).get("status") == "error" for k in critical_checks)
@@ -141,6 +143,87 @@ def health():
     overall_status = "unhealthy" if has_critical else "degraded" if has_warning else "healthy"
 
     return {"status": overall_status, "checks": checks, "version": "1.0.0"}
+
+
+def _api_process_health() -> dict[str, Any]:
+    """Detect duplicate/orphaned API server processes inside the container."""
+    api_processes = _scan_api_processes()
+    orphaned_count = sum(1 for proc in api_processes if proc.get("orphaned"))
+    status = "warning" if len(api_processes) > 1 or orphaned_count else "ok"
+    result: dict[str, Any] = {
+        "api_processes": api_processes,
+        "api_process_count": len(api_processes),
+        "orphaned_api_process_count": orphaned_count,
+    }
+    if status != "ok":
+        result["status"] = status
+        result["warning"] = "Duplicate or orphaned API server processes detected"
+    return result
+
+
+def _scan_api_processes() -> list[dict[str, Any]]:
+    current_pid = os.getpid()
+    api_processes: list[dict[str, Any]] = []
+    proc_dir = Path("/proc")
+    if not proc_dir.exists():
+        return []
+
+    for pid_dir in proc_dir.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            cmdline = (pid_dir / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            if "uvicorn" not in cmdline or "orchestrator.api.main:app" not in cmdline:
+                continue
+            is_server = "python" in cmdline and "/uvicorn" in cmdline
+            if not is_server:
+                continue
+            stat = (pid_dir / "stat").read_text().split()
+            pid = int(pid_dir.name)
+            ppid = int(stat[3])
+            api_processes.append(
+                {
+                    "pid": pid,
+                    "ppid": ppid,
+                    "current": pid == current_pid,
+                    "orphaned": ppid == 1 and pid != current_pid,
+                    "command": cmdline[:240],
+                }
+            )
+        except (OSError, ValueError, IndexError):
+            continue
+
+    return api_processes
+
+
+@router.post("/runtime/orphaned-api-processes/cleanup")
+def cleanup_orphaned_api_processes():
+    """Terminate orphaned API server processes left behind by supervisor restarts."""
+    current_pid = os.getpid()
+    orphaned = [
+        proc
+        for proc in _scan_api_processes()
+        if proc.get("orphaned") and proc.get("pid") != current_pid
+    ]
+    killed: list[int] = []
+    errors: list[dict[str, Any]] = []
+
+    for proc in orphaned:
+        pid = int(proc["pid"])
+        try:
+            os.kill(pid, 15)
+            killed.append(pid)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            errors.append({"pid": pid, "error": str(exc)})
+
+    return {
+        "status": "ok" if not errors else "partial",
+        "killed": killed,
+        "errors": errors,
+        "remaining": _api_process_health(),
+    }
 
 
 @router.get("/api/browser-pool/status")
