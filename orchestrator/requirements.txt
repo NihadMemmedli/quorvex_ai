@@ -7,7 +7,7 @@ pytest
 pytest-asyncio
 Pillow>=12.2.0
 fastapi
-httpx>=0.24.0
+httpx>=0.28.1
 uvicorn
 python-multipart
 sqlmodel
