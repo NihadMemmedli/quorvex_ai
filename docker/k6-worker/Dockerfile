@@ -2,7 +2,7 @@
 # Lightweight image for running K6 load tests via Redis queue
 # ~200-300MB (no browser, no Node.js, no Playwright)
 
-FROM python:3.10-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Install curl for K6 download
 RUN apt-get update && apt-get install -y --no-install-recommends \
